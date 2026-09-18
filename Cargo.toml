@@ -1,0 +1,15 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/camshaft/etude"
+
+[profile.release]
+debug = 1

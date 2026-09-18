@@ -1,0 +1,13 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-ensure"
+version = "0.1.0"
+description = "Small, dependency-free control-flow macros (ensure! / assume!)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
