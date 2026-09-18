@@ -1,13 +1,20 @@
-# byte-vec
+# etude
 
-A chunked, reference-counted byte buffer.
+A workspace of small, focused crates for moving bytes around — copy-avoiding
+buffer traits and the containers built on them.
 
-`ByteVec` is a deque of [`bytes::Bytes`] chunks that behaves like a single
-contiguous byte buffer while avoiding copies on the hot path. It supports
-cheap `split_to`, `push_front`/`push_back`, `truncate`, and zero-copy reads.
+## Crates
+
+| Crate | Description |
+|-------|-------------|
+| [`etude-ensure`](crates/etude-ensure)   | Dependency-free `ensure!` / `assume!` control-flow macros. |
+| [`etude-buffer`](crates/etude-buffer)   | Copy-avoiding `reader` / `writer` buffer traits, a family of storage adapters, and a stream-data testing model. Offsets are plain `u64`. |
+| [`etude-bytevec`](crates/etude-bytevec) | `ByteVec`: a chunked, reference-counted byte buffer built on `etude-buffer`. |
+
+## Example
 
 ```rust
-use byte_vec::ByteVec;
+use etude_bytevec::ByteVec;
 use bytes::Bytes;
 
 let mut v = ByteVec::new();
@@ -15,19 +22,20 @@ v.push_back(Bytes::from_static(b"hello "));
 v.push_back(Bytes::from_static(b"world"));
 assert_eq!(v.len(), 11);
 
+// Split off the front without copying the underlying chunks.
 let head = v.split_to(6).unwrap();
 assert_eq!(head, b"hello ");
 assert_eq!(v, b"world");
 ```
 
-## Layout
+## Development
 
-This is a Cargo workspace. Crates live under [`crates/`](crates):
-
-- [`byte-vec`](crates/bytevec) — the `ByteVec` buffer.
+```sh
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features
+cargo fmt --all --check
+```
 
 ## License
 
 Licensed under the [Apache-2.0](LICENSE) license.
-
-[`bytes::Bytes`]: https://docs.rs/bytes
