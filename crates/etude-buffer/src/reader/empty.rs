@@ -2,27 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{Reader, Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 
-/// Returns an empty buffer for the current offset of an inner reader
-#[derive(Debug)]
-pub struct Empty<'a, R: Reader + ?Sized>(&'a R);
+/// An empty reader [`Buffer`]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Empty;
 
-impl<'a, R: Reader + ?Sized> Empty<'a, R> {
-    #[inline]
-    pub fn new(reader: &'a R) -> Self {
-        Self(reader)
-    }
-}
-
-impl<R: Reader + ?Sized> Storage for Empty<'_, R> {
+impl Buffer for Empty {
     type Error = core::convert::Infallible;
 
     #[inline(always)]
     fn buffered_len(&self) -> usize {
         0
+    }
+
+    #[inline(always)]
+    fn buffer_is_empty(&self) -> bool {
+        true
     }
 
     #[inline(always)]
@@ -33,49 +31,35 @@ impl<R: Reader + ?Sized> Storage for Empty<'_, R> {
     #[inline(always)]
     fn partial_copy_into<Dest>(&mut self, _dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         Ok(Chunk::empty())
     }
-}
-
-impl<R: Reader + ?Sized> Reader for Empty<'_, R> {
-    #[inline]
-    fn current_offset(&self) -> u64 {
-        self.0.current_offset()
-    }
 
     #[inline]
-    fn final_offset(&self) -> Option<u64> {
-        self.0.final_offset()
+    fn copy_into<Dest>(&mut self, _dest: &mut Dest) -> Result<(), Self::Error>
+    where
+        Dest: writer::Buffer + ?Sized,
+    {
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::Data;
 
     #[test]
     fn empty_test() {
-        let mut reader = Data::new(1000);
-        assert_eq!(reader.buffered_len(), 1000);
-        let mut reader = reader.with_checks();
+        let mut reader = Empty;
+        let mut writer: Vec<u8> = vec![];
 
-        {
-            assert_eq!(reader.with_empty_buffer().buffered_len(), 0);
-        }
-
-        let mut dest = &mut [0u8; 16][..];
-        let chunk = reader.partial_copy_into(&mut dest).unwrap();
-        assert_eq!(chunk.len(), 16);
-
-        let mut reader = reader.with_empty_buffer();
-
-        assert_eq!(reader.buffered_len(), 0);
-        assert!(reader.buffer_is_empty());
-
-        let chunk = reader.partial_copy_into(&mut dest).unwrap();
+        let chunk = reader.partial_copy_into(&mut writer).unwrap();
         assert_eq!(chunk.len(), 0);
+        assert_eq!(writer.len(), 0);
+
+        reader.copy_into(&mut writer).unwrap();
+
+        assert_eq!(writer.len(), 0);
     }
 }

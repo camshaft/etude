@@ -1,13 +1,14 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
+use crate::reader::Stream;
+use etude_buffer::{
     Error,
-    reader::{Reader, Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 
-/// Implements an incremental [`Reader`] that joins to temporary [`Storage`] as the stream data
+/// Implements an incremental [`Stream`] that joins to temporary [`Buffer`] as the stream data
 ///
 /// This is useful for scenarios where the stream isn't completely buffered in memory and
 /// data come in gradually.
@@ -27,7 +28,7 @@ impl Incremental {
     }
 
     #[inline]
-    pub fn with_storage<'a, C: Storage>(
+    pub fn with_storage<'a, C: Buffer>(
         &'a mut self,
         storage: &'a mut C,
         is_fin: bool,
@@ -60,12 +61,12 @@ impl Incremental {
     }
 }
 
-pub struct WithStorage<'a, C: Storage> {
+pub struct WithStorage<'a, C: Buffer> {
     incremental: &'a mut Incremental,
     storage: &'a mut C,
 }
 
-impl<C: Storage> WithStorage<'_, C> {
+impl<C: Buffer> WithStorage<'_, C> {
     #[inline]
     pub fn set_fin(&mut self) -> Result<&mut Self, Error> {
         let final_offset = self
@@ -85,7 +86,7 @@ impl<C: Storage> WithStorage<'_, C> {
     }
 }
 
-impl<C: Storage> Storage for WithStorage<'_, C> {
+impl<C: Buffer> Buffer for WithStorage<'_, C> {
     type Error = C::Error;
 
     #[inline]
@@ -103,7 +104,7 @@ impl<C: Storage> Storage for WithStorage<'_, C> {
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let mut dest = dest.track_write();
         let chunk = self.storage.partial_copy_into(&mut dest)?;
@@ -115,7 +116,7 @@ impl<C: Storage> Storage for WithStorage<'_, C> {
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let mut dest = dest.track_write();
         self.storage.copy_into(&mut dest)?;
@@ -124,7 +125,7 @@ impl<C: Storage> Storage for WithStorage<'_, C> {
     }
 }
 
-impl<C: Storage> Reader for WithStorage<'_, C> {
+impl<C: Buffer> Stream for WithStorage<'_, C> {
     #[inline]
     fn current_offset(&self) -> u64 {
         self.incremental.current_offset()

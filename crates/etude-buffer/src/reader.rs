@@ -1,96 +1,90 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod checked;
-mod complete;
+mod buf;
+mod bytes;
+mod chain;
+mod chunk;
 mod empty;
-pub mod incremental;
-mod limit;
-pub mod storage;
+mod full_copy;
+mod infallible;
+mod io_slice;
+mod slice;
+mod tracked;
 
-pub use checked::Checked;
-pub use complete::Complete;
+#[cfg(test)]
+mod tests;
+
+pub use buf::Buf;
+pub use chain::Chain;
+pub use chunk::Chunk;
 pub use empty::Empty;
-pub use incremental::Incremental;
-pub use limit::Limit;
-pub use storage::Storage;
+pub use full_copy::FullCopy;
+pub use infallible::Infallible;
+pub use io_slice::IoSlice;
+pub use tracked::Tracked;
 
-#[cfg(any(test, feature = "testing"))]
-pub mod testing;
+pub trait Buffer {
+    type Error: 'static;
 
-/// A buffer that can be read with a tracked offset and final position.
-pub trait Reader: Storage {
-    /// Returns the currently read offset for the stream
-    fn current_offset(&self) -> u64;
+    /// Returns the length of the chunk
+    fn buffered_len(&self) -> usize;
 
-    /// Returns the final offset for the stream
-    fn final_offset(&self) -> Option<u64>;
-
-    /// Returns `true` if the reader has the final offset buffered
+    /// Returns if the chunk is empty
     #[inline]
-    fn has_buffered_fin(&self) -> bool {
-        self.final_offset().is_some_and(|fin| {
-            let buffered_end = self
-                .current_offset()
-                .saturating_add(self.buffered_len() as u64);
-            fin == buffered_end
-        })
+    fn buffer_is_empty(&self) -> bool {
+        self.buffered_len() == 0
     }
 
-    /// Returns `true` if the reader is finished producing data
+    /// Reads the current contiguous chunk
+    fn read_chunk(&mut self, watermark: usize) -> Result<Chunk<'_>, Self::Error>;
+
+    /// Copies the reader into `dest`, with a trailing chunk of bytes.
+    ///
+    /// Implementations should either fill the `dest` completely or exhaust the buffered data.
+    ///
+    /// The storage also returns a `Chunk`, which can be used by the caller to defer
+    /// copying the trailing chunk until later. The returned chunk must fit into the target
+    /// destination. The caller must eventually copy the chunk into the destination, otherwise this
+    /// data will be discarded.
+    fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
+    where
+        Dest: crate::writer::Buffer + ?Sized;
+
+    /// Copies the reader into `dest`.
+    ///
+    /// Implementations should either fill the `dest` completely or exhaust the buffered data.
     #[inline]
-    fn is_consumed(&self) -> bool {
-        self.final_offset()
-            .is_some_and(|fin| fin == self.current_offset())
-    }
-
-    /// Skips the data in the reader until `offset` is reached, or the reader storage is exhausted.
-    #[inline]
-    fn skip_until(&mut self, offset: u64) -> Result<(), Self::Error> {
-        ensure!(offset > self.current_offset(), Ok(()));
-
-        while let Some(len) = offset.checked_sub(self.current_offset()) {
-            // we don't need to skip anything if the difference is 0
-            ensure!(len > 0, break);
-
-            // clamp the len to usize
-            let len = (usize::MAX as u64).min(len) as usize;
-            let _chunk = self.read_chunk(len)?;
-
-            ensure!(!self.buffer_is_empty(), break);
-        }
-
+    fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
+    where
+        Dest: crate::writer::Buffer + ?Sized,
+    {
+        let mut chunk = self.partial_copy_into(dest)?;
+        chunk.infallible_copy_into(dest);
         Ok(())
     }
 
-    /// Limits the maximum offset that the caller can read from the reader
-    #[inline]
-    fn with_max_data(&mut self, max_data: u64) -> Limit<'_, Self> {
-        let max_buffered_len = max_data.saturating_sub(self.current_offset());
-        let max_buffered_len = max_buffered_len.min(self.buffered_len() as u64) as usize;
-        self.with_read_limit(max_buffered_len)
-    }
-
-    /// Limits the maximum amount of data that the caller can read from the reader
-    #[inline]
-    fn with_read_limit(&mut self, max_buffered_len: usize) -> Limit<'_, Self> {
-        Limit::new(self, max_buffered_len)
-    }
-
-    /// Return an empty view onto the reader, with no change in current offset
-    #[inline]
-    fn with_empty_buffer(&self) -> Empty<'_, Self> {
-        Empty::new(self)
-    }
-
-    /// Enables checking the reader for correctness invariants
+    /// Forces the entire reader to be copied, even when calling `partial_copy_into`.
     ///
-    /// # Note
-    ///
-    /// `debug_assertions` must be enabled for these checks to be performed. Otherwise, the reader
-    /// methods will simply be forwarded to `Self`.
+    /// The returned `Chunk` from `partial_copy_into` will always be empty.
     #[inline]
-    fn with_checks(&mut self) -> Checked<'_, Self> {
-        Checked::new(self)
+    fn full_copy(&mut self) -> FullCopy<'_, Self> {
+        FullCopy::new(self)
+    }
+
+    /// Tracks the number of bytes read from the storage
+    #[inline]
+    fn track_read(&mut self) -> Tracked<'_, Self> {
+        Tracked::new(self)
+    }
+
+    /// Chains this storage with another, draining `self` before `other`
+    #[inline]
+    fn chain<Other>(self, other: Other) -> Chain<Self, Other>
+    where
+        Self: Sized + Buffer<Error = core::convert::Infallible>,
+        Other: Buffer<Error = core::convert::Infallible>,
+    {
+        Chain::new(self, other)
     }
 }

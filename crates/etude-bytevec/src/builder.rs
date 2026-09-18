@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use etude_buffer::writer::Storage;
+use etude_buffer::writer::Buffer;
 
 const DEFAULT_CAPACITY: usize = 1 << 17;
 
@@ -17,7 +17,7 @@ const DEFAULT_CAPACITY: usize = 1 << 17;
 /// ```
 /// use etude_bytevec::ByteVec;
 /// use bytes::Bytes;
-/// use etude_buffer::writer::Storage;
+/// use etude_buffer::writer::Buffer;
 ///
 /// let mut builder = ByteVec::builder(1024);
 /// builder.put_slice(b"hello");
@@ -70,7 +70,7 @@ impl Builder {
     ///
     /// ```
     /// use etude_bytevec::ByteVec;
-    /// use etude_buffer::writer::Storage;
+    /// use etude_buffer::writer::Buffer;
     ///
     /// let mut builder = ByteVec::builder(1024);
     /// builder.put_slice(b"hello");
@@ -89,7 +89,7 @@ impl Builder {
     ///
     /// ```
     /// use etude_bytevec::ByteVec;
-    /// use etude_buffer::writer::Storage;
+    /// use etude_buffer::writer::Buffer;
     ///
     /// let mut builder = ByteVec::builder(1024);
     /// assert!(builder.is_empty());
@@ -110,7 +110,7 @@ impl Builder {
     ///
     /// ```
     /// use etude_bytevec::ByteVec;
-    /// use etude_buffer::writer::Storage;
+    /// use etude_buffer::writer::Buffer;
     ///
     /// let mut builder = ByteVec::builder(1024);
     /// builder.put_slice(b"hello");
@@ -138,7 +138,7 @@ impl Builder {
     ///
     /// ```
     /// use etude_bytevec::ByteVec;
-    /// use etude_buffer::writer::Storage;
+    /// use etude_buffer::writer::Buffer;
     ///
     /// let mut builder = ByteVec::builder(1024);
     /// builder.put_slice(b"hello");
@@ -165,7 +165,7 @@ impl Builder {
     ///
     /// ```
     /// use etude_bytevec::ByteVec;
-    /// use etude_buffer::writer::Storage;
+    /// use etude_buffer::writer::Buffer;
     ///
     /// let mut builder = ByteVec::builder(1024);
     /// builder.put_slice(b"hello world");
@@ -193,7 +193,7 @@ impl Builder {
     ///
     /// ```
     /// use etude_bytevec::ByteVec;
-    /// use etude_buffer::writer::Storage;
+    /// use etude_buffer::writer::Buffer;
     ///
     /// let mut builder = ByteVec::builder(1024);
     /// builder.put_slice(b"hello world");
@@ -233,7 +233,7 @@ impl Builder {
     ///
     /// ```
     /// use etude_bytevec::ByteVec;
-    /// use etude_buffer::writer::Storage;
+    /// use etude_buffer::writer::Buffer;
     ///
     /// let mut builder = ByteVec::builder(1024);
     /// builder.put_slice(b"hello");
@@ -341,7 +341,7 @@ impl From<Builder> for ByteVec {
     }
 }
 
-impl writer::Storage for Builder {
+impl writer::Buffer for Builder {
     // we prefer direct writes into the head chunk rather than appending byte chunks
     const SPECIALIZES_BYTES: bool = false;
     const SPECIALIZES_BYTES_MUT: bool = false;
@@ -399,7 +399,7 @@ impl writer::Storage for Builder {
     }
 }
 
-impl reader::Storage for Builder {
+impl reader::Buffer for Builder {
     type Error = core::convert::Infallible;
 
     fn buffered_len(&self) -> usize {
@@ -420,7 +420,7 @@ impl reader::Storage for Builder {
 
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         // First drain chunks into dest
         if !self.chunks.buffer_is_empty() {
@@ -450,7 +450,7 @@ impl reader::Storage for Builder {
 
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.chunks.copy_into(dest)?;
         self.head.copy_into(dest)

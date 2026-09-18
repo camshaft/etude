@@ -1,19 +1,19 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{reader::storage::Chunk, writer::Storage};
+use crate::{reader::Chunk, writer::Buffer};
 use bytes::{Bytes, BytesMut, buf::UninitSlice};
 
 /// Only allows a single write into the storage. After that, no more writes are allowed.
 ///
 /// This can be used for very low latency scenarios where processing the single read is more
 /// important than filling the entire storage with as much data as possible.
-pub struct WriteOnce<'a, S: Storage + ?Sized> {
+pub struct WriteOnce<'a, S: Buffer + ?Sized> {
     storage: &'a mut S,
     did_write: bool,
 }
 
-impl<'a, S: Storage + ?Sized> WriteOnce<'a, S> {
+impl<'a, S: Buffer + ?Sized> WriteOnce<'a, S> {
     #[inline]
     pub fn new(storage: &'a mut S) -> Self {
         Self {
@@ -23,7 +23,7 @@ impl<'a, S: Storage + ?Sized> WriteOnce<'a, S> {
     }
 }
 
-impl<S: Storage + ?Sized> Storage for WriteOnce<'_, S> {
+impl<S: Buffer + ?Sized> Buffer for WriteOnce<'_, S> {
     const SPECIALIZES_BYTES: bool = S::SPECIALIZES_BYTES;
     const SPECIALIZES_BYTES_MUT: bool = S::SPECIALIZES_BYTES_MUT;
 

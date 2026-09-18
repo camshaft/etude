@@ -3,15 +3,11 @@
 
 //! Copy-avoiding byte reader/writer buffer traits.
 //!
-//! This crate defines the `reader` and `writer` abstractions used to move bytes between
-//! buffers while avoiding copies wherever possible:
+//! This crate defines the chunk-oriented [`reader::Buffer`] and [`writer::Buffer`] traits
+//! used to move bytes between buffers while avoiding copies wherever possible, along with a
+//! family of storage adapters (`chain`, `tracked`, `limit`, `io_slice`, …).
 //!
-//! - [`reader::Storage`] / [`writer::Storage`] — the low-level chunk-oriented traits,
-//!   plus a family of adapters (`limit`, `chain`, `tracked`, …).
-//! - [`Reader`] / [`Writer`] — offset-aware streaming views layered on top of `Storage`.
-//!
-//! Offsets are plain `u64`; callers that use a narrower on-the-wire encoding convert at
-//! their own boundary.
+//! Offset-aware *stream* views layered on top of these live in the `etude-stream` crate.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
@@ -31,8 +27,6 @@ pub mod writer;
 mod slice;
 
 pub use error::Error;
-pub use reader::Reader;
-pub use writer::Writer;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

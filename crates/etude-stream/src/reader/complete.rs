@@ -1,13 +1,14 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
+use crate::reader::Stream;
+use etude_buffer::{
     Error,
-    reader::{Reader, Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 
-/// Wraps a single [`Storage`] instance as a [`Reader`].
+/// Wraps a single [`Buffer`] instance as a [`Stream`].
 ///
 /// This can be used for scenarios where the entire stream is buffered and known up-front.
 #[derive(Debug)]
@@ -19,7 +20,7 @@ pub struct Complete<'a, S> {
 
 impl<'a, S> Complete<'a, S>
 where
-    S: Storage,
+    S: Buffer,
 {
     #[inline]
     pub fn new(storage: &'a mut S) -> Result<Self, Error> {
@@ -34,9 +35,9 @@ where
     }
 }
 
-impl<S> Storage for Complete<'_, S>
+impl<S> Buffer for Complete<'_, S>
 where
-    S: Storage,
+    S: Buffer,
 {
     type Error = S::Error;
 
@@ -60,7 +61,7 @@ where
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let mut dest = dest.track_write();
         let chunk = self.storage.partial_copy_into(&mut dest)?;
@@ -72,7 +73,7 @@ where
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let mut dest = dest.track_write();
         self.storage.copy_into(&mut dest)?;
@@ -81,9 +82,9 @@ where
     }
 }
 
-impl<C> Reader for Complete<'_, C>
+impl<C> Stream for Complete<'_, C>
 where
-    C: Storage,
+    C: Buffer,
 {
     #[inline]
     fn current_offset(&self) -> u64 {

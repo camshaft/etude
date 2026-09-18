@@ -1,13 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Storage;
+use super::Buffer;
 
 /// A writer incapable of being written to
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Empty;
 
-impl Storage for Empty {
+impl Buffer for Empty {
     #[inline]
     fn put_slice(&mut self, slice: &[u8]) {
         debug_assert!(

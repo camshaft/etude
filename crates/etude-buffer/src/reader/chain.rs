@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 
-/// Chains two [`Storage`] implementations together, draining the first before the second.
+/// Chains two [`Buffer`] implementations together, draining the first before the second.
 pub struct Chain<A, B> {
     a: A,
     b: B,
@@ -14,8 +14,8 @@ pub struct Chain<A, B> {
 
 impl<A, B> Chain<A, B>
 where
-    A: Storage<Error = core::convert::Infallible>,
-    B: Storage<Error = core::convert::Infallible>,
+    A: Buffer<Error = core::convert::Infallible>,
+    B: Buffer<Error = core::convert::Infallible>,
 {
     #[inline]
     pub fn new(a: A, b: B) -> Self {
@@ -23,10 +23,10 @@ where
     }
 }
 
-impl<A, B> Storage for Chain<A, B>
+impl<A, B> Buffer for Chain<A, B>
 where
-    A: Storage<Error = core::convert::Infallible>,
-    B: Storage<Error = core::convert::Infallible>,
+    A: Buffer<Error = core::convert::Infallible>,
+    B: Buffer<Error = core::convert::Infallible>,
 {
     type Error = core::convert::Infallible;
 
@@ -51,7 +51,7 @@ where
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         if !self.a.buffer_is_empty() {
             if self.a.buffered_len() > dest.remaining_capacity() {
@@ -70,7 +70,7 @@ where
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         if !self.a.buffer_is_empty() {
             self.a.copy_into(dest)?;

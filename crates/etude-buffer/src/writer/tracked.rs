@@ -1,16 +1,16 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{reader::storage::Chunk, writer::Storage};
+use crate::{reader::Chunk, writer::Buffer};
 use bytes::{Bytes, BytesMut, buf::UninitSlice};
 
 /// Tracks the number of bytes written to the underlying storage
-pub struct Tracked<'a, S: Storage + ?Sized> {
+pub struct Tracked<'a, S: Buffer + ?Sized> {
     storage: &'a mut S,
     written: usize,
 }
 
-impl<'a, S: Storage + ?Sized> Tracked<'a, S> {
+impl<'a, S: Buffer + ?Sized> Tracked<'a, S> {
     #[inline]
     pub fn new(storage: &'a mut S) -> Self {
         Self {
@@ -26,7 +26,7 @@ impl<'a, S: Storage + ?Sized> Tracked<'a, S> {
     }
 }
 
-impl<S: Storage + ?Sized> Storage for Tracked<'_, S> {
+impl<S: Buffer + ?Sized> Buffer for Tracked<'_, S> {
     const SPECIALIZES_BYTES: bool = S::SPECIALIZES_BYTES;
     const SPECIALIZES_BYTES_MUT: bool = S::SPECIALIZES_BYTES_MUT;
 

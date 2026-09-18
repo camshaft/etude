@@ -1,20 +1,21 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    reader::{Reader, Storage, storage::Chunk},
-    writer::{self, Storage as _},
+use crate::reader::Stream;
+use etude_buffer::{
+    reader::{Buffer, Chunk},
+    writer::{self, Buffer as _},
 };
 
 /// Wraps a reader and limits the amount of data that can be read from it
 ///
 /// This can be used for applying back pressure to the reader with flow control.
-pub struct Limit<'a, R: Reader + ?Sized> {
+pub struct Limit<'a, R: Stream + ?Sized> {
     len: usize,
     reader: &'a mut R,
 }
 
-impl<'a, R: Reader + ?Sized> Limit<'a, R> {
+impl<'a, R: Stream + ?Sized> Limit<'a, R> {
     #[inline]
     pub fn new(reader: &'a mut R, max_buffered_len: usize) -> Self {
         let len = max_buffered_len.min(reader.buffered_len());
@@ -23,7 +24,7 @@ impl<'a, R: Reader + ?Sized> Limit<'a, R> {
     }
 }
 
-impl<R: Reader + ?Sized> Storage for Limit<'_, R> {
+impl<R: Stream + ?Sized> Buffer for Limit<'_, R> {
     type Error = R::Error;
 
     #[inline]
@@ -45,7 +46,7 @@ impl<R: Reader + ?Sized> Storage for Limit<'_, R> {
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let mut dest = dest.with_write_limit(self.len);
         let mut dest = dest.track_write();
@@ -61,7 +62,7 @@ impl<R: Reader + ?Sized> Storage for Limit<'_, R> {
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let mut dest = dest.with_write_limit(self.len);
         let mut dest = dest.track_write();
@@ -75,7 +76,7 @@ impl<R: Reader + ?Sized> Storage for Limit<'_, R> {
     }
 }
 
-impl<R: Reader + ?Sized> Reader for Limit<'_, R> {
+impl<R: Stream + ?Sized> Stream for Limit<'_, R> {
     #[inline]
     fn current_offset(&self) -> u64 {
         self.reader.current_offset()

@@ -3,11 +3,8 @@
 
 use core::fmt;
 use etude_buffer::{
-    reader::{
-        self, Storage as _,
-        storage::{Chunk, Infallible as _},
-    },
-    writer::{self, Storage as _},
+    reader::{self, Buffer as _, Chunk, Infallible as _},
+    writer::{self, Buffer as _},
 };
 use std::{collections::VecDeque, io, ops};
 
@@ -1097,7 +1094,7 @@ macro_rules! impl_reader_traits {
                     return Err(ByteVecError::OutOfBounds(len));
                 }
 
-                let mut out = writer::storage::Discard;
+                let mut out = writer::Discard;
                 let mut out = out.with_write_limit(len);
                 self.infallible_copy_into(&mut out);
 
@@ -1137,7 +1134,7 @@ macro_rules! impl_reader_traits {
             #[inline]
             fn copy_head<Dest>(&mut self, dest: &mut Dest)
             where
-                Dest: writer::storage::Storage + ?Sized,
+                Dest: writer::Buffer + ?Sized,
             {
                 let mut dest = dest.track_write();
 
@@ -1155,7 +1152,7 @@ macro_rules! impl_reader_traits {
             }
         }
 
-        impl reader::Storage for $ty {
+        impl reader::Buffer for $ty {
             type Error = core::convert::Infallible;
 
             #[inline]
@@ -1164,10 +1161,7 @@ macro_rules! impl_reader_traits {
             }
 
             #[inline]
-            fn read_chunk(
-                &mut self,
-                watermark: usize,
-            ) -> Result<reader::storage::Chunk<'_>, Self::Error> {
+            fn read_chunk(&mut self, watermark: usize) -> Result<reader::Chunk<'_>, Self::Error> {
                 Ok(self.read_chunk_bytes(watermark).into())
             }
 
@@ -1175,14 +1169,14 @@ macro_rules! impl_reader_traits {
             fn partial_copy_into<Dest>(
                 &mut self,
                 dest: &mut Dest,
-            ) -> Result<reader::storage::Chunk<'_>, Self::Error>
+            ) -> Result<reader::Chunk<'_>, Self::Error>
             where
-                Dest: writer::Storage + ?Sized,
+                Dest: writer::Buffer + ?Sized,
             {
                 loop {
                     let head_len = self.head.len();
                     if head_len == 0 {
-                        return Ok(reader::storage::Chunk::empty());
+                        return Ok(reader::Chunk::empty());
                     }
 
                     let remaining_capacity = dest.remaining_capacity();
@@ -1198,7 +1192,7 @@ macro_rules! impl_reader_traits {
             #[inline]
             fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
             where
-                Dest: writer::Storage + ?Sized,
+                Dest: writer::Buffer + ?Sized,
             {
                 loop {
                     self.copy_head(dest);
@@ -1282,7 +1276,7 @@ impl_iter_traits!(Reader<'_>);
 impl_reader_traits!(DrainIter);
 impl_iter_traits!(DrainIter);
 
-impl writer::Storage for ByteVec {
+impl writer::Buffer for ByteVec {
     const SPECIALIZES_BYTES: bool = true;
 
     #[inline]
@@ -1313,7 +1307,7 @@ impl std::io::Write for ByteVec {
 
     #[inline]
     fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
-        let mut bufs = reader::storage::IoSlice::new(bufs);
+        let mut bufs = reader::IoSlice::new(bufs);
         let len = bufs.buffered_len();
         let mut bytes = BytesMut::with_capacity(len);
         bufs.infallible_copy_into(&mut bytes);

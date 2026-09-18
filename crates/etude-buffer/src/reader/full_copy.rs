@@ -2,22 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 
 /// Forces a full copy, even when `partial_copy_into` is called
 #[derive(Debug)]
-pub struct FullCopy<'a, S: Storage + ?Sized>(&'a mut S);
+pub struct FullCopy<'a, S: Buffer + ?Sized>(&'a mut S);
 
-impl<'a, S: Storage + ?Sized> FullCopy<'a, S> {
+impl<'a, S: Buffer + ?Sized> FullCopy<'a, S> {
     #[inline]
     pub fn new(storage: &'a mut S) -> Self {
         Self(storage)
     }
 }
 
-impl<S: Storage + ?Sized> Storage for FullCopy<'_, S> {
+impl<S: Buffer + ?Sized> Buffer for FullCopy<'_, S> {
     type Error = S::Error;
 
     #[inline]
@@ -38,7 +38,7 @@ impl<S: Storage + ?Sized> Storage for FullCopy<'_, S> {
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         // force the full copy
         self.0.copy_into(dest)?;
@@ -48,7 +48,7 @@ impl<S: Storage + ?Sized> Storage for FullCopy<'_, S> {
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.0.copy_into(dest)
     }

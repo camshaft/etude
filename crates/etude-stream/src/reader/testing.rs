@@ -1,12 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Reader, Storage, storage::Infallible as _};
+use super::Stream;
 use core::convert::Infallible;
+use etude_buffer::reader::{Buffer, Infallible as _};
 
 pub struct Fallible<'a, R, E>
 where
-    R: ?Sized + Storage<Error = Infallible>,
+    R: ?Sized + Buffer<Error = Infallible>,
     E: 'static + Clone,
 {
     inner: &'a mut R,
@@ -15,7 +16,7 @@ where
 
 impl<'a, R, E> Fallible<'a, R, E>
 where
-    R: ?Sized + Storage<Error = Infallible>,
+    R: ?Sized + Buffer<Error = Infallible>,
     E: 'static + Clone,
 {
     #[inline]
@@ -44,9 +45,9 @@ where
     }
 }
 
-impl<R, E> Storage for Fallible<'_, R, E>
+impl<R, E> Buffer for Fallible<'_, R, E>
 where
-    R: ?Sized + Storage<Error = Infallible>,
+    R: ?Sized + Buffer<Error = Infallible>,
     E: 'static + Clone,
 {
     type Error = E;
@@ -62,7 +63,10 @@ where
     }
 
     #[inline]
-    fn read_chunk(&mut self, watermark: usize) -> Result<super::storage::Chunk<'_>, Self::Error> {
+    fn read_chunk(
+        &mut self,
+        watermark: usize,
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error> {
         self.check_error()?;
         let chunk = self.inner.infallible_read_chunk(watermark);
         Ok(chunk)
@@ -72,9 +76,9 @@ where
     fn partial_copy_into<Dest>(
         &mut self,
         dest: &mut Dest,
-    ) -> Result<super::storage::Chunk<'_>, Self::Error>
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error>
     where
-        Dest: crate::writer::Storage + ?Sized,
+        Dest: etude_buffer::writer::Buffer + ?Sized,
     {
         self.check_error()?;
         let chunk = self.inner.infallible_partial_copy_into(dest);
@@ -84,7 +88,7 @@ where
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: crate::writer::Storage + ?Sized,
+        Dest: etude_buffer::writer::Buffer + ?Sized,
     {
         self.check_error()?;
         self.inner.infallible_copy_into(dest);
@@ -92,9 +96,9 @@ where
     }
 }
 
-impl<R, E> Reader for Fallible<'_, R, E>
+impl<R, E> Stream for Fallible<'_, R, E>
 where
-    R: ?Sized + Reader<Error = Infallible>,
+    R: ?Sized + Stream<Error = Infallible>,
     E: 'static + Clone,
 {
     #[inline]
@@ -111,7 +115,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::storage::Chunk;
+    use etude_buffer::reader::Chunk;
 
     #[test]
     fn fallible_test() {

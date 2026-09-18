@@ -9,13 +9,13 @@
 )]
 
 use crate::{
-    reader::{Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 
 macro_rules! impl_slice {
     ($ty:ty, $default:expr, $split:ident $(, $extend:expr, $new:expr)?) => {
-        impl Storage for $ty {
+        impl Buffer for $ty {
             type Error = core::convert::Infallible;
 
             #[inline]
@@ -49,7 +49,7 @@ macro_rules! impl_slice {
             #[inline]
             fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
             where
-                Dest: writer::Storage + ?Sized,
+                Dest: writer::Buffer + ?Sized,
             {
                 self.read_chunk(dest.remaining_capacity())
             }
@@ -57,7 +57,7 @@ macro_rules! impl_slice {
             #[inline]
             fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
             where
-                Dest: writer::Storage + ?Sized,
+                Dest: writer::Buffer + ?Sized,
             {
                 ensure!(!self.is_empty(), Ok(()));
                 let len = self.len().min(dest.remaining_capacity());

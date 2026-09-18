@@ -2,15 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{
-        Storage,
-        storage::{Chunk, Infallible as _},
-    },
+    reader::{Buffer, Chunk, Infallible as _},
     writer,
 };
 use bytes::{Bytes, BytesMut};
 
-impl Storage for BytesMut {
+impl Buffer for BytesMut {
     type Error = core::convert::Infallible;
 
     #[inline]
@@ -35,7 +32,7 @@ impl Storage for BytesMut {
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.read_chunk(dest.remaining_capacity())
     }
@@ -43,7 +40,7 @@ impl Storage for BytesMut {
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let watermark = self.len().min(dest.remaining_capacity());
 
@@ -70,7 +67,7 @@ impl Storage for BytesMut {
     }
 }
 
-impl Storage for Bytes {
+impl Buffer for Bytes {
     type Error = core::convert::Infallible;
 
     #[inline]
@@ -87,7 +84,7 @@ impl Storage for Bytes {
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.read_chunk(dest.remaining_capacity())
     }
@@ -95,7 +92,7 @@ impl Storage for Bytes {
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let watermark = self.len().min(dest.remaining_capacity());
 
@@ -120,7 +117,7 @@ impl Storage for Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use writer::Storage as _;
+    use writer::Buffer as _;
 
     #[test]
     fn bytes_into_queue_test() {

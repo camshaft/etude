@@ -1,18 +1,16 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    reader::{Reader, Storage},
-    writer,
-};
+use crate::reader::Stream;
+use etude_buffer::{reader::Buffer, writer};
 
 #[cfg(debug_assertions)]
-use crate::reader::storage::Infallible;
+use etude_buffer::reader::Infallible;
 
-/// Ensures [`Reader`] invariants are held as each trait function is called
+/// Ensures [`Stream`] invariants are held as each trait function is called
 pub struct Checked<'a, R>
 where
-    R: Reader + ?Sized,
+    R: Stream + ?Sized,
 {
     inner: &'a mut R,
     #[cfg(debug_assertions)]
@@ -21,7 +19,7 @@ where
 
 impl<'a, R> Checked<'a, R>
 where
-    R: Reader + ?Sized,
+    R: Stream + ?Sized,
 {
     #[inline(always)]
     pub fn new(inner: &'a mut R) -> Self {
@@ -35,9 +33,9 @@ where
 
 /// Forward on to the inner reader when debug_assertions are disabled
 #[cfg(not(debug_assertions))]
-impl<'a, R> Storage for Checked<'a, R>
+impl<'a, R> Buffer for Checked<'a, R>
 where
-    R: Reader + ?Sized,
+    R: Stream + ?Sized,
 {
     type Error = R::Error;
 
@@ -52,7 +50,10 @@ where
     }
 
     #[inline(always)]
-    fn read_chunk(&mut self, watermark: usize) -> Result<super::storage::Chunk<'_>, Self::Error> {
+    fn read_chunk(
+        &mut self,
+        watermark: usize,
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error> {
         self.inner.read_chunk(watermark)
     }
 
@@ -60,9 +61,9 @@ where
     fn partial_copy_into<Dest>(
         &mut self,
         dest: &mut Dest,
-    ) -> Result<super::storage::Chunk<'_>, Self::Error>
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.inner.partial_copy_into(dest)
     }
@@ -70,16 +71,16 @@ where
     #[inline(always)]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.inner.copy_into(dest)
     }
 }
 
 #[cfg(debug_assertions)]
-impl<R> Storage for Checked<'_, R>
+impl<R> Buffer for Checked<'_, R>
 where
-    R: Reader + ?Sized,
+    R: Stream + ?Sized,
 {
     type Error = R::Error;
 
@@ -94,7 +95,10 @@ where
     }
 
     #[inline]
-    fn read_chunk(&mut self, watermark: usize) -> Result<super::storage::Chunk<'_>, Self::Error> {
+    fn read_chunk(
+        &mut self,
+        watermark: usize,
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error> {
         let snapshot = Snapshot::new(self.inner, watermark);
 
         let mut chunk = self.inner.read_chunk(watermark)?;
@@ -112,9 +116,9 @@ where
     fn partial_copy_into<Dest>(
         &mut self,
         dest: &mut Dest,
-    ) -> Result<super::storage::Chunk<'_>, Self::Error>
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let snapshot = Snapshot::new(self.inner, dest.remaining_capacity());
         let mut dest = dest.track_write();
@@ -133,7 +137,7 @@ where
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         let snapshot = Snapshot::new(self.inner, dest.remaining_capacity());
         let mut dest = dest.track_write();
@@ -146,9 +150,9 @@ where
     }
 }
 
-impl<R> Reader for Checked<'_, R>
+impl<R> Stream for Checked<'_, R>
 where
-    R: Reader + ?Sized,
+    R: Stream + ?Sized,
 {
     #[inline(always)]
     fn current_offset(&self) -> u64 {
@@ -182,7 +186,7 @@ struct Snapshot {
 #[cfg(debug_assertions)]
 impl Snapshot {
     #[inline]
-    fn new<R: Reader + ?Sized>(reader: &R, dest_capacity: usize) -> Self {
+    fn new<R: Stream + ?Sized>(reader: &R, dest_capacity: usize) -> Self {
         let current_offset = reader.current_offset();
         let final_offset = reader.final_offset();
         let buffered_len = reader.buffered_len();
@@ -195,7 +199,7 @@ impl Snapshot {
     }
 
     #[inline]
-    fn check<R: Reader + ?Sized>(&self, reader: &R, dest_written_len: usize, chunk_len: usize) {
+    fn check<R: Stream + ?Sized>(&self, reader: &R, dest_written_len: usize, chunk_len: usize) {
         assert!(
             chunk_len <= self.dest_capacity,
             "chunk exceeded destination"

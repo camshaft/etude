@@ -1,14 +1,14 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::writer::Storage;
+use crate::writer::Buffer;
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Bytes, BytesMut};
 
 /// Implements a queue of bytes, capable of zero-copy transfer of data
 macro_rules! impl_queue {
     ($ty:ident, $push:ident) => {
-        impl Storage for $ty<Bytes> {
+        impl Buffer for $ty<Bytes> {
             const SPECIALIZES_BYTES: bool = true;
             const SPECIALIZES_BYTES_MUT: bool = true;
 
@@ -38,7 +38,7 @@ macro_rules! impl_queue {
             }
         }
 
-        impl Storage for $ty<BytesMut> {
+        impl Buffer for $ty<BytesMut> {
             const SPECIALIZES_BYTES_MUT: bool = true;
 
             #[inline]

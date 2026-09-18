@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::writer::{Storage, storage::UninitSlice};
+use crate::writer::{Buffer, UninitSlice};
 
 /// Delegates storage operations into a [`bytes::BufMut`] implementation.
 pub struct BufMut<'a, T: bytes::BufMut> {
@@ -15,7 +15,7 @@ impl<'a, T: bytes::BufMut> BufMut<'a, T> {
     }
 }
 
-impl<T: bytes::BufMut> Storage for BufMut<'_, T> {
+impl<T: bytes::BufMut> Buffer for BufMut<'_, T> {
     #[inline]
     fn put_slice(&mut self, bytes: &[u8]) {
         self.buf_mut.put_slice(bytes);
@@ -49,7 +49,7 @@ impl<T: bytes::BufMut> Storage for BufMut<'_, T> {
 /// Delegates standard types to their BufMut implementations
 macro_rules! impl_buf_mut {
     ($ty:ty $(, $reserve:ident)?) => {
-        impl Storage for $ty {
+        impl Buffer for $ty {
             #[inline]
             fn put_slice(&mut self, bytes: &[u8]) {
                 bytes::BufMut::put_slice(self, bytes);
@@ -98,7 +98,7 @@ impl_buf_mut!(&mut [core::mem::MaybeUninit<u8>]);
 
 #[cfg(test)]
 mod tests {
-    use crate::{reader::Storage as _, writer::Storage as _};
+    use crate::{reader::Buffer as _, writer::Buffer as _};
 
     #[test]
     fn vec_test() {

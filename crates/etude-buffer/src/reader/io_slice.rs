@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 use core::{cmp::Ordering, ops::ControlFlow};
 
-/// A vectored reader [`Storage`]
+/// A vectored reader [`Buffer`]
 pub struct IoSlice<'a, T> {
     len: usize,
     head: &'a [u8],
@@ -197,7 +197,7 @@ where
     }
 }
 
-impl<T> Storage for IoSlice<'_, T>
+impl<T> Buffer for IoSlice<'_, T>
 where
     T: core::ops::Deref<Target = [u8]>,
 {
@@ -219,7 +219,7 @@ where
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         ensure!(dest.has_remaining_capacity(), Ok(Chunk::empty()));
 
@@ -237,7 +237,7 @@ where
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         ensure!(dest.has_remaining_capacity(), Ok(()));
 
@@ -261,7 +261,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::storage::Buf;
+    use crate::reader::Buf;
 
     /// ensures each storage type correctly copies multiple chunks into the destination
     #[test]

@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{Storage, storage::Chunk},
+    reader::{Buffer, Chunk},
     writer,
 };
 use core::cmp::Ordering;
 
-/// Implementation of [`Storage`] that delegates to a [`bytes::Buf`] implementation.
+/// Implementation of [`Buffer`] that delegates to a [`bytes::Buf`] implementation.
 pub struct Buf<'a, B: bytes::Buf> {
     buf: &'a mut B,
     /// tracks the number of bytes that need to be advanced in the Buf
@@ -36,7 +36,7 @@ where
     }
 }
 
-impl<B> Storage for Buf<'_, B>
+impl<B> Buffer for Buf<'_, B>
 where
     B: bytes::Buf,
 {
@@ -63,7 +63,7 @@ where
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.commit_pending();
 
@@ -111,7 +111,7 @@ where
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         self.commit_pending();
 

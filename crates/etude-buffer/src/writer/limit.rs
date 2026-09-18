@@ -1,16 +1,16 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{reader::storage::Chunk, writer::Storage};
+use crate::{reader::Chunk, writer::Buffer};
 use bytes::{Bytes, BytesMut, buf::UninitSlice};
 
 /// An implementation that limits the number of bytes that can be written to the underlying storage
-pub struct Limit<'a, S: Storage + ?Sized> {
+pub struct Limit<'a, S: Buffer + ?Sized> {
     storage: &'a mut S,
     remaining_capacity: usize,
 }
 
-impl<'a, S: Storage + ?Sized> Limit<'a, S> {
+impl<'a, S: Buffer + ?Sized> Limit<'a, S> {
     #[inline]
     pub fn new(storage: &'a mut S, remaining_capacity: usize) -> Self {
         let remaining_capacity = storage.remaining_capacity().min(remaining_capacity);
@@ -21,7 +21,7 @@ impl<'a, S: Storage + ?Sized> Limit<'a, S> {
     }
 }
 
-impl<S: Storage + ?Sized> Storage for Limit<'_, S> {
+impl<S: Buffer + ?Sized> Buffer for Limit<'_, S> {
     const SPECIALIZES_BYTES: bool = S::SPECIALIZES_BYTES;
     const SPECIALIZES_BYTES_MUT: bool = S::SPECIALIZES_BYTES_MUT;
 

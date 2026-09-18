@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::writer::Storage;
+use crate::writer::Buffer;
 
 /// Immediately discards any write operations
 ///
@@ -9,7 +9,7 @@ use crate::writer::Storage;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Discard;
 
-impl Storage for Discard {
+impl Buffer for Discard {
     #[inline]
     fn put_slice(&mut self, bytes: &[u8]) {
         let _ = bytes;

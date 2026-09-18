@@ -3,7 +3,7 @@
 
 use alloc::collections::VecDeque;
 
-impl super::Storage for VecDeque<u8> {
+impl super::Buffer for VecDeque<u8> {
     #[inline]
     fn put_slice(&mut self, bytes: &[u8]) {
         self.extend(bytes);

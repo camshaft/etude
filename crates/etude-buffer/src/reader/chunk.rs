@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{reader::Storage, writer};
+use crate::{reader::Buffer, writer};
 use bytes::{Bytes, BytesMut};
 
 /// Concrete chunk of bytes
@@ -70,7 +70,7 @@ impl AsRef<[u8]> for Chunk<'_> {
     }
 }
 
-impl Storage for Chunk<'_> {
+impl Buffer for Chunk<'_> {
     type Error = core::convert::Infallible;
 
     #[inline]
@@ -90,7 +90,7 @@ impl Storage for Chunk<'_> {
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         match self {
             Self::Slice(v) => v.partial_copy_into(dest),
@@ -102,7 +102,7 @@ impl Storage for Chunk<'_> {
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: writer::Storage + ?Sized,
+        Dest: writer::Buffer + ?Sized,
     {
         match self {
             Self::Slice(v) => v.copy_into(dest),
