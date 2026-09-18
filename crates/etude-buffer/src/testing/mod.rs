@@ -3,6 +3,12 @@
 
 //! Test helpers.
 
+pub mod data;
+pub use data::Data;
+
+pub mod fallible;
+pub use fallible::Fallible;
+
 #[cfg(any(test, feature = "generator"))]
 use bolero_generator::prelude::*;
 

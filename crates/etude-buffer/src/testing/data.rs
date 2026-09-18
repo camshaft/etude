@@ -3,13 +3,9 @@
 
 //! A model that ensures stream data is correctly sent and received between peers
 
-use crate::reader::Stream;
+use crate::reader::{Buffer, Chunk};
+use crate::writer;
 use bytes::Bytes;
-use etude_buffer::{
-    Error,
-    reader::{Buffer, Chunk},
-    writer,
-};
 
 #[cfg(any(test, feature = "generator"))]
 use bolero_generator::prelude::*;
@@ -184,6 +180,11 @@ impl Data {
         self.offset
     }
 
+    /// Returns the final offset (the stream's end), if it is known.
+    pub fn final_offset(&self) -> Option<u64> {
+        self.final_offset
+    }
+
     /// Moves the current offset forward by the provided `len`
     pub fn seek_forward(&mut self, len: u64) {
         let len = self.buffered_len.min(len);
@@ -233,18 +234,6 @@ impl Buffer for Data {
     }
 }
 
-impl Stream for Data {
-    #[inline]
-    fn current_offset(&self) -> u64 {
-        self.offset()
-    }
-
-    #[inline]
-    fn final_offset(&self) -> Option<u64> {
-        self.final_offset
-    }
-}
-
 impl writer::Buffer for Data {
     #[inline]
     fn put_slice(&mut self, slice: &[u8]) {
@@ -256,18 +245,6 @@ impl writer::Buffer for Data {
         // return max so readers don't know where the stream is expected to end and we can make an
         // assertion when they write
         usize::MAX
-    }
-}
-
-impl crate::writer::Stream for Data {
-    #[inline]
-    fn read_from<R>(&mut self, reader: &mut R) -> Result<(), Error<R::Error>>
-    where
-        R: Stream + ?Sized,
-    {
-        // no need to specialize on anything here
-        reader.copy_into(self)?;
-        Ok(())
     }
 }
 
@@ -352,18 +329,5 @@ mod tests {
                 assert!(sender.is_finished());
                 assert!(receiver.is_finished());
             })
-    }
-
-    #[test]
-    fn buffer_trait_test() {
-        use crate::writer::Stream as _;
-
-        let mut reader = Data::new(10);
-        let mut writer = reader;
-
-        writer.read_from(&mut reader).unwrap();
-
-        assert!(reader.is_finished());
-        assert!(writer.is_finished());
     }
 }

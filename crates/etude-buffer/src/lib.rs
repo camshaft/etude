@@ -5,9 +5,11 @@
 //!
 //! This crate defines the chunk-oriented [`reader::Buffer`] and [`writer::Buffer`] traits
 //! used to move bytes between buffers while avoiding copies wherever possible, along with a
-//! family of storage adapters (`chain`, `tracked`, `limit`, `io_slice`, …).
+//! family of adapters (`chain`, `tracked`, `io_slice`, …) and, under the `testing` feature,
+//! a stream-data model and generators for property/fuzz tests.
 //!
-//! Offset-aware *stream* views layered on top of these live in the `etude-stream` crate.
+//! The traits are cursor-free: anything that tracks offsets (stream position, final offset)
+//! layers that on top downstream.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 

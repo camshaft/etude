@@ -1,9 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Stream;
+use crate::reader::{Buffer, Infallible as _};
 use core::convert::Infallible;
-use etude_buffer::reader::{Buffer, Infallible as _};
 
 pub struct Fallible<'a, R, E>
 where
@@ -63,10 +62,7 @@ where
     }
 
     #[inline]
-    fn read_chunk(
-        &mut self,
-        watermark: usize,
-    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error> {
+    fn read_chunk(&mut self, watermark: usize) -> Result<crate::reader::Chunk<'_>, Self::Error> {
         self.check_error()?;
         let chunk = self.inner.infallible_read_chunk(watermark);
         Ok(chunk)
@@ -76,9 +72,9 @@ where
     fn partial_copy_into<Dest>(
         &mut self,
         dest: &mut Dest,
-    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error>
+    ) -> Result<crate::reader::Chunk<'_>, Self::Error>
     where
-        Dest: etude_buffer::writer::Buffer + ?Sized,
+        Dest: crate::writer::Buffer + ?Sized,
     {
         self.check_error()?;
         let chunk = self.inner.infallible_partial_copy_into(dest);
@@ -88,7 +84,7 @@ where
     #[inline]
     fn copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<(), Self::Error>
     where
-        Dest: etude_buffer::writer::Buffer + ?Sized,
+        Dest: crate::writer::Buffer + ?Sized,
     {
         self.check_error()?;
         self.inner.infallible_copy_into(dest);
@@ -96,26 +92,10 @@ where
     }
 }
 
-impl<R, E> Stream for Fallible<'_, R, E>
-where
-    R: ?Sized + Stream<Error = Infallible>,
-    E: 'static + Clone,
-{
-    #[inline]
-    fn current_offset(&self) -> u64 {
-        self.inner.current_offset()
-    }
-
-    #[inline]
-    fn final_offset(&self) -> Option<u64> {
-        self.inner.final_offset()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etude_buffer::reader::Chunk;
+    use crate::reader::Chunk;
 
     #[test]
     fn fallible_test() {
