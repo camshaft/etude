@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{storage::Chunk, Storage},
+    reader::{Storage, storage::Chunk},
     writer,
 };
 use core::{cmp::Ordering, ops::ControlFlow};

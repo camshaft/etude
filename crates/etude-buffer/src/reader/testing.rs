@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{storage::Infallible as _, Reader, Storage};
+use super::{Reader, Storage, storage::Infallible as _};
 use core::convert::Infallible;
 
 pub struct Fallible<'a, R, E>

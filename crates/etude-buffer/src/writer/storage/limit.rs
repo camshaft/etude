@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{reader::storage::Chunk, writer::Storage};
-use bytes::{buf::UninitSlice, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut, buf::UninitSlice};
 
 /// An implementation that limits the number of bytes that can be written to the underlying storage
 pub struct Limit<'a, S: Storage + ?Sized> {

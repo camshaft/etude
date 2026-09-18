@@ -3,8 +3,8 @@
 
 use crate::{
     reader::{
-        storage::{Chunk, Infallible as _},
         Storage,
+        storage::{Chunk, Infallible as _},
     },
     writer,
 };

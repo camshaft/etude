@@ -9,7 +9,7 @@
 )]
 
 use crate::{
-    reader::{storage::Chunk, Storage},
+    reader::{Storage, storage::Chunk},
     writer,
 };
 

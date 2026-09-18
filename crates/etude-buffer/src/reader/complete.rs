@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{storage::Chunk, Reader, Storage},
-    writer, Error,
+    Error,
+    reader::{Reader, Storage, storage::Chunk},
+    writer,
 };
 
 /// Wraps a single [`Storage`] instance as a [`Reader`].

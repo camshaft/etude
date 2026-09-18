@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    reader::{storage::Chunk, Reader, Storage},
+    reader::{Reader, Storage, storage::Chunk},
     writer::{self, Storage as _},
 };
 

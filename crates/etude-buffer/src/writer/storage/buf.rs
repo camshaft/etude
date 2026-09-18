@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::writer::{storage::UninitSlice, Storage};
+use crate::writer::{Storage, storage::UninitSlice};
 
 /// Delegates storage operations into a [`bytes::BufMut`] implementation.
 pub struct BufMut<'a, T: bytes::BufMut> {

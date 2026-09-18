@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use bolero::{check, TypeGenerator};
+use bolero::{TypeGenerator, check};
 use std::io::{Read, Write};
 
 macro_rules! assert_eq_dump {

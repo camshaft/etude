@@ -6,7 +6,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/camshaft/etude"

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{reader::storage::Chunk, writer::Storage};
-use bytes::{buf::UninitSlice, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut, buf::UninitSlice};
 
 /// Only allows a single write into the storage. After that, no more writes are allowed.
 ///
