@@ -12,7 +12,7 @@ repository.workspace = true
 
 [features]
 default = ["std"]
-std = []
+std = ["bytes/std"]
 # Derive `bolero_generator::TypeGenerator` impls for property/fuzz testing.
 generator = ["dep:bolero-generator", "bolero-generator/alloc"]
 # Expose the `testing` stream-data model + generators.
@@ -20,7 +20,7 @@ testing = ["generator"]
 
 [dependencies]
 etude-ensure = { version = "0.1", path = "../etude-ensure" }
-bytes = "1"
+bytes = { version = "1", default-features = false }
 bolero-generator = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
