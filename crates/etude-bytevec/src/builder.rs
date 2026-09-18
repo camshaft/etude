@@ -31,6 +31,10 @@ pub struct Builder {
     chunks: ByteVec,
     head: BytesMut,
     capacity: usize,
+    /// Chunks with `len <= inline_threshold` are copied into the contiguous head buffer;
+    /// larger chunks are held by reference (zero-copy). `0` means never copy — reference
+    /// everything.
+    inline_threshold: usize,
 }
 
 impl Default for Builder {
@@ -59,7 +63,34 @@ impl Builder {
             chunks: ByteVec::new(),
             head: BytesMut::new(),
             capacity,
+            inline_threshold: 0,
         }
+    }
+
+    /// Sets the inline threshold: chunks with `len <= threshold` handed to `put_bytes`
+    /// are copied into the contiguous head buffer, while larger chunks are held by
+    /// reference (zero-copy).
+    ///
+    /// The default is `0` — every chunk is held by reference. Raising it trades a small
+    /// `memcpy` for fewer reference-counted chunks (less per-chunk overhead and
+    /// fragmentation) when a lot of tiny `Bytes` are written.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use etude_bytevec::ByteVec;
+    ///
+    /// // Copy any chunk of 16 bytes or fewer into the contiguous buffer.
+    /// let builder = ByteVec::builder(1024).with_inline_threshold(16);
+    /// ```
+    pub fn with_inline_threshold(mut self, threshold: usize) -> Self {
+        self.inline_threshold = threshold;
+        self
+    }
+
+    /// Returns the current inline threshold. See [`Builder::with_inline_threshold`].
+    pub fn inline_threshold(&self) -> usize {
+        self.inline_threshold
     }
 
     /// Returns the total number of bytes in the builder.
@@ -331,6 +362,7 @@ impl From<ByteVec> for Builder {
             chunks,
             head: BytesMut::new(),
             capacity: DEFAULT_CAPACITY,
+            inline_threshold: 0,
         }
     }
 }
@@ -342,9 +374,10 @@ impl From<Builder> for ByteVec {
 }
 
 impl writer::Buffer for Builder {
-    // we prefer direct writes into the head chunk rather than appending byte chunks
-    const SPECIALIZES_BYTES: bool = false;
-    const SPECIALIZES_BYTES_MUT: bool = false;
+    // Always accept `Bytes`/`BytesMut`; the `inline_threshold` decides at runtime whether a
+    // given chunk is copied into the head buffer or held by reference.
+    const SPECIALIZES_BYTES: bool = true;
+    const SPECIALIZES_BYTES_MUT: bool = true;
 
     fn put_slice(&mut self, bytes: &[u8]) {
         let remaining_capacity = self.head.spare_capacity_mut().len();
@@ -386,12 +419,22 @@ impl writer::Buffer for Builder {
         if bytes.is_empty() {
             return;
         }
+        // small chunks are cheaper to copy into the contiguous buffer than to hold as a
+        // separate reference-counted chunk
+        if bytes.len() <= self.inline_threshold {
+            self.put_slice(&bytes);
+            return;
+        }
         self.flush();
         self.chunks.push_back(bytes);
     }
 
     fn put_bytes_mut(&mut self, bytes: BytesMut) {
         if bytes.is_empty() {
+            return;
+        }
+        if bytes.len() <= self.inline_threshold {
+            self.put_slice(&bytes);
             return;
         }
         self.flush();
@@ -454,5 +497,44 @@ impl reader::Buffer for Builder {
     {
         self.chunks.copy_into(dest)?;
         self.head.copy_into(dest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_threshold_zero_references_everything() {
+        // the default threshold of 0 holds every chunk by reference
+        let mut b = ByteVec::builder(1024);
+        assert_eq!(b.inline_threshold(), 0);
+        b.put_bytes(Bytes::from_static(b"ab"));
+        b.put_bytes(Bytes::from_static(b"cd"));
+        let out = b.finish();
+        assert_eq!(out, b"abcd");
+        assert_eq!(out.chunks().len(), 2);
+    }
+
+    #[test]
+    fn inline_threshold_compacts_small_chunks() {
+        // small chunks (<= threshold) are copied into the contiguous head buffer
+        let mut b = ByteVec::builder(1024).with_inline_threshold(16);
+        b.put_bytes(Bytes::from_static(b"ab"));
+        b.put_bytes(Bytes::from_static(b"cd"));
+        let out = b.finish();
+        assert_eq!(out, b"abcd");
+        assert_eq!(out.chunks().len(), 1);
+    }
+
+    #[test]
+    fn inline_threshold_still_references_large_chunks() {
+        let big = Bytes::from(vec![7u8; 64]);
+        let mut b = ByteVec::builder(1024).with_inline_threshold(16);
+        b.put_bytes(Bytes::from_static(b"ab")); // <= 16 -> copied into head
+        b.put_bytes(big); // > 16 -> flushes head, held by reference
+        let out = b.finish();
+        assert_eq!(out.len(), 2 + 64);
+        assert_eq!(out.chunks().len(), 2);
     }
 }
