@@ -26,3 +26,8 @@ bolero-generator = { version = "0.13", default-features = false, optional = true
 [dev-dependencies]
 bolero = "0.13"
 bolero-generator = "0.13"
+
+[lints.rust]
+# `kani` is set by the Kani model checker (see the `vectored_copy` proof); declare it
+# so the `unexpected_cfgs` lint stays quiet under a normal build.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

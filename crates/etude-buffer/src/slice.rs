@@ -108,3 +108,63 @@ where
 
     count
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::InlineVec;
+    use bolero::check;
+
+    fn assert_eq_slices<A, B, T>(a: &[A], b: &[B])
+    where
+        A: Deref<Target = [T]>,
+        B: Deref<Target = [T]>,
+        T: PartialEq + core::fmt::Debug,
+    {
+        let a = a.iter().flat_map(|a| a.iter());
+        let b = b.iter().flat_map(|b| b.iter());
+
+        // make sure all of the values match
+        //
+        // Note: this doesn't use Iterator::eq, as the slice lengths may be different
+        for (a, b) in a.zip(b) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn vectored_copy_test() {
+        let from = [
+            &[0][..],
+            &[1, 2, 3][..],
+            &[4, 5, 6, 7][..],
+            &[][..],
+            &[8, 9, 10, 11][..],
+        ];
+
+        for len in 0..6 {
+            let mut to = vec![vec![0; 2]; len];
+            let copied_len = vectored_copy(&from, &mut to);
+            assert_eq!(copied_len, len * 2);
+            assert_eq_slices(&from, &to);
+        }
+    }
+
+    const LEN: usize = if cfg!(kani) { 2 } else { 32 };
+
+    #[test]
+    #[cfg_attr(kani, kani::proof, kani::unwind(5), kani::solver(kissat))]
+    #[cfg_attr(miri, ignore)] // This test is too expensive for miri to complete in a reasonable amount of time
+    fn vectored_copy_fuzz_test() {
+        check!()
+            .with_type::<(
+                InlineVec<InlineVec<u8, LEN>, LEN>,
+                InlineVec<InlineVec<u8, LEN>, LEN>,
+            )>()
+            .cloned()
+            .for_each(|(from, mut to)| {
+                vectored_copy(&from, &mut to);
+                assert_eq_slices(&from, &to);
+            })
+    }
+}
