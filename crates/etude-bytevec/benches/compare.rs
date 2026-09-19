@@ -1290,8 +1290,64 @@ fn bench_mixed_rw(c: &mut Criterion) {
     }
 }
 
+/// Chunk-size distribution — the same ~1 MiB payload delivered as many tiny chunks, medium (MTU)
+/// chunks, or a few huge chunks. Chunk *count* (not just size) drives the rope's cost: 64 B chunks
+/// make ~16k of them (a tall deep tree), 64 KiB chunks make ~16 (the flat `Small` tier). Measures
+/// flatten-to-contiguous (`copy_to_bytes_mut`) and random `byte_at` across the three, so the
+/// per-chunk-count overhead is explicit against a flat deque baseline.
+fn bench_chunk_dist(c: &mut Criterion) {
+    const TOTAL: usize = 1 << 20; // ~1 MiB
+    let sized = |size: usize, count: usize| -> Vec<Bytes> {
+        (0..count)
+            .map(|i| Bytes::from(vec![i as u8; size]))
+            .collect()
+    };
+    for &(size, label) in &[(64usize, "tiny64"), (1400, "mtu1400"), (65536, "huge64k")] {
+        let count = TOTAL / size;
+        let total = size * count;
+        let template = sized(size, count);
+
+        let mut g = group(c, "chunkdist_flatten");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteVec>(),
+                |r| black_box(r.copy_to_bytes_mut()),
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<NaiveVec>(),
+                |v| black_box(v.copy_to_bytes()),
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+
+        let rope = template.iter().cloned().collect::<ByteVec>();
+        let naive = template.iter().cloned().collect::<NaiveVec>();
+        let mut g = group(c, "chunkdist_byte_at");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            let mut st = 0x9E37_79B9u64;
+            b.iter(|| {
+                st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+                black_box(rope.byte_at((st >> 33) as usize % total))
+            })
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", label), |b| {
+            let mut st = 0x9E37_79B9u64;
+            b.iter(|| {
+                st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+                black_box(byte_via_walk(&naive, (st >> 33) as usize % total))
+            })
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
+    bench_chunk_dist,
     bench_stream,
     bench_build_crossover,
     bench_churn_sweep,

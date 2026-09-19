@@ -371,6 +371,32 @@ read half swamps everything and the rope finishes **~3.7× ahead**. This is the 
 the `slice`/`clone`/`append` structural wins: the more content a live buffer holds, the more the rope's
 O(log) addressing pays over a flat deque's O(n) reach.
 
+### Chunk-size distribution: many-tiny vs few-huge (runnable: `cargo bench -p etude-bytevec -- chunkdist`)
+
+The same ~1 MiB payload delivered at three chunk granularities — 64 B (~16k chunks, a tall deep tree),
+1400 B MTU (~750 chunks), and 64 KiB (~16 chunks, the flat `Small` tier). Chunk *count*, not just size,
+is what the rope's structure keys on (aarch64, jemalloc, release):
+
+| op | distribution | rope | naive deque | ratio |
+|----|--------------|------|-------------|-------|
+| flatten (`copy_to_bytes_mut`) | tiny64 (~16k) | 225 µs | 197 µs | 1.14 |
+| flatten | mtu1400 (~750) | 44.6 µs | 40.9 µs | 1.09 |
+| flatten | huge64k (~16) | 33.0 µs | 32.6 µs | 1.01 |
+| random `byte_at` | tiny64 (~16k) | 95.5 ns | 6.34 µs | **0.015 (~66× faster)** |
+| random `byte_at` | mtu1400 (~750) | 54.0 ns | 304 ns | **0.18 (~5.6× faster)** |
+| random `byte_at` | huge64k (~16) | 22.3 ns | 18.7 ns | 1.19 |
+
+The two ops pull in opposite directions as fragmentation rises, and both behave as the structure
+predicts — no new pathology. **Flatten** trails 1.01→1.14× as the chunk count climbs: it is one presized
+memcpy per chunk for both, and the rope pays a little extra to walk the tree where the deque iterates a
+flat buffer (the same locality cost as `chunks_iter`), so the gap scales with count and is inherent.
+**Random `byte_at`** is the mirror image and the headline: the rope addresses any offset in O(log₃₂)
+regardless of fragmentation, while the deque walks chunks O(n) — so at 16k tiny chunks the rope is **~66×
+faster**, at MTU ~5.6×, and only at ~16 huge chunks does the deque's short walk edge it (~19 ns). The
+practical guidance: fragmentation barely dents rope addressing but is quadratic-feeling for a flat deque;
+if a producer floods a buffer with tiny chunks and you only ever flatten it, `compact()` first — but if
+you index into it, the tiered rope is exactly the structure you want.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
