@@ -18,6 +18,7 @@ use etude_bigint::Big;
 use etude_rational::Rational;
 use num_bigint::BigInt;
 use num_rational::BigRational;
+use num_traits::Signed;
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -311,6 +312,42 @@ fn bench(c: &mut Criterion) {
             });
             g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
                 be.iter(|| black_box(a.recip()))
+            });
+        }
+        g.finish();
+    }
+
+    // Negation: only the numerator's sign flips (already canonical) — an O(limbs) clone + sign. Both
+    // implementations return an owned value cloning internally, so this is a fair clone-cost comparison.
+    {
+        let mut g = group(c, "neg");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x0f0f_a5a5 ^ (nbytes as u64));
+            let a = rng.rat(nbytes);
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter(|| black_box(a.neg()))
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
+                be.iter(|| black_box(-a))
+            });
+        }
+        g.finish();
+    }
+
+    // Absolute value: drop the numerator's sign (denominator already positive) — an O(limbs) clone.
+    {
+        let mut g = group(c, "abs");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x5c5c_3210 ^ (nbytes as u64));
+            // A negative operand so `abs` does its sign work (not a no-op copy).
+            let a = rng.rat(nbytes).neg();
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter(|| black_box(a.abs()))
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
+                be.iter(|| black_box(a.abs()))
             });
         }
         g.finish();
