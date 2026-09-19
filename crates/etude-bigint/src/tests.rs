@@ -69,6 +69,15 @@ fn check_pair(a: &Big, b: &Big) {
         "to_decimal_string {a:?}"
     );
 
+    // O(1) size accessors: bit_len matches num-bigint's magnitude bit count; byte_len is the magnitude
+    // byte count (the sign-magnitude encoding minus its sign byte).
+    assert_eq!(a.bit_len(), ra.bits() as usize, "bit_len {a:?}");
+    assert_eq!(
+        a.byte_len(),
+        a.to_sign_magnitude_bytes().len() - 1,
+        "byte_len {a:?}"
+    );
+
     let ord = a.cmp(b);
     assert_eq!(ord, ra.cmp(&rb), "cmp {a:?} {b:?}");
     // The byte-form compare (no `Big` decode) must give the SAME ordering as `Big::cmp`.

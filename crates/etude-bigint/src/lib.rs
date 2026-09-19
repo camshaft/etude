@@ -64,6 +64,22 @@ impl Big {
         }
     }
 
+    /// The number of bits in the magnitude — `⌊log₂ |self|⌋ + 1`, and `0` for zero. `O(1)` (reads only
+    /// the most-significant limb), so it is a cheap size probe for magnitude-thresholded algorithms.
+    pub fn bit_len(&self) -> usize {
+        match self.mag.last() {
+            // Canonical form keeps the top limb nonzero, so `leading_zeros` gives the exact bit width.
+            Some(&top) => self.mag.len() * 64 - top.leading_zeros() as usize,
+            None => 0,
+        }
+    }
+
+    /// The number of significant bytes in the magnitude — the length of the little-endian magnitude in
+    /// [`Big::to_sign_magnitude_bytes`] (i.e. excluding the sign byte). `0` for zero. `O(1)`.
+    pub fn byte_len(&self) -> usize {
+        self.bit_len().div_ceil(8)
+    }
+
     /// Strip trailing zero limbs and force a zero magnitude to non-negative — re-establishes the
     /// canonical form after an operation that may have produced trailing zeros or a signed zero.
     fn normalize(&mut self) {
