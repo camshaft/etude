@@ -651,6 +651,67 @@ fn to_decimal_string_recursive_vs_num_bigint() {
     }
 }
 
+/// gcd on WIDE operands vs num-bigint — the ≤4-limb random corpus barely exercises Lehmer's
+/// multiprecision cofactor path or its fallbacks. This drives: (1) random wide pairs; (2) pairs with a
+/// planted large common factor `k` (so the gcd itself is multi-limb, stressing the cofactor combine and
+/// the `k*x, k*y` reduction); (3) HIGHLY unbalanced widths (a ≫ b, which forces the `bh == 0` aligned-
+/// leading-limb fallback to a full division step); (4) equal operands and one-off (coprime) pairs.
+#[test]
+fn gcd_wide_operands_vs_num_bigint() {
+    let mut rng = Rng(0x9cd1_ea3b_7c50_0001);
+    let mk = |rng: &mut Rng, n: usize| -> Big {
+        let mut mag: Vec<u64> = (0..n).map(|_| rng.next()).collect();
+        if let Some(top) = mag.last_mut() {
+            *top |= 0x8000_0000_0000_0000; // force exact width n (top limb nonzero)
+        }
+        let mut b = Big { neg: false, mag };
+        b.normalize();
+        b
+    };
+    let check = |a: &Big, b: &Big| {
+        let g = a.gcd(b);
+        assert!(!g.is_negative(), "gcd non-negative");
+        assert_eq!(to_ref(&g), ref_gcd(to_ref(a), to_ref(b)), "gcd {a:?} {b:?}");
+        if !g.is_zero() {
+            assert!(a.divmod(&g).unwrap().1.is_zero(), "gcd divides a");
+            assert!(b.divmod(&g).unwrap().1.is_zero(), "gcd divides b");
+        }
+    };
+    // (1) random wide pairs + (3) unbalanced widths (na ≫ nb triggers the bh==0 fallback).
+    for &(na, nb) in &[
+        (8usize, 8usize),
+        (16, 15),
+        (20, 3),
+        (24, 1),
+        (30, 12),
+        (12, 30),
+        (17, 17),
+        (40, 5),
+    ] {
+        for _ in 0..40 {
+            let a = mk(&mut rng, na);
+            let b = mk(&mut rng, nb);
+            check(&a, &b);
+        }
+    }
+    // (2) planted common factor: gcd(k*x, k*y) is a multiple of k → a wide gcd result.
+    for _ in 0..60 {
+        let (nk, nx, ny) = (
+            3 + (rng.next() % 6) as usize,
+            4 + (rng.next() % 8) as usize,
+            4 + (rng.next() % 8) as usize,
+        );
+        let k = mk(&mut rng, nk);
+        let x = mk(&mut rng, nx);
+        let y = mk(&mut rng, ny);
+        check(&k.mul(&x), &k.mul(&y));
+    }
+    // (4) equal operands (gcd == |a|) and gcd(a, 1) == 1.
+    let a = mk(&mut rng, 18);
+    check(&a, &a);
+    check(&a, &Big::from_i64(1));
+}
+
 #[test]
 fn mul_wide_operands_vs_num_bigint() {
     let mut rng = Rng(0x51ee_7c0d_e1a5_9b3f);
