@@ -218,6 +218,39 @@ fn utf8_streaming_matches_from_utf8_oracle() {
         });
 }
 
+/// `as_contiguous` is `Some(borrowed slice)` exactly when the rope is contiguous (empty or one
+/// chunk) and `None` once it holds multiple chunks; when `Some`, it equals `copy_to_bytes`.
+#[test]
+fn as_contiguous_borrows_when_single_chunk() {
+    // empty -> Some(&[])
+    let empty = ByteVec::new();
+    assert_eq!(empty.as_contiguous(), Some(&b""[..]));
+
+    // single chunk -> Some(that slice), borrow equals copy_to_bytes
+    let mut one = ByteVec::new();
+    one.push_back(chunk(b"hello"));
+    assert_eq!(one.as_contiguous(), Some(&b"hello"[..]));
+    assert_eq!(one.as_contiguous().unwrap(), &one.copy_to_bytes()[..]);
+
+    // two chunks -> None (not contiguous)
+    let mut two = ByteVec::new();
+    two.push_back(chunk(b"ab"));
+    two.push_back(chunk(b"cd"));
+    assert_eq!(two.as_contiguous(), None);
+
+    // deep tier -> None
+    let mut deep = ByteVec::new();
+    for i in 0..(PROMOTE_AT * 3) {
+        deep.push_back(chunk(&[(i % 251) as u8]));
+    }
+    assert!(matches!(deep.repr, Repr::Deep(_)));
+    assert_eq!(deep.as_contiguous(), None);
+
+    // available on Rope<Utf8> too (kind-agnostic), and matches the contiguous content
+    let s = Rope::<Utf8>::try_from_bytes(one).unwrap();
+    assert_eq!(s.as_contiguous(), Some(&b"hello"[..]));
+}
+
 #[test]
 fn single_chunk_is_flat_and_allocation_light() {
     let mut rope = ByteVec::new();

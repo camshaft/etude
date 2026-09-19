@@ -1449,8 +1449,31 @@ impl<K> Rope<K> {
         self.maybe_demote();
     }
 
+    /// Returns the whole content as one **borrowed** contiguous slice if it is stored contiguously
+    /// (empty, or a single chunk — the common case for a small or freshly-received buffer), else
+    /// `None`.
+    ///
+    /// Truly zero-cost: a pure borrow, no copy and no refcount traffic (unlike
+    /// [`copy_to_bytes`](Self::copy_to_bytes), which hands back an owned [`Bytes`]). Intended as the
+    /// fast path for a reader/decoder that wants a `&[u8]` view: `rope.as_contiguous()` when it is
+    /// `Some`, else fall back to [`chunks`](Self::chunks) (or `copy_to_bytes` for a guaranteed
+    /// contiguous — but copying — view). A multi-chunk rope is never contiguous by construction.
+    #[inline]
+    #[must_use]
+    pub fn as_contiguous(&self) -> Option<&[u8]> {
+        match &self.repr {
+            // Shallow: the single chunk lives in `head` with an empty `additional` (an empty rope
+            // has an empty `head`, which is a valid empty contiguous slice).
+            Repr::Small { head, additional } if additional.is_empty() => Some(&head[..]),
+            Repr::Small { .. } => None,
+            // Deep is >1 chunk in practice (it only promotes past PROMOTE_AT); be exact anyway.
+            Repr::Deep(_) => (self.chunk_count() == 1).then(|| &self.chunks().next().unwrap()[..]),
+        }
+    }
+
     /// Flattens the rope into one contiguous [`Bytes`]. Zero-copy when there is a single chunk;
-    /// otherwise copies. Prefer [`ByteVec::chunks`] when you only need to read.
+    /// otherwise copies. Prefer [`ByteVec::chunks`] (or [`as_contiguous`](Self::as_contiguous) for a
+    /// borrow) when you only need to read.
     pub fn copy_to_bytes(&self) -> Bytes {
         if self.len == 0 {
             return Bytes::new();
