@@ -468,6 +468,131 @@ fn bench_builder(c: &mut Criterion) {
     }
 }
 
+/// `Extend<Bytes>` — appends a stream of chunks onto a fresh buffer. Head-to-head construction path.
+fn bench_extend(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let chunks: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let mut g = group(c, "extend");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| {
+                let mut r = ByteRope::new();
+                r.extend(chunks.iter().cloned());
+                black_box(r)
+            })
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| {
+                let mut v = ByteVec::new();
+                v.extend(chunks.iter().cloned());
+                black_box(v)
+            })
+        });
+        g.finish();
+    }
+}
+
+/// `FromIterator<Bytes>` (`collect`) — the idiomatic construction path. Head-to-head.
+fn bench_from_iter(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let chunks: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let mut g = group(c, "from_iter");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| black_box(chunks.iter().cloned().collect::<ByteRope>()))
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| black_box(chunks.iter().cloned().collect::<ByteVec>()))
+        });
+        g.finish();
+    }
+}
+
+/// `io::Write` — appending many MTU-sized slices via `write_all` (each is copied into an owned chunk).
+fn bench_io_write(c: &mut Criterion) {
+    use std::io::Write as _;
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let payload = vec![0x5au8; 1400];
+        let mut g = group(c, "io_write");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| {
+                let mut r = ByteRope::new();
+                for _ in 0..n {
+                    r.write_all(&payload).unwrap();
+                }
+                black_box(r)
+            })
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| {
+                let mut v = ByteVec::new();
+                for _ in 0..n {
+                    v.write_all(&payload).unwrap();
+                }
+                black_box(v)
+            })
+        });
+        g.finish();
+    }
+}
+
+/// `io::Read` — draining the whole buffer into one caller-sized slice in a single `read`.
+fn bench_io_read(c: &mut Criterion) {
+    use std::io::Read as _;
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let total = n * 1400;
+        let mut g = group(c, "io_read");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter_batched(
+                || (template.iter().cloned().collect::<ByteRope>(), vec![0u8; total]),
+                |(mut r, mut out)| black_box(r.read(&mut out).unwrap()),
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter_batched(
+                || (template.iter().cloned().collect::<ByteVec>(), vec![0u8; total]),
+                |(mut v, mut out)| black_box(v.read(&mut out).unwrap()),
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
+/// `clear` — drop all chunks (rope: tears down the tree spine; vec: drops the deque). Head-to-head.
+fn bench_clear(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let mut g = group(c, "clear");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteRope>(),
+                |mut r| {
+                    r.clear();
+                    black_box(r)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteVec>(),
+                |mut v| {
+                    v.clear();
+                    black_box(v)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
 fn byte_via_walk(v: &ByteVec, mut offset: usize) -> Option<u8> {
     for chunk in v.chunks() {
         if offset < chunk.len() {
@@ -491,6 +616,11 @@ criterion_group!(
     bench_slice,
     bench_set_byte,
     bench_replace,
-    bench_builder
+    bench_builder,
+    bench_extend,
+    bench_from_iter,
+    bench_io_write,
+    bench_io_read,
+    bench_clear
 );
 criterion_main!(benches);
