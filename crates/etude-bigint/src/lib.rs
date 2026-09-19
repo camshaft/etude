@@ -77,11 +77,7 @@ impl Big {
     /// The number of bits in the magnitude — `⌊log₂ |self|⌋ + 1`, and `0` for zero. `O(1)` (reads only
     /// the most-significant limb), so it is a cheap size probe for magnitude-thresholded algorithms.
     pub fn bit_len(&self) -> usize {
-        match self.mag.last() {
-            // Canonical form keeps the top limb nonzero, so `leading_zeros` gives the exact bit width.
-            Some(&top) => self.mag.len() * 64 - top.leading_zeros() as usize,
-            None => 0,
-        }
+        bitlen_mag(&self.mag)
     }
 
     /// The number of significant bytes in the magnitude — the length of the little-endian magnitude in
@@ -860,15 +856,27 @@ fn write_decimal_mag<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt::
     if mag.len() <= DECIMAL_RECURSIVE_THRESHOLD {
         return emit_decimal_linear(mag, w);
     }
-    // Power stack: pow[0] = 10^19, pow[i] = pow[i-1]² = 10^(19·2^i). Square up until it strictly
-    // exceeds the value, so the top entry bounds it (value < pow[level]).
+    // Power stack: pow[0] = 10^19, pow[i] = pow[i-1]² = 10^(19·2^i). Grow it until pow.last()² > value;
+    // that pow.last() is the top divisor pow[level-1], and pow.last()² is the bound pow[level].
+    //
+    // pow[level] is used ONLY as the bound (value < pow[level]) — the recursion divides by pow[level-1]
+    // downward and never touches it. So we avoid materializing that last (widest, costliest) squaring
+    // whenever the bit widths alone prove pow.last()² > value: with `top` of `b` bits, `top² ≥ 2^(2b-2)`,
+    // so `2b-2 ≥ value_bits` (i.e. `2b-1 > value_bits`) already forces `top² > value`. Only a one-bit-wide
+    // ambiguous band still needs the actual square computed to decide.
+    let value_bits = bitlen_mag(mag);
     let mut pow: Vec<Vec<u64>> = alloc::vec![alloc::vec![DECIMAL_CHUNK]];
-    while Big::cmp_mag(pow.last().unwrap(), mag) != Ordering::Greater {
+    let level = loop {
         let top = pow.last().unwrap();
+        if 2 * bitlen_mag(top) - 1 > value_bits {
+            break pow.len(); // top² > value proven by width — do not build it; top is pow[level-1]
+        }
         let sq = Big::mul_mag(top, top);
+        if Big::cmp_mag(&sq, mag) == Ordering::Greater {
+            break pow.len(); // ambiguous band: had to build sq (= pow[level]); discard it, keep pow[level-1]
+        }
         pow.push(sq);
-    }
-    let level = pow.len() - 1; // pow[level] > value ≥ pow[level-1]
+    };
     write_decimal_rec(mag, w, true, level, &pow)
 }
 
@@ -1094,6 +1102,15 @@ fn pow10_mag(mut e: u64) -> Vec<u64> {
         }
     }
     result
+}
+
+/// Bit width of a little-endian magnitude — `⌊log₂ value⌋ + 1`, and `0` for the empty (zero) magnitude.
+/// `O(1)`: canonical form keeps the top limb nonzero, so `leading_zeros` on it gives the exact width.
+fn bitlen_mag(m: &[u64]) -> usize {
+    match m.last() {
+        Some(&top) => m.len() * 64 - top.leading_zeros() as usize,
+        None => 0,
+    }
 }
 
 /// Count of trailing zero BITS in a nonzero little-endian magnitude (its 2-adic valuation).

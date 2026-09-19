@@ -53,8 +53,8 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
 | to_decimal_string         | 64b    | 61.9 ns   | 72.2 ns    | **0.86**  |
 | to_decimal_string         | 256b   | 342 ns    | 248 ns     | 1.38      |
-| to_decimal_string         | 1024b  | 3.57 µs   | 2.25 µs    | 1.58      |
-| to_decimal_string         | 4096b  | 22.1 µs   | 21.2 µs    | 1.04      |
+| to_decimal_string         | 1024b  | 3.19 µs   | 2.22 µs    | 1.44      |
+| to_decimal_string         | 4096b  | 17.1 µs   | 21.0 µs    | **0.81**  |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
@@ -70,8 +70,8 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | from_base_10_pow_k        | 4096b  | 2.32 µs   | 4.77 µs    | **0.49**  |
 
 We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), **cmp** (three of four
-tiers), and **to_decimal_string at 64b** (0.86×), and reach parity-or-better on **mul at 256b/1024b**
-and **sub at 256b**.
+tiers), and **to_decimal_string at 64b and 4096b** (0.86× / 0.81×), and reach parity-or-better on
+**mul at 256b/1024b** and **sub at 256b**.
 
 `clone` and `from_i64` are the small-value CONSTRUCTION paths: at 64b both trail num-bigint (2.20× /
 1.77×) because a small `Big` heap-allocates its one-limb `Vec` where num-bigint has a small-value
@@ -255,18 +255,26 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   discard the remainder (fraction reduction, cross-reduction). vs num-bigint's `/`: 64b **0.67×** (beats
   it), 256b 0.99×; vs our own `divmod` it removes one allocation per call. (num-bigint's `/` column is
   quotient-only, so it is faster than its `/`+`%` divmod column — hence the tighter ratios at ≥1024b.)
+- **Skip the wasted top squaring in `to_decimal_string`** — the recursive base-conversion power stack
+  (`pow[i] = pow[i-1]²`) built `pow[level]` only to bound the value (`value < pow[level]`); the recursion
+  divides by `pow[level-1]` downward and never uses it. That top entry is the widest, costliest square —
+  a 64×64-limb multiply at 4096b. Now the loop stops without building it whenever the bit widths already
+  prove `pow.last()² > value` (`2·bitlen(top) − 1 > bitlen(value)` — the common case; only a one-bit-wide
+  band still computes the square). Eliminating that one multiply: 1024b 3.57 → 3.19 µs (1.58× → **1.44×**),
+  4096b 22.1 → 17.1 µs (1.04× → **0.81× — now beats num-bigint**). The 64b/256b tiers use the linear
+  peel, unaffected. (Distinct from — and unlike — the reverted symmetric-squaring attempt, which only
+  made the squarings faster; this removes one entirely.)
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string at 256b/1024b (1.38× / 1.58×).** The peel is alloc-free with a reciprocal ÷10¹⁹,
-   and the recursive path's divmods use the reciprocal `qhat`. The residual is **not** the power-stack
-   squarings: a symmetric schoolbook squaring for the `pow[i] = pow[i-1]²` stack was measured
-   neutral-to-worse (1024b +4.2%, 4096b −1.4%, small tiers unchanged — the stack entries are small, so
-   the three-pass overhead outweighs the ~½ multiply saving, and the stack is a small fraction of the
-   total) and reverted. So the residual is the **recursive split's own overhead — the divmod calls and
-   per-node allocations**, not the squarings. Moving this needs fewer/cheaper splits (e.g. avoiding the
-   wasted top squaring, a leaner node that reuses scratch), not a faster square. 256b is the linear peel
-   (4 limbs, below the 10-limb recursive threshold), a separate constant-factor path.
+1. **to_decimal_string at 256b/1024b (1.38× / 1.44×).** (4096b now **wins** at 0.81× after skipping the
+   wasted top squaring — see landed.) The peel is alloc-free with a reciprocal ÷10¹⁹ and the recursive
+   divmods use the reciprocal `qhat`. Two dead-ends are recorded: making the squarings *faster* (a
+   symmetric schoolbook square) was neutral-to-worse and reverted; *eliminating* the wasted top square
+   landed the win above. The remaining 1024b residual is the recursive split's own overhead — the divmod
+   calls and per-node `(hi, lo)` allocations — so the next lever is a leaner node that reuses scratch
+   buffers, not a faster square. 256b is the linear peel (4 limbs, below the 10-limb recursive threshold),
+   a separate constant-factor path.
 2. **clone / from_i64 / neg / abs at 64b (2.20× / 1.77× / 2.19× / 1.80×).** All four are the same
    small-value path heap-allocating a one-limb `Vec`. An inline small-value magnitude repr fixes them
    together (measured clone 2.20→~1.0×, from_i64 1.77→0.97×) but REGRESSES add/mul unless the arithmetic
