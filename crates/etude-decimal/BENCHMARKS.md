@@ -240,15 +240,17 @@ mantissa), so it has its own cell — `12345678.9012345` (15 significant digits)
 ### `div_exact` — exact division by a terminating divisor (etude only)
 
 `bigdecimal` has no exact-terminating division — its `/` is precision-bounded (that comparison is the
-`div_round` group above). This tracks our exact `div`'s cost across tiers (divisor `2^10`).
+`div_round` group above). This tracks our exact `div`'s cost across tiers (divisor `2^10`). A dividend that
+fits `i128` reduces and factor-strips (gcd, 2s, 5s) entirely in native `u128` — no chain of `Big` divmods —
+so the `64b` tier drops sharply; wider dividends keep the exact `Big` path.
 
-| tier | etude |
-|------|------:|
-| 64b   | 1.213 µs |
-| 256b  | 3.252 µs |
-| 1024b | 16.04 µs |
-| 2048b | 43.79 µs |
-| 4096b | 140.2 µs |
+| tier | etude (before) | etude (now) |
+|------|---------------:|------------:|
+| 64b   | 876 ns   | 208 ns |
+| 256b  | 1.863 µs | 1.851 µs |
+| 1024b | 10.11 µs | 10.11 µs |
+| 2048b | 30.33 µs | 30.33 µs |
+| 4096b | 108.0 µs | 108.0 µs |
 
 ### `new` — construction + canonicalization (etude only)
 
