@@ -1823,6 +1823,18 @@ impl From<Bytes> for ByteRope {
 
 impl FromIterator<Bytes> for ByteRope {
     fn from_iter<I: IntoIterator<Item = Bytes>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+        // When the source already knows it holds more than a flat rope's worth of chunks (the common
+        // `collect` from a slice/`Vec`, whose `size_hint` is exact), build the radix tree in one bulk
+        // bottom-up pass — `extend_blocks` folds whole `FANOUT`-sized leaf blocks straight in, instead
+        // of promoting mid-stream and then re-shuffling. For small or size-unknown inputs, fall back
+        // to the plain flat-tier `push_back` loop (which promotes + batches on its own if it turns out
+        // large), so the cheap streaming path is unchanged.
+        if iter.size_hint().0 > PROMOTE_AT {
+            let mut tree = Tree::new();
+            extend_blocks(&mut tree, iter);
+            return Self::from_tree(tree);
+        }
         let mut rope = Self::new();
         for chunk in iter {
             rope.push_back(chunk);

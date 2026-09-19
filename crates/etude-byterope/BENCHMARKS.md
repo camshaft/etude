@@ -50,7 +50,7 @@ variants are at parity or faster (the rope never touches a tree there).
 | op | size | byterope | bytevec | ratio |
 |----|------|----------|---------|-------|
 | pop_back (drain) | deep | 15.5 µs | 10.0 µs | 1.55 |
-| from_iter | deep | 24.7 µs | 16.5 µs | 1.49 |
+| from_iter | deep | 19.9 µs | 16.9 µs | 1.18 (bulk-built) |
 | builder (put_bytes) | deep | 30.0 µs | 20.8 µs | 1.44 |
 | extend | deep | 22.4 µs | 16.4 µs | 1.37 |
 | push_back | deep | 22.6 µs | 17.7 µs | 1.28 |
@@ -67,7 +67,12 @@ to ~45000×** on the structural operations it exists for — clone, slice, split
 **trails 1.16×–1.55×** on deep-tier *sequential per-chunk* push/pop/drain/build/extend, and is slower
 in relative terms on `chunks_iter`/`get(index)` (though the absolute costs there are tiny).
 
-`from_iter`, `extend`, and `builder(put_bytes)` all funnel through per-chunk `push_back` into the
-promoting tree — a **bulk bottom-up tree build** (construct the radix tree from N chunks at once
-rather than N incremental inserts) is the single highest-leverage optimization and would close most
-of the deep-tier gap at once. That is the next perf target before proposing the bytevec deletion.
+`FromIterator` now **bulk-builds** the radix tree bottom-up when the source size is known to exceed
+the flat tier (the common `collect` from a slice/`Vec`): `from_iter/deep` improved 1.49× → 1.18×
+with `shallow` unchanged. Note that `push_back`'s deep path already batches (it buffers a `FANOUT`
+block in the tail deque and folds it in with one `push_block`), so the residual deep-tier gap on
+`extend` / `builder(put_bytes)` / pop / drain is the **irreducible tree-construction cost** — Arc
+allocations for leaf/branch nodes that a flat `VecDeque<Bytes>` simply does not pay. Shrinking it
+further would require changing the tree node representation itself (e.g. a smaller/tagged node or an
+arena), a much larger rope-core change; the current gap is the expected persistent-structure
+tradeoff for the O(1) clone / O(log) split / zero-copy slice wins above.
