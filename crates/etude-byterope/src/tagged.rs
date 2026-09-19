@@ -50,12 +50,21 @@ macro_rules! static_byterope_tag {
             fn increment(&mut self, len: usize) {
                 if len > 0 {
                     COUNT.fetch_add(len as _, core::sync::atomic::Ordering::Relaxed);
+                    // Track the grow in the handle's own remembered length, or a later Clone/Drop
+                    // would charge/release the STALE initial length and drift the owner budget.
+                    self.0 += len;
                 }
             }
 
             fn decrement(&mut self, len: usize) {
                 if len > 0 {
+                    debug_assert!(
+                        self.0 >= len,
+                        "tag handle decrement {len} exceeds its tracked length {}",
+                        self.0
+                    );
                     COUNT.fetch_sub(len as _, core::sync::atomic::Ordering::Relaxed);
+                    self.0 -= len;
                 }
             }
         }
