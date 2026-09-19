@@ -59,12 +59,21 @@ macro_rules! static_bytevec_tag {
             fn increment(&mut self, len: usize) {
                 if len > 0 {
                     COUNT.fetch_add(len as _, core::sync::atomic::Ordering::Relaxed);
+                    // Track the grow in the handle's own remembered length, or a later Clone/Drop
+                    // would charge/release the STALE initial length and drift the owner budget.
+                    self.0 += len;
                 }
             }
 
             fn decrement(&mut self, len: usize) {
                 if len > 0 {
+                    debug_assert!(
+                        self.0 >= len,
+                        "tag handle decrement {len} exceeds its tracked length {}",
+                        self.0
+                    );
                     COUNT.fetch_sub(len as _, core::sync::atomic::Ordering::Relaxed);
+                    self.0 -= len;
                 }
             }
         }
@@ -249,5 +258,42 @@ mod tests {
 
         assert_eq!(tag_a::Tag::current(), 0);
         assert_eq!(tag_b::Tag::current(), 0);
+    }
+
+    /// A `Tagged` that GROWS after creation must release its CURRENT length on drop, not the stale
+    /// initial length — otherwise grow-then-drop leaks the owner budget forever (the `Handle` used
+    /// to bump `COUNT` in `increment` but never its own remembered length). Mirrors the byterope
+    /// reproducer.
+    #[test]
+    fn handle_drop_releases_current_len_not_initial() {
+        mod tag_d {
+            static_bytevec_tag!(crate::tagged);
+        }
+        let mut t: Tagged<tag_d::Tag> = ByteVec::from(b"abc").tag(&tag_d::Tag);
+        t.push_back(bytes::Bytes::from_static(b"de"));
+        assert_eq!(tag_d::Tag::current(), 5);
+        drop(t);
+        assert_eq!(tag_d::Tag::current(), 0, "grow-then-drop leaked owner budget");
+    }
+
+    /// A clone of a GROWN tagged buffer must charge the CURRENT length (not the stale initial), and a
+    /// shrink-then-drop must release exactly what remains (releasing the stale initial would wrap the
+    /// unsigned budget below zero). Mirrors the byterope reproducer.
+    #[test]
+    fn handle_clone_charges_current_len_and_shrink_does_not_over_release() {
+        mod tag_e {
+            static_bytevec_tag!(crate::tagged);
+        }
+        let mut t: Tagged<tag_e::Tag> = ByteVec::from(b"abc").tag(&tag_e::Tag);
+        t.push_back(bytes::Bytes::from_static(b"de")); // 5 bytes live
+        let c = t.clone(); // must charge the CURRENT 5, not the initial 3
+        assert_eq!(tag_e::Tag::current(), 10, "clone undercharged the owner");
+        drop(c);
+        assert_eq!(tag_e::Tag::current(), 5);
+
+        let _front = t.split_to(4).expect("in bounds"); // 1 byte remains tagged
+        assert_eq!(tag_e::Tag::current(), 1);
+        drop(t); // releasing the stale initial 3 would wrap the budget below zero
+        assert_eq!(tag_e::Tag::current(), 0, "shrink-then-drop over-released (budget wrapped)");
     }
 }
