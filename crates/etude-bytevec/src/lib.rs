@@ -113,11 +113,37 @@ pub mod kind {
     /// Zero runtime cost; implemented only by the marker types in this module.
     pub trait Kind {}
 
+    /// Marker for a kind whose invariant permits *arbitrary* byte writes, so the unchecked mutators
+    /// (`push_back`/`push_front`/`pop_*`/`set_byte`/`replace`/`advance`/`truncate`/…) are safe to
+    /// expose. Implemented for [`Bytes`] only. A validated kind (e.g. [`Utf8`]) is deliberately NOT
+    /// `Mutable`: it can only be mutated through its own invariant-preserving entry points, so an
+    /// unchecked byte write cannot corrupt it — this is what makes the kind marker *validate*
+    /// mutation at the type level.
+    ///
+    /// `ByteVec` (= `Rope<Bytes>`) is `Mutable`, so unchecked writes compile:
+    ///
+    /// ```
+    /// use etude_bytevec::{ByteVec, Bytes};
+    /// let mut v = ByteVec::new();
+    /// v.push_back(Bytes::from_static(b"ok"));
+    /// assert_eq!(v.len(), 2);
+    /// ```
+    ///
+    /// `Rope<Utf8>` is not `Mutable`, so an unchecked `push_back` must NOT compile:
+    ///
+    /// ```compile_fail
+    /// use etude_bytevec::{Rope, Utf8, Bytes};
+    /// let mut s: Rope<Utf8> = Rope::default();
+    /// s.push_back(Bytes::from_static(b"x")); // error: `Utf8: Mutable` is not satisfied
+    /// ```
+    pub trait Mutable: Kind {}
+
     /// The unvalidated kind: any byte sequence is valid. `Rope<Bytes>` is [`ByteVec`](crate::ByteVec).
     #[derive(Debug, Clone, Copy, Default)]
     pub struct Bytes;
 
     impl Kind for Bytes {}
+    impl Mutable for Bytes {}
 
     /// The UTF-8 kind: the rope's *concatenated* byte content is guaranteed valid UTF-8. Individual
     /// chunk boundaries may fall inside a multi-byte codepoint (chunks arrive from arbitrary
@@ -218,7 +244,7 @@ impl Rope<kind::Utf8> {
         if bytes.is_empty() {
             return;
         }
-        self.push_back(Bytes::copy_from_slice(bytes));
+        self.push_chunk_back(Bytes::copy_from_slice(bytes));
     }
 
     /// Inserts `bytes` at byte offset `at`. **Infallible and caller-trusted**: `bytes` must be valid
@@ -294,9 +320,12 @@ impl ByteVec {
 }
 
 /// Kind-agnostic surface shared by every [`Rope`] regardless of content kind: constructors, reads,
-/// and the raw byte-offset structural ops (`slice`, `split_to`, `append`). See also [`ByteVec`]'s
-/// byte-specific mutators (`push_back`/`set_byte`/…). Gating those mutators behind the content kind
-/// (so a validated kind cannot be corrupted by an unchecked write) is a planned follow-up.
+/// and the raw byte-offset structural ops (`slice`, `split_to`, `append`). The unchecked byte
+/// mutators (`push_back`/`push_front`/`pop_*`/`set_byte`/`replace`/`advance`/`truncate`/…) also live
+/// here but are bounded `where K: kind::Mutable`, so they are callable only on a mutable kind (e.g.
+/// [`ByteVec`]) and NOT on a validated kind like `Rope<Utf8>` — the kind marker gates mutation at the
+/// type level. Concatenation (`append`) and the raw split/slice ops stay kind-agnostic (a caller of
+/// the raw offset ops is responsible for choosing invariant-preserving boundaries).
 impl<K> Rope<K> {
     /// Creates an empty rope. Allocation-free. `const` to match the flat buffer's `const fn new`, so
     /// a rope can initialize a `const`/`static`.
@@ -375,8 +404,22 @@ impl<K> Rope<K> {
     fn check_invariants(&self) {}
 
     /// Appends a chunk at the back. Empty chunks are ignored. Amortized O(1).
+    ///
+    /// Available only when the content kind is [`kind::Mutable`] (e.g. [`ByteVec`]): pushing an
+    /// arbitrary chunk could violate a validated kind's invariant, so a validated kind mutates only
+    /// through its own trusted entry points (e.g. `Rope<Utf8>::append_bytes`).
     #[inline]
-    pub fn push_back(&mut self, chunk: Bytes) {
+    pub fn push_back(&mut self, chunk: Bytes)
+    where
+        K: kind::Mutable,
+    {
+        self.push_chunk_back(chunk);
+    }
+
+    /// Kind-agnostic chunk-append primitive backing [`push_back`](Self::push_back); used by the
+    /// concatenation/build paths that must work for any kind. Empty chunks are ignored. Amortized O(1).
+    #[inline]
+    fn push_chunk_back(&mut self, chunk: Bytes) {
         if chunk.is_empty() {
             return;
         }
@@ -405,8 +448,21 @@ impl<K> Rope<K> {
     }
 
     /// Prepends a chunk at the front. Empty chunks are ignored. Amortized O(1).
+    ///
+    /// Available only when the content kind is [`kind::Mutable`] (e.g. [`ByteVec`]); see
+    /// [`push_back`](Self::push_back).
     #[inline]
-    pub fn push_front(&mut self, chunk: Bytes) {
+    pub fn push_front(&mut self, chunk: Bytes)
+    where
+        K: kind::Mutable,
+    {
+        self.push_chunk_front(chunk);
+    }
+
+    /// Kind-agnostic chunk-prepend primitive backing [`push_front`](Self::push_front); used by the
+    /// structural paths that must work for any kind. Empty chunks are ignored. Amortized O(1).
+    #[inline]
+    fn push_chunk_front(&mut self, chunk: Bytes) {
         if chunk.is_empty() {
             return;
         }
@@ -431,8 +487,21 @@ impl<K> Rope<K> {
     }
 
     /// Removes and returns the front chunk, or `None` if empty. O(1) amortized.
+    ///
+    /// Available only when the content kind is [`kind::Mutable`] (e.g. [`ByteVec`]): removing a whole
+    /// chunk falls on an arbitrary byte boundary, which could violate a validated kind's invariant.
     #[inline]
-    pub fn pop_front(&mut self) -> Option<Bytes> {
+    pub fn pop_front(&mut self) -> Option<Bytes>
+    where
+        K: kind::Mutable,
+    {
+        self.pop_chunk_front()
+    }
+
+    /// Kind-agnostic front-chunk-pop primitive backing [`pop_front`](Self::pop_front); used by the
+    /// structural paths (split/consume) that must work for any kind. O(1) amortized.
+    #[inline]
+    fn pop_chunk_front(&mut self) -> Option<Bytes> {
         let chunk = match &mut self.repr {
             Repr::Small { head, additional } => {
                 if head.is_empty() {
@@ -465,8 +534,14 @@ impl<K> Rope<K> {
     }
 
     /// Removes and returns the back chunk, or `None` if empty. O(1) amortized.
+    ///
+    /// Available only when the content kind is [`kind::Mutable`] (e.g. [`ByteVec`]); see
+    /// [`pop_front`](Self::pop_front).
     #[inline]
-    pub fn pop_back(&mut self) -> Option<Bytes> {
+    pub fn pop_back(&mut self) -> Option<Bytes>
+    where
+        K: kind::Mutable,
+    {
         let chunk = match &mut self.repr {
             Repr::Small { head, additional } => {
                 if let Some(c) = additional.pop_back() {
@@ -502,7 +577,10 @@ impl<K> Rope<K> {
     /// Zero-copy at chunk boundaries (the boundary chunk is sliced in place). Returns
     /// [`ByteVecError::OutOfBounds`] if `len` exceeds the rope, matching the flat buffer.
     #[inline]
-    pub fn advance(&mut self, len: usize) -> Result<(), ByteVecError> {
+    pub fn advance(&mut self, len: usize) -> Result<(), ByteVecError>
+    where
+        K: kind::Mutable,
+    {
         if len > self.len {
             return Err(ByteVecError::OutOfBounds(len));
         }
@@ -601,7 +679,10 @@ impl<K> Rope<K> {
     /// mutated in place when unique and path-copied only where shared (FBIP). So the blast radius of a
     /// write on a shared rope is one chunk plus an O(log₃₂) spine path — never the whole buffer.
     /// Beyond the `ByteVec` API (like [`ByteVec::byte_at`]); the Cadenza runtime needs byte writes.
-    pub fn set_byte(&mut self, offset: usize, value: u8) -> Result<(), ByteVecError> {
+    pub fn set_byte(&mut self, offset: usize, value: u8) -> Result<(), ByteVecError>
+    where
+        K: kind::Mutable,
+    {
         if offset >= self.len {
             return Err(ByteVecError::OutOfBounds(offset));
         }
@@ -825,14 +906,15 @@ impl<K> Rope<K> {
         self.check_invariants();
     }
 
-    /// Drains every chunk of `other` into the back of `self` via `push_back` (the slow, chunk-wise
-    /// path — used only for the shallow flat case).
+    /// Drains every chunk of `other` into the back of `self` via the kind-agnostic chunk primitive
+    /// (the slow, chunk-wise path — used only for the shallow flat case). Kind-agnostic, so `append`
+    /// works for any kind (concatenating two valid ropes stays valid).
     fn push_all(&mut self, other: Self) {
         match other.repr {
             Repr::Small { head, additional } => {
-                self.push_back(head);
+                self.push_chunk_back(head);
                 for c in additional {
-                    self.push_back(c);
+                    self.push_chunk_back(c);
                 }
             }
             Repr::Deep(d) => {
@@ -842,15 +924,15 @@ impl<K> Rope<K> {
                     tail,
                 } = *d;
                 for c in head {
-                    self.push_back(c);
+                    self.push_chunk_back(c);
                 }
                 while let Some(block) = tree.pop_front_block() {
                     for c in block {
-                        self.push_back(c);
+                        self.push_chunk_back(c);
                     }
                 }
                 for c in tail {
-                    self.push_back(c);
+                    self.push_chunk_back(c);
                 }
             }
         }
@@ -904,20 +986,21 @@ impl<K> Rope<K> {
             front.check_invariants();
             return Ok(front);
         }
-        // Small: move the (few) chunks, slicing the boundary chunk.
+        // Small: move the (few) chunks, slicing the boundary chunk. Uses the kind-agnostic chunk
+        // primitives so `split_to` works for any kind (the caller owns boundary validity).
         let mut out = Self::new();
         let mut remaining = at;
         while remaining > 0 {
             let front_len = self.front_chunk_len().expect("bytes remaining");
             if front_len <= remaining {
-                let chunk = self.pop_front().expect("front chunk present");
+                let chunk = self.pop_chunk_front().expect("front chunk present");
                 remaining -= chunk.len();
-                out.push_back(chunk);
+                out.push_chunk_back(chunk);
             } else {
-                let mut chunk = self.pop_front().expect("front chunk present");
+                let mut chunk = self.pop_chunk_front().expect("front chunk present");
                 let front = chunk.split_to(remaining);
-                out.push_back(front);
-                self.push_front(chunk);
+                out.push_chunk_back(front);
+                self.push_chunk_front(chunk);
                 remaining = 0;
             }
         }
@@ -976,7 +1059,7 @@ impl<K> Rope<K> {
                     }
                     let lo = start.saturating_sub(cs);
                     let hi = end.min(ce) - cs;
-                    out.push_back(chunk.slice(lo..hi));
+                    out.push_chunk_back(chunk.slice(lo..hi));
                 }
                 out
             }
@@ -997,12 +1080,12 @@ impl<K> Rope<K> {
                 // append the sliced tail chunks — each bounded by the buffered-end capacity.
                 if start < head_bytes {
                     for chunk in slice_deque_chunks(&d.head, 0, start, end).into_iter().rev() {
-                        out.push_front(chunk);
+                        out.push_chunk_front(chunk);
                     }
                 }
                 if end > tree_end {
                     for chunk in slice_deque_chunks(&d.tail, tree_end, start, end) {
-                        out.push_back(chunk);
+                        out.push_chunk_back(chunk);
                     }
                 }
                 out
@@ -1024,6 +1107,7 @@ impl<K> Rope<K> {
     ) -> Result<(), ByteVecError>
     where
         R: etude_buffer::reader::Buffer<Error = core::convert::Infallible>,
+        K: kind::Mutable,
     {
         let (start, end) = resolve_range(&range, self.len)?;
         let removed = end - start;
@@ -1182,7 +1266,10 @@ impl<K> Rope<K> {
     ///
     /// Prefer [`ByteVec::split_to`] when you can keep the chunked form — this forces a copy.
     #[must_use = "consider ByteVec::advance if you don't need the split-off half"]
-    pub fn split_to_copy(&mut self, at: usize) -> Result<Bytes, ByteVecError> {
+    pub fn split_to_copy(&mut self, at: usize) -> Result<Bytes, ByteVecError>
+    where
+        K: kind::Mutable,
+    {
         if at > self.len {
             return Err(ByteVecError::OutOfBounds(at));
         }
@@ -1203,7 +1290,10 @@ impl<K> Rope<K> {
     }
 
     /// Shortens the rope to `len` bytes, dropping the rest from the back. No-op if already shorter.
-    pub fn truncate(&mut self, len: usize) {
+    pub fn truncate(&mut self, len: usize)
+    where
+        K: kind::Mutable,
+    {
         if len == 0 {
             self.clear();
             return;
