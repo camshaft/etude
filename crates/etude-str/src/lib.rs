@@ -205,8 +205,11 @@ impl PartialEq<&str> for Str {
 impl Str {
     /// Drain every buffered byte out of `reader` and validate the result as UTF-8, producing a `Str`.
     ///
-    /// The bytes are collected into a `bytes::BytesMut` and frozen with no copy, so on the common path
-    /// (a single contiguous chunk) the resulting `Str` shares that one allocation.
+    /// Fast path — no copy: when the reader yields all of its bytes in a single `Bytes`- or
+    /// `BytesMut`-backed chunk (the common case, e.g. a `bytes::Bytes` source), the resulting `Str`
+    /// reuses that chunk's allocation directly. A borrowed-slice chunk, or a reader that spans several
+    /// chunks (e.g. a `Chain`), is instead collected into one `bytes::BytesMut` (a single copy) so the
+    /// bytes are contiguous before validation.
     ///
     /// # Errors
     /// Returns [`FromReaderError::Read`] if `reader` errors while draining, or [`FromReaderError::Utf8`]
@@ -215,12 +218,35 @@ impl Str {
     where
         B: etude_buffer::reader::Buffer,
     {
-        let mut out = bytes::BytesMut::new();
-        // `copy_into` drains up to the (unbounded) dest capacity or one contiguous chunk, so loop until
-        // the reader is empty. Guard against a non-advancing implementation so we can never spin forever.
+        use etude_buffer::reader::Chunk;
+
+        // Read the first contiguous chunk (up to the whole reader). Extract OWNED bytes from it so the
+        // reader's mutable borrow is released before we inspect the reader again below.
+        let first: bytes::Bytes = match reader
+            .read_chunk(usize::MAX)
+            .map_err(FromReaderError::Read)?
+        {
+            Chunk::Bytes(b) => b,             // zero-copy: shares the source allocation
+            Chunk::BytesMut(b) => b.freeze(), // zero-copy freeze
+            Chunk::Slice(s) => bytes::Bytes::copy_from_slice(s), // a borrowed slice must be copied out
+        };
+
+        // Common case: that one chunk drained the reader — validate it directly, no accumulation buffer.
+        if reader.buffer_is_empty() {
+            return Str::from_utf8(first).map_err(FromReaderError::Utf8);
+        }
+
+        // Multi-chunk reader: accumulate the first chunk plus the rest into one contiguous buffer.
+        let mut out = bytes::BytesMut::with_capacity(first.len() + reader.buffered_len());
+        out.extend_from_slice(&first);
         while !reader.buffer_is_empty() {
             let before = reader.buffered_len();
-            reader.copy_into(&mut out).map_err(FromReaderError::Read)?;
+            let chunk = reader
+                .read_chunk(usize::MAX)
+                .map_err(FromReaderError::Read)?;
+            out.extend_from_slice(&chunk);
+            drop(chunk); // release the reader borrow before re-inspecting buffered_len below
+            // Guard against a non-advancing implementation so we can never spin forever.
             if reader.buffered_len() == before {
                 break;
             }
@@ -431,6 +457,22 @@ mod buffer_tests {
             Str::from_reader(&mut r),
             Err(FromReaderError::Utf8(_))
         ));
+    }
+
+    #[test]
+    fn from_reader_single_bytes_chunk_is_zero_copy() {
+        // A single `Bytes`-backed chunk that drains the reader must be REUSED, not copied — the produced
+        // Str aliases the source allocation. Locks in the fast path (and the doc's no-copy claim).
+        let src = Bytes::from_static("zero copy path".as_bytes());
+        let ptr = src.as_ptr();
+        let mut r = src;
+        let s = Str::from_reader(&mut r).unwrap();
+        assert_eq!(s, "zero copy path");
+        assert_eq!(
+            s.as_bytes().as_ptr(),
+            ptr,
+            "single Bytes chunk must be reused without a copy"
+        );
     }
 
     #[test]
