@@ -11,13 +11,15 @@
 //! rounding-capable operation always takes explicit rounding arguments — there is no default). Correctness
 //! is pinned by a differential test against `bigdecimal` (a dev-dependency) as the reference.
 //!
-//! A value is built either numerically from a [`etude_bigint::Big`] coefficient and an exponent via
-//! [`Decimal::new`] (and the [`Decimal::from_i64`] / [`Decimal::from_bigint`] conveniences), or PARSED
-//! from a decimal number literal via [`Decimal::parse`] / [`Decimal::from_str`]. Parsing owns exactly the
-//! decimal-number-literal grammar and consumes any `Iterator<Item = u8>`, so a rope- or chunk-backed
-//! (non-contiguous) byte source is parsed in place with no flattening; [`Decimal::parse_prefix`] parses a
-//! number embedded in a larger byte stream (a text decoder such as a JSON tokenizer hands its chunk
-//! cursor straight in — this crate parses the *number*, the decoder owns the surrounding structure).
+//! `Decimal` is a pure VALUE type: it holds a number and does the math, and carries NO byte-grammar
+//! parser — so the same value type is reusable across data formats (JSON, protobuf, …), each of which
+//! owns its own parsing. A value is built numerically from a [`etude_bigint::Big`] coefficient and an
+//! exponent via [`Decimal::new`] (and the [`Decimal::from_i64`] / [`Decimal::from_bigint`] conveniences),
+//! or from a format decoder's already-scanned pieces via [`Decimal::from_components`] (sign + coefficient
+//! digit bytes + exponent — the decoder scans the number, `Decimal` just assembles the value; the digit
+//! stream may be a non-contiguous rope/chunk source, consumed with no flattening). [`Decimal::from_str`]
+//! ([`FromStr`]) is a self-contained convenience for standalone use and tests — it is the one place a
+//! literal grammar is scanned, and it is not the format-integration path.
 //!
 //! # Representation and the canonical-form invariant
 //! A [`Decimal`] is the exact value `coeff * 10^exp`, where `coeff` is an [`etude_bigint::Big`] signed
@@ -34,8 +36,7 @@
 //!
 //! The fields are PRIVATE and not part of the stable API — the coefficient repr and the exponent width
 //! may change. Construct through [`Decimal::zero`], [`Decimal::from_i64`], [`Decimal::from_bigint`],
-//! [`Decimal::new`], or by parsing via [`Decimal::parse`]/[`Decimal::parse_prefix`]/[`Decimal::from_str`];
-//! inspect through
+//! [`Decimal::new`], [`Decimal::from_components`], or [`Decimal::from_str`]; inspect through
 //! [`Decimal::coefficient`], [`Decimal::exponent`], [`Decimal::is_zero`], [`Decimal::is_negative`],
 //! [`Decimal::is_integer`], [`Decimal::to_f64`], the [`Ord`]/[`PartialOrd`] comparison, and `Display` /
 //! [`Decimal::write_to`] (the allocation-conscious rendering path — write straight into a
@@ -330,38 +331,40 @@ impl Decimal {
         }
     }
 
-    /// Parse a decimal number literal from a byte stream into an exact `Decimal`, or `None` if the whole
-    /// stream is not a well-formed literal. The stream need NOT be contiguous — any `IntoIterator<Item =
-    /// u8>` works, so a rope- or chunk-backed byte source is parsed in place with no flattening. The
-    /// grammar is
+    /// Build a `Decimal` from a format decoder's already-scanned pieces: the `negative` sign, the
+    /// coefficient's significant digits (the integer part followed by the fractional part, concatenated,
+    /// ASCII `b'0'..=b'9'`, with no sign and no `.`) as any `IntoIterator<Item = u8>`, and the FINAL
+    /// base-10 `exp` (the decoder folds the fractional-point shift into it). The value is
+    /// `(-1)^negative * digits * 10^exp`. The digit stream need NOT be contiguous, so a rope-/chunk-backed
+    /// source is consumed in place with no flattening. Returns `None` if a byte is not an ASCII digit.
     ///
-    /// ```text
-    /// -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
-    /// ```
-    ///
-    /// so a leading `+`, a redundant leading zero (`01`), a bare `.5`, a trailing `1.`, a lone `-`, an
-    /// empty exponent (`1e`), and any surrounding whitespace or trailing bytes are all REJECTED. The
-    /// decode is LOSSLESS. An exponent of more than 18 digits (beyond `i64`) is rejected rather than
-    /// silently wrapping. To parse a number embedded in a larger stream — stopping at the first byte that
-    /// is not part of the number — use [`Decimal::parse_prefix`].
-    pub fn parse<I: IntoIterator<Item = u8>>(bytes: I) -> Option<Decimal> {
-        let mut it = bytes.into_iter().peekable();
-        let d = Decimal::parse_prefix(&mut it)?;
-        if it.peek().is_some() {
-            return None; // trailing bytes after the number literal
+    /// This is the constructor a FORMAT crate (etude-json, …) calls after IT has scanned a number:
+    /// `Decimal` is a pure value type and does NO byte-grammar parsing of its own (so the same value type
+    /// is reusable across formats — see the module docs). A caller that already holds a coefficient
+    /// [`Big`] can use [`Decimal::new`] directly instead.
+    pub fn from_components<I: IntoIterator<Item = u8>>(
+        negative: bool,
+        digits: I,
+        exp: i64,
+    ) -> Option<Decimal> {
+        let mut coeff = CoeffBuilder::new();
+        for d in digits {
+            if !d.is_ascii_digit() {
+                return None;
+            }
+            coeff.push(d);
         }
-        Some(d)
+        let mag = coeff.finish();
+        let coeff = if negative { mag.neg() } else { mag };
+        Some(Decimal::new(coeff, exp))
     }
 
-    /// Parse the maximal decimal-number-literal PREFIX from a peekable byte iterator, stopping at (and NOT
-    /// consuming) the first byte that is not part of the number — leaving the iterator positioned right
-    /// after the literal. This is the entry point for a decoder embedding a number in a larger chunked
-    /// byte stream (e.g. a JSON tokenizer): it advances the shared cursor across chunk boundaries with no
-    /// flattening. Returns `None` if no well-formed number literal starts at the cursor. Grammar and
-    /// losslessness are as for [`Decimal::parse`].
-    pub fn parse_prefix<I: Iterator<Item = u8>>(
-        it: &mut core::iter::Peekable<I>,
-    ) -> Option<Decimal> {
+    /// Scan a decimal-number-literal prefix from a peekable byte iterator, stopping at the first byte that
+    /// is not part of the number. PRIVATE: the grammar `-?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?`
+    /// lives here ONLY to back the standalone [`FromStr`] convenience. A format decoder does NOT use it —
+    /// value types carry no byte-grammar; the decoder scans bytes itself and calls
+    /// [`Decimal::from_components`].
+    fn scan_number<I: Iterator<Item = u8>>(it: &mut core::iter::Peekable<I>) -> Option<Decimal> {
         // Optional leading minus (a leading plus is not accepted).
         let neg = if it.peek() == Some(&b'-') {
             it.next();
@@ -630,7 +633,7 @@ impl Decimal {
 
     /// Write the canonical decimal rendering DIRECTLY into a [`core::fmt::Write`] sink — the
     /// allocation-conscious rendering path that [`Display`](core::fmt::Display) uses (no intermediate `String` is built for
-    /// the framing). The output is always a valid decimal literal and re-parses via [`Decimal::parse`]
+    /// the framing). The output is always a valid decimal literal and re-parses via [`Decimal::from_str`]
     /// to the same value: a plain (point) form for modest exponents, and a bounded `<digits>e<exp>`
     /// scientific form for large magnitudes so the output stays small.
     ///
@@ -815,7 +818,7 @@ impl core::fmt::Display for Decimal {
 }
 
 /// Parse error for [`Decimal::from_str`] / [`str::parse`]. Carries no detail — the input was not a
-/// well-formed decimal literal (see [`Decimal::parse`] for the grammar).
+/// well-formed decimal literal (see [`Decimal::from_str`] for the grammar).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ParseDecimalError;
 
@@ -829,7 +832,12 @@ impl FromStr for Decimal {
     type Err = ParseDecimalError;
 
     fn from_str(s: &str) -> Result<Decimal, ParseDecimalError> {
-        Decimal::parse(s.bytes()).ok_or(ParseDecimalError)
+        let mut it = s.bytes().peekable();
+        let d = Decimal::scan_number(&mut it).ok_or(ParseDecimalError)?;
+        if it.next().is_some() {
+            return Err(ParseDecimalError); // trailing bytes after the number literal
+        }
+        Ok(d)
     }
 }
 

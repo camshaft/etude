@@ -5,7 +5,7 @@
 //!
 //! The safety net is a DIFFERENTIAL ORACLE against `bigdecimal`'s `BigDecimal` (the arbitrary-precision
 //! reference): a single growing harness generates candidate byte-strings, parses them with BOTH our
-//! [`Decimal::parse`] and `BigDecimal`, and asserts they agree on the exact value (compared as the
+//! [`Decimal::from_str`] and `BigDecimal`, and asserts they agree on the exact value (compared as the
 //! canonical `(sign, magnitude-digits, exponent)` triple), that our output re-parses to the same value
 //! (round-trip), and that our comparison sign matches the reference's on every pair. When a case can't
 //! be expressed here, GROW this harness rather than adding a one-off test.
@@ -105,10 +105,7 @@ fn rejects_malformed() {
         "1.e5", "1.5e", "abc", "0x1", " 1", "1 ", "1,000", "--1", "1-", "Infinity", "NaN", ".",
         "1.2e3.4", "0..1", "+0",
     ] {
-        assert!(
-            Decimal::parse(bad.bytes()).is_none(),
-            "{bad:?} must be rejected"
-        );
+        assert!(Decimal::from_str(bad).is_err(), "{bad:?} must be rejected");
     }
     // Leading zero is only allowed as a bare "0" (optionally with a fraction/exponent).
     assert!(Decimal::from_str("0.5").is_ok());
@@ -117,54 +114,47 @@ fn rejects_malformed() {
 }
 
 #[test]
-fn parse_over_non_contiguous_bytes() {
-    // The parser consumes any Iterator<Item = u8>, so a NON-CONTIGUOUS (chunk-backed) source parses in
-    // place with no flattening — the whole point of the API. Feed each literal as split chunks and check
-    // it equals the contiguous parse.
-    for s in [
-        "1.5", "-3.14", "1500", "0.001", "123e4", "-7", "1e-1000", "0", "-0.0",
-    ] {
-        let contiguous = Decimal::from_str(s).unwrap();
-        // Split the bytes into arbitrary chunks and chain their iterators (a stand-in for rope leaves).
-        let bytes = s.as_bytes();
-        for split in 1..bytes.len().max(2) {
-            let (a, b) = bytes.split_at(split.min(bytes.len()));
-            let chunked = a.iter().copied().chain(b.iter().copied());
-            assert_eq!(
-                Decimal::parse(chunked).unwrap(),
-                contiguous,
-                "chunked parse of {s:?} split at {split} differs"
-            );
-        }
+fn from_components_builds_the_value() {
+    // The value constructor a format decoder calls after scanning: (sign, coefficient digit bytes, final
+    // exponent). value = (-1)^neg * digits * 10^exp. Equivalent to the literal the decoder scanned.
+    // (neg, digits, exp, expected literal)
+    let cases: &[(bool, &[u8], i64, &str)] = &[
+        (false, b"15", -1, "1.5"),
+        (true, b"314", -2, "-3.14"),
+        (false, b"15", 2, "1500"), // 15 * 10^2
+        (false, b"1", -3, "0.001"),
+        (false, b"123", 4, "123e4"), // 1230000
+        (true, b"7", 0, "-7"),
+        (false, b"", 5, "0"), // empty coefficient is zero
+        (true, b"0", 0, "0"), // sign on zero dropped (canonical)
+        (
+            false,
+            b"123456789012345678901234567890",
+            0,
+            "123456789012345678901234567890",
+        ),
+    ];
+    for &(neg, digits, exp, expected) in cases {
+        let built = Decimal::from_components(neg, digits.iter().copied(), exp).unwrap();
+        assert_eq!(
+            built,
+            Decimal::from_str(expected).unwrap(),
+            "from_components {neg} {digits:?} e{exp}"
+        );
     }
-}
-
-#[test]
-fn parse_prefix_stops_at_delimiter() {
-    // parse_prefix reads the maximal number and STOPS at (does not consume) the first non-number byte,
-    // leaving the cursor positioned there — the entry point for embedding a number in a larger stream.
-    let mut it = b"12.5,rest".iter().copied().peekable();
-    let d = Decimal::parse_prefix(&mut it).unwrap();
-    assert_eq!(d, Decimal::from_str("12.5").unwrap());
-    // The delimiter and the remainder are still available to the caller.
-    assert_eq!(it.next(), Some(b','));
-    let rest: alloc::vec::Vec<u8> = it.collect();
-    assert_eq!(&rest, b"rest");
-
-    // Stops at a space, an exponent-less number, and end-of-stream alike.
-    let mut it = b"42 ".iter().copied().peekable();
-    assert_eq!(
-        Decimal::parse_prefix(&mut it).unwrap(),
-        Decimal::from_i64(42)
-    );
-    assert_eq!(it.next(), Some(b' '));
-
-    // A leading non-number yields None without consuming anything meaningful.
-    let mut it = b"abc".iter().copied().peekable();
-    assert!(Decimal::parse_prefix(&mut it).is_none());
-
-    // `parse` (whole-stream) rejects the trailing bytes that parse_prefix would leave.
-    assert!(Decimal::parse(b"12.5,rest".iter().copied()).is_none());
+    // The digit stream may be NON-CONTIGUOUS (rope/chunk-backed): splitting it must not change the value.
+    let digits = b"123456789012345678901234567890";
+    for split in 0..=digits.len() {
+        let (a, b) = digits.split_at(split);
+        let chunked = a.iter().copied().chain(b.iter().copied());
+        assert_eq!(
+            Decimal::from_components(false, chunked, -5).unwrap(),
+            Decimal::from_components(false, digits.iter().copied(), -5).unwrap(),
+            "chunked digit stream split at {split} differs"
+        );
+    }
+    // A non-digit byte is rejected (the decoder is expected to pass validated digits).
+    assert!(Decimal::from_components(false, *b"1a2", 0).is_none());
 }
 
 #[test]
@@ -459,15 +449,15 @@ fn map_to_charset(raw: &[u8]) -> String {
 /// Parse `s` with both implementations and, when we accept it, assert the reference agrees on the value
 /// and that our rendering round-trips. Returns the parsed pair when both accept, for downstream cmp.
 fn check_parse(s: &str) -> Option<(Decimal, BigDecimal)> {
-    let ours = Decimal::parse(s.bytes());
+    let ours = Decimal::from_str(s).ok();
     let refs = BigDecimal::from_str(s).ok();
     match (ours, refs) {
         (Some(d), Some(b)) => {
             assert_same(&d, &b);
             // Round-trip: our own output re-parses to the same value in both implementations.
             let rendered = d.to_string();
-            let reparsed = Decimal::parse(rendered.bytes())
-                .unwrap_or_else(|| panic!("our output {rendered:?} must re-parse (from {s:?})"));
+            let reparsed = Decimal::from_str(&rendered)
+                .unwrap_or_else(|_| panic!("our output {rendered:?} must re-parse (from {s:?})"));
             assert_eq!(
                 d, reparsed,
                 "round-trip changed value: {s:?} -> {rendered:?}"
@@ -558,14 +548,19 @@ fn differential_structured_numbers() {
                     has_exp.then_some(exp as i64),
                 );
                 if let Some(pair) = check_parse(&s) {
-                    // Parsing the SAME literal over a non-contiguous (split) byte stream must match the
-                    // contiguous parse exactly — the chunk-cursor path a decoder feeds.
-                    let bytes = s.as_bytes();
-                    let mid = bytes.len() / 2;
-                    let (a, b) = bytes.split_at(mid);
-                    let chunked = Decimal::parse(a.iter().copied().chain(b.iter().copied()))
-                        .expect("valid literal parses over chunks");
-                    assert_eq!(chunked, pair.0, "chunked parse != contiguous for {s}");
+                    // Round-trip through the value constructor a decoder uses: decompose the value into
+                    // (sign, coefficient digits, exponent) and rebuild via from_components — must match.
+                    let digits = pair.0.coefficient().abs().to_decimal_string();
+                    let rebuilt = Decimal::from_components(
+                        pair.0.is_negative(),
+                        digits.bytes(),
+                        pair.0.exponent(),
+                    )
+                    .expect("digits are valid");
+                    assert_eq!(
+                        rebuilt, pair.0,
+                        "from_components round-trip != value for {s}"
+                    );
                     parsed.push(pair);
                 }
             }
@@ -672,7 +667,7 @@ fn differential_division() {
                     has_frac.then_some(frac),
                     has_exp.then_some(exp as i64),
                 );
-                if let (Some(d), Ok(b)) = (Decimal::parse(s.bytes()), BigDecimal::from_str(&s)) {
+                if let (Ok(d), Ok(b)) = (Decimal::from_str(&s), BigDecimal::from_str(&s)) {
                     vals.push((d, b));
                 }
             }
