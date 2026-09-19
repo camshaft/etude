@@ -1,6 +1,26 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! [`ByteVec`] — a byte buffer stored as a sequence of [`Bytes`] chunks.
+//!
+//! Holding a run of bytes as separate reference-counted chunks lets bytes be appended, split, and
+//! consumed by moving whole chunks rather than copying their contents — a chunk that arrived as a
+//! `Bytes` stays that `Bytes` until it is actually needed contiguously. This suits accumulating
+//! network reads or forwarding payloads, where a single contiguous `BytesMut` would copy on every
+//! write.
+//!
+//! The crate provides:
+//! - [`ByteVec`] itself, with `push`/`pop`/`split` and iteration.
+//! - [`Builder`], which buffers small writes into a contiguous head and holds large chunks by
+//!   reference before producing a `ByteVec`.
+//! - [`Tagged`] and the [`static_bytevec_tag!`] macro, for tracking outstanding buffered bytes
+//!   against an owner (e.g. a memory-accounting counter).
+//!
+//! `ByteVec` and `Builder` implement the [`etude_buffer`] reader/writer `Buffer` traits, so they
+//! compose with that crate's copy-avoiding adapters.
+
+#![deny(missing_docs)]
+
 use core::fmt;
 use etude_buffer::{
     reader::{self, Buffer as _, Chunk, Infallible as _},
@@ -17,9 +37,12 @@ pub use builder::Builder;
 pub use bytes::{Bytes, BytesMut};
 pub use tagged::Tagged;
 
+/// An index or range operation that fell outside a [`ByteVec`]'s bounds.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ByteVecError {
+    /// An index or split point exceeded the buffer's length; carries the offending index.
     OutOfBounds(usize),
+    /// A range `start..end` fell outside the buffer's length; carries `start` and `end`.
     OutOfBoundsRange(usize, usize),
 }
 
@@ -71,6 +94,7 @@ pub struct ByteVec {
 }
 
 impl ByteVec {
+    /// Creates an empty `ByteVec`.
     #[inline]
     pub const fn new() -> Self {
         Self {
@@ -80,6 +104,9 @@ impl ByteVec {
         }
     }
 
+    /// Creates an empty `ByteVec` with room for `cap` chunks before the chunk list reallocates.
+    ///
+    /// `cap` counts chunks, not bytes; each pushed [`Bytes`] is one chunk regardless of its size.
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
         Self {
@@ -89,6 +116,10 @@ impl ByteVec {
         }
     }
 
+    /// Creates a [`Builder`] whose head buffer starts at `chunk_capacity` bytes.
+    ///
+    /// A builder is the efficient way to accumulate many small writes: they coalesce into the
+    /// contiguous head buffer instead of becoming one chunk each.
     #[inline]
     pub fn builder(chunk_capacity: usize) -> builder::Builder {
         builder::Builder::new(chunk_capacity)
@@ -620,6 +651,9 @@ impl ByteVec {
         out
     }
 
+    /// Wraps this buffer in a [`Tagged`] so its bytes are counted against `owner`.
+    ///
+    /// See [`tagged`] for the accounting model.
     #[inline]
     pub fn tag<O: tagged::Owner>(self, owner: &O) -> tagged::Tagged<O> {
         tagged::Tagged::new(self, owner)
@@ -956,17 +990,22 @@ impl IntoIterator for ByteVec {
     }
 }
 
+/// An iterator over a [`ByteVec`]'s chunks, borrowing each as `&Bytes`.
+///
+/// Created by [`ByteVec::chunks`]. Yields chunks in order without copying.
 pub struct ChunkIter<'a> {
     head: Option<&'a Bytes>,
     tail: std::collections::vec_deque::Iter<'a, Bytes>,
 }
 
 impl ChunkIter<'_> {
+    /// Returns the number of chunks remaining to be yielded.
     #[inline]
     pub fn len(&self) -> usize {
         self.size_hint().0
     }
 
+    /// Returns `true` when no chunks remain.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.head.is_none()
@@ -991,6 +1030,11 @@ impl<'a> Iterator for ChunkIter<'a> {
     }
 }
 
+/// A cloneable reader over a borrowed [`ByteVec`].
+///
+/// Created by [`ByteVec::reader`]. It borrows the chunk list and clones chunks lazily as they are
+/// read (each clone is a refcount bump), leaving the source `ByteVec` untouched. Implements
+/// [`etude_buffer::reader::Buffer`], so it drains into any writer without copying chunk contents.
 #[derive(Clone)]
 pub struct Reader<'a> {
     head: Bytes,
@@ -999,11 +1043,13 @@ pub struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    /// Returns the number of bytes remaining to be read.
     #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns `true` when no bytes remain to be read.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -1027,6 +1073,10 @@ impl Reader<'_> {
     }
 }
 
+/// An owning iterator that drains a [`ByteVec`]'s chunks.
+///
+/// Created by [`ByteVec::into_iter`]. Consumes the buffer, yielding each chunk as an owned
+/// [`Bytes`].
 pub struct DrainIter {
     head: Bytes,
     tail: VecDeque<Bytes>,
@@ -1034,11 +1084,13 @@ pub struct DrainIter {
 }
 
 impl DrainIter {
+    /// Returns the number of bytes remaining across the undrained chunks.
     #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns `true` when no bytes remain.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len == 0
