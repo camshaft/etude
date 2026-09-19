@@ -18,6 +18,10 @@ impl<'a, B> Buf<'a, B>
 where
     B: bytes::Buf,
 {
+    /// Wraps a mutable [`bytes::Buf`] as a reader [`Buffer`].
+    ///
+    /// Bytes read through the wrapper are advanced out of `buf` (on the next read, or when the
+    /// wrapper is dropped), so the underlying `buf` reflects what has been consumed.
     #[inline]
     pub fn new(buf: &'a mut B) -> Self {
         Self { buf, pending: 0 }

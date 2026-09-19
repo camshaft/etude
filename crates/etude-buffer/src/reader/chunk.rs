@@ -4,14 +4,19 @@
 use crate::{reader::Buffer, writer};
 use bytes::{Bytes, BytesMut};
 
-/// Concrete chunk of bytes
+/// A contiguous run of bytes handed out by a reader.
 ///
-/// This can be returned to allow the caller to defer copying the data until later.
+/// A chunk is either borrowed from the source or an owned reference-counted buffer, so a caller
+/// can forward it to a writer — deferring or avoiding a copy — rather than copying it eagerly.
+/// It is `#[must_use]` because dropping a chunk without placing it discards its bytes.
 #[derive(Clone, Debug)]
 #[must_use = "Chunk should not be discarded"]
 pub enum Chunk<'a> {
+    /// Bytes borrowed directly from the source.
     Slice(&'a [u8]),
+    /// An owned, reference-counted [`Bytes`] buffer, adoptable without copying.
     Bytes(Bytes),
+    /// An owned, mutable [`BytesMut`] buffer, adoptable without copying.
     BytesMut(BytesMut),
 }
 
@@ -23,6 +28,7 @@ impl Default for Chunk<'_> {
 }
 
 impl Chunk<'_> {
+    /// Returns an empty chunk (a borrowed empty slice).
     #[inline]
     pub fn empty() -> Self {
         Self::Slice(&[])

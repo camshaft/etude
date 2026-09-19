@@ -11,6 +11,8 @@ pub struct Tracked<'a, S: Buffer + ?Sized> {
 }
 
 impl<'a, S: Buffer + ?Sized> Tracked<'a, S> {
+    /// Wraps `storage` to count bytes written through it. Prefer
+    /// [`Buffer::track_write`](crate::writer::Buffer::track_write).
     #[inline]
     pub fn new(storage: &'a mut S) -> Self {
         Self {

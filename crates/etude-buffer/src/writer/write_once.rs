@@ -14,6 +14,8 @@ pub struct WriteOnce<'a, S: Buffer + ?Sized> {
 }
 
 impl<'a, S: Buffer + ?Sized> WriteOnce<'a, S> {
+    /// Wraps `storage` to accept a single write. Prefer
+    /// [`Buffer::write_once`](crate::writer::Buffer::write_once).
     #[inline]
     pub fn new(storage: &'a mut S) -> Self {
         Self {

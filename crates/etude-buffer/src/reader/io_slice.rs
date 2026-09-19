@@ -18,6 +18,8 @@ impl<'a, T> IoSlice<'a, T>
 where
     T: core::ops::Deref<Target = [u8]>,
 {
+    /// Wraps a slice of byte segments as one vectored reader, presenting them in order as a
+    /// single logical byte stream. Empty segments are skipped.
     #[inline]
     pub fn new(buf: &'a [T]) -> Self {
         let mut len = 0;
