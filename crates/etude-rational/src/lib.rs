@@ -27,6 +27,7 @@
 
 extern crate alloc;
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use core::cmp::Ordering;
 use etude_bigint::Big;
@@ -554,14 +555,16 @@ fn big_from_i128(v: i128) -> Big {
     }
 }
 
-/// `n / g` where `g` is a known divisor of `n`. Skips the division entirely when `g == 1` (an O(1),
-/// allocation-free `bit_len() == 1` check — `g` is a non-negative gcd, so `bit_len() == 1` ⟺ `g == 1`);
-/// otherwise uses `Big::div_exact` (quotient only — no discarded-remainder allocation).
-fn reduce_by(n: &Big, g: &Big) -> Big {
+/// `n / g` where `g` is a known divisor of `n`, WITHOUT allocating when the division is a no-op: returns a
+/// borrow of `n` when `g == 1` (an O(1), allocation-free `bit_len() == 1` check — `g` is a non-negative gcd,
+/// so `bit_len() == 1` ⟺ `g == 1`), else the owned `Big::div_exact` quotient (no discarded remainder). The
+/// borrow avoids cloning the operand in the common coprime case, where the caller only reads it (to
+/// multiply) and would otherwise drop the clone immediately.
+fn reduce_ref<'a>(n: &'a Big, g: &Big) -> Cow<'a, Big> {
     if g.bit_len() == 1 {
-        n.clone()
+        Cow::Borrowed(n)
     } else {
-        n.div_exact(g).expect("g is a nonzero divisor of n")
+        Cow::Owned(n.div_exact(g).expect("g is a nonzero divisor of n"))
     }
 }
 
@@ -569,12 +572,13 @@ fn reduce_by(n: &Big, g: &Big) -> Big {
 /// nonzero). Cancels `g1 = gcd(a,d)` and `g2 = gcd(c,b)` before multiplying, returning `((a/g1)*(c/g2),
 /// (b/g2)*(d/g1))` — which is already in lowest terms (the four cross-pairs are pairwise coprime), so no
 /// further gcd-normalize is needed. `gcd` is sign-agnostic, so the quotients keep their operands' signs;
-/// the caller owns any final sign placement.
+/// the caller owns any final sign placement. When a cross-gcd is 1 (the common coprime case) the factor is
+/// borrowed rather than cloned — only the two products are allocated.
 fn cross_reduce_mul(a: &Big, b: &Big, c: &Big, d: &Big) -> (Big, Big) {
     let g1 = a.gcd(d); // gcd(|a|, |d|)
     let g2 = c.gcd(b); // gcd(|c|, |b|)
-    let num = reduce_by(a, &g1).mul(&reduce_by(c, &g2));
-    let den = reduce_by(b, &g2).mul(&reduce_by(d, &g1));
+    let num = reduce_ref(a, &g1).mul(&reduce_ref(c, &g2));
+    let den = reduce_ref(b, &g2).mul(&reduce_ref(d, &g1));
     (num, den)
 }
 
