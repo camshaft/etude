@@ -17,6 +17,18 @@ Numbers below are medians from one `aarch64-linux` run and are **indicative, not
 absolute times vary by machine; what matters is the **ratio to num-rational** and its movement as
 optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (**bold**), `>1.00` = slower.
 
+## Current — gcd-free `recip` (slice 3)
+
+Reciprocal is now an O(limbs) swap+sign instead of a full gcd-normalize (a canonical rational is already
+coprime), collapsing the recip row from 60–1651× slower to **parity-or-better** (flat ~30 ns across all
+tiers) — it now beats num-rational at 256b/1024b. All other rows are unchanged from the baseline below.
+
+| op         | tier   | etude     | num-rational | ratio     | vs baseline |
+|------------|--------|-----------|--------------|-----------|-------------|
+| recip      | 64b    | 31.0 ns   | 15.1 ns      | 2.05      | 909 ns → 31 ns (29× faster) |
+| recip      | 256b   | 29.7 ns   | 32.4 ns      | **0.92**  | 9.12 µs → 30 ns (307× faster) |
+| recip      | 1024b  | 32.6 ns   | 34.4 ns      | **0.95**  | 57.3 µs → 33 ns (1759× faster) |
+
 ## Baseline — faithful port (single-gcd normalize, cross-multiply arithmetic)
 
 | op         | tier   | etude     | num-rational | ratio     |
@@ -48,11 +60,11 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 The port already **wins the small (64b) tier across the board** and beats num-rational on cmp at 64b/256b
 (its cmp allocates; ours cross-multiplies in place). The measured gaps, in priority order:
 
-1. **`recip` — 60–1651× slower (the glaring one).** We call the full gcd-normalize on `den/num`, but a
-   canonical rational's numerator and denominator are ALREADY coprime — so `1/(a/b) = b/a` is already in
-   lowest terms (modulo moving the sign onto the new numerator). num-rational's recip is O(1) swap+sign.
-   Fix: a gcd-free `recip` (and the same insight guards any op whose inputs are known coprime). Expected
-   to collapse this row to ~parity or better. **Next slice.**
+1. ~~**`recip` — 60–1651× slower (the glaring one).**~~ **DONE (slice 3):** gcd-free `recip` — a canonical
+   rational is already coprime, so `1/(a/b) = b/a` is already in lowest terms (only the sign moves onto the
+   new numerator). Now an O(limbs) swap, flat ~30 ns, and beats num-rational at 256b/1024b. Residual: at
+   64b we are 2.05× (clone-bound — two small `Vec` clones); a future micro-opt could avoid a clone. The
+   same "inputs known coprime ⇒ no gcd" insight guards any future such op.
 2. **`cmp` at 1024b — 4.42× slower.** We always do two full-width `num*den` cross-multiplies. num-rational
    compares integer/floor parts first and only falls back to full cross-multiplication when they tie, so
    it is far cheaper when the values differ in magnitude. Fix: a cheaper comparison that avoids the full
