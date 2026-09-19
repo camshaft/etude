@@ -1,20 +1,50 @@
 <!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# `etude-bytevec` — tiered rope vs. the flat deque it replaced (historical scoreboard)
+# `etude-bytevec` — performance scoreboard
 
-`etude-bytevec` was reimplemented from a flat `VecDeque<Bytes>` deque to a tiered relaxed-radix
-(RRB) byte rope. This is the head-to-head scoreboard that justified that switch — the **rope** (the
-current implementation) vs. the **flat deque** (the previous implementation, now removed). It is
-kept as the design rationale and as the record of the one accepted performance exception
-(`chunks_iter`, below).
+`etude-bytevec` is a tiered relaxed-radix (RRB) byte rope. This file has two parts: the **current
+live scoreboard** (rope vs. a naive `VecDeque<Bytes>`, reproducible from `benches/compare.rs`), and
+the **historical scoreboard** (rope vs. the flat `VecDeque<Bytes>` deque this crate was reimplemented
+from — kept as the design rationale + the record of the one accepted performance exception,
+`chunks_iter`).
 
-- **Measured on:** aarch64 Linux, jemalloc, release.
-- **Sizes:** `shallow` = 4 chunks (the rope stays in its flat `Small` tier); `deep` = 1000 chunks
-  (past the promote threshold — exercises the radix tree). Chunks are 1400 B (MTU-ish).
-- **Ratio** = rope ÷ flat-deque median. `<1.0` ⇒ the rope is faster. Numbers are medians; ±few %
-  run to run. (The head-to-head bench was retired with the flat deque; these numbers are the
-  as-measured record from that comparison.)
+## Current live scoreboard — rope vs. a naive `VecDeque<Bytes>` (runnable: `cargo bench -p etude-bytevec`)
+
+`benches/compare.rs` now measures the rope against a naive chunk deque baseline, to prove the tiered
+rope does not regress a plain `VecDeque<Bytes>` on the streaming path while winning big on structural
+ops. Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4):
+
+| op (deep) | rope | naive deque | ratio |
+|-----------|------|-------------|-------|
+| **clone** | 36.5 ns | 14.9 µs (@1000) / 1.6 ms (@100k) | **~0.002 (∞ faster)** |
+| **append_mid** | 1.44 µs | 10.3 µs | **0.14 (7× faster)** |
+| **split_to_mid** | 6.8 µs | 7.88 µs | 0.86 |
+| copy_to_bytes | 63.7 µs | 64.6 µs | 0.99 |
+| from_iter | 19.5 µs | 17.5 µs | 1.11 |
+| extend | 22.4 µs | 18.8 µs | 1.19 |
+| push_back | 22.6 µs | 17.4 µs | 1.30 |
+| advance (drain) | 16.9 µs | 11.5 µs | 1.47 |
+| pop_front (drain) | 15.2 µs | 9.04 µs | 1.68 |
+| pop_back (drain) | 15.7 µs | 9.06 µs | 1.74 |
+| chunks_iter | 2.09 µs | 197 ns | 10.6 (accepted exception) |
+| get(index) | 31.6 ns | 1.81 ns | 17 (abs 32 ns — trivial) |
+
+**Reading it:** the rope is at parity-or-faster on the shallow path and the structural ops it exists
+for (clone/append/split/slice), and trails **1.1×–1.74×** on deep-tier *sequential per-chunk*
+build/drain — the irreducible per-node `Arc` allocation + O(log₃₂) navigation a flat deque does not
+pay. `pop_back`/`pop_front` drain already use O(1) block-buffer adoption (the leading refill cost was
+removed); the residual is the tree's per-block `pop`/`Arc::get_mut` descent. `chunks_iter` is the one
+accepted exception (cache locality — see below). The levers that could shrink the deep build/drain
+gaps (a node arena, a single-allocation/DST leaf) each break a core guarantee (O(1) structural-sharing
+clone, or in-place bounded copy-on-write), so the gaps are the expected persistent-structure tradeoff.
+
+## Historical: the switch from a flat deque to the tiered rope
+
+The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
+deque** (previous, now removed). The bench was retired with the flat deque; these are the as-measured
+record. `deep` = 1000 chunks, `shallow` = 4; 1400 B chunks; aarch64, jemalloc, release. **Ratio** =
+rope ÷ flat-deque; `<1.0` ⇒ rope faster.
 
 ## Where the rope WINS (its reason to exist: O(1) clone, O(log) split, zero-copy slice)
 
