@@ -55,10 +55,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | to_decimal_string         | 256b   | 342 ns    | 248 ns     | 1.38      |
 | to_decimal_string         | 1024b  | 3.14 µs   | 2.22 µs    | 1.42      |
 | to_decimal_string         | 4096b  | 17.1 µs   | 21.0 µs    | **0.81**  |
-| sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
-| sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
-| sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
-| sign_magnitude_roundtrip  | 4096b  | 524 ns    | —          | —         |
+| sign_magnitude_roundtrip  | 64b    | 35.2 ns   | —          | —         |
+| sign_magnitude_roundtrip  | 256b   | 41.6 ns   | —          | —         |
+| sign_magnitude_roundtrip  | 1024b  | 75.0 ns   | —          | —         |
+| sign_magnitude_roundtrip  | 4096b  | 215 ns    | —          | —         |
 | clone                     | 64b    | 12.9 ns   | 5.87 ns    | 2.20      |
 | clone                     | 256b   | 12.7 ns   | 12.7 ns    | 1.00      |
 | clone                     | 1024b  | 13.8 ns   | 14.0 ns    | **0.98**  |
@@ -119,22 +119,21 @@ num-bigint counterpart; the rest are etude-only (num-bigint has no matching oper
 | to_i64_checked (vs `to_i64`)         | fits    | 2.94 ns  | 3.00 ns    | **0.98** |
 | to_i64_checked (vs `to_i64`)         | overflow| 1.56 ns  | 1.77 ns    | **0.88** |
 | is_even (vs `Integer::is_even`)      | all     | 2.01 ns  | 2.21 ns    | **0.91** |
-| twos_complement_roundtrip            | 64b     | 78.7 ns  | 91.4 ns    | **0.86** |
-| twos_complement_roundtrip            | 256b    | 151 ns   | 124 ns     | 1.22     |
-| twos_complement_roundtrip            | 1024b   | 242 ns   | 270 ns     | **0.89** |
-| twos_complement_roundtrip            | 4096b   | 477 ns   | 864 ns     | **0.55** |
+| twos_complement_roundtrip            | 64b     | 48.0 ns  | 91.4 ns    | **0.53** |
+| twos_complement_roundtrip            | 256b    | 57.8 ns  | 124 ns     | **0.47** |
+| twos_complement_roundtrip            | 1024b   | 82.5 ns  | 270 ns     | **0.31** |
+| twos_complement_roundtrip            | 4096b   | 229 ns   | 864 ns     | **0.27** |
 
 The differential accessors win almost everywhere. `rem_u64` rides the reciprocal single-limb scan (no
 `Big` remainder allocated) for a 2.6–5.3× lead — though num-bigint's `%` allocates a `BigInt` result
-where `rem_u64` returns a native `u64`, so part of the gap is that allocation. Two losses fall out,
-both allocation-bound:
+where `rem_u64` returns a native `u64`, so part of the gap is that allocation. `twos_complement_roundtrip`
+now wins every tier (0.27–0.53×) after the byte serializers pre-reserve their output `Vec` (see landed) —
+it was 1.22× at 256b before, an allocation crossover now removed. The remaining loss is allocation-bound:
 
 - **neg / abs at 64b (2.19× / 1.80×).** Same small-`Big` one-limb `Vec` clone as `clone` / `from_i64`;
   an inline small-value magnitude repr closes all of these together (etude-rational reports the same at
   its `neg`/`abs` cells, so one bigint change closes three rational cells too — this re-ranks the inline
   repr item upward).
-- **twos_complement_roundtrip at 256b (1.22×).** An allocation crossover — the encode + decode pair
-  allocates two buffers where num-bigint's is tighter at exactly this width; it wins at 64b/1024b/4096b.
 
 Etude-only measurements (no num-bigint counterpart), for regression guarding:
 
@@ -269,6 +268,14 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   buffer from the right, so the digits land most-significant-first with no reversal pass and no second
   buffer. Helps most where the formatter is the larger share of the work: 64b 61.9 → 58.3 ns
   (0.86× → **0.81×**), 1024b 3.19 → 3.14 µs (1.44× → **1.42×**); 256b/4096b within noise (divmod-dominated).
+- **Pre-reserved byte serializers** — `to_sign_magnitude_bytes` (the canonical map-key encoding) and
+  `to_le_twos_complement_bytes` built their output `Vec` with `Vec::new()` and grew it 8 bytes per limb,
+  reallocating up the doubling schedule; and the trailing sign-guard byte then forced one more realloc
+  that copied the whole magnitude. Reserving `len·8 (+1)` up front makes the whole encode a single
+  allocation. Round-trip (encode+decode) medians roughly halve: sign-magnitude 256b 137 → 42 ns, 1024b
+  247 → 75 ns (**≈ −70%**); two's-complement 256b 153 → 58 ns (**closing the old 1.22× loss to 0.47×**),
+  1024b 239 → 83 ns (**0.31×**). All tiers of both round-trips now beat / have no num-bigint peer. The
+  decode direction was already reserved; this was pure encode-side realloc.
 
 ## Where the gaps remain (optimization order)
 
@@ -286,10 +293,7 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
    kernels emit inline results directly — a larger change (below). The `neg`/`abs` backfill widens this
    item's payoff: etude-rational reports the same 64b loss at its `neg`/`abs` cells, so the one repr change
    closes those three rational cells as well.
-3. **twos_complement_roundtrip at 256b (1.22×).** An allocation crossover — the encode+decode pair is a
-   touch behind num-bigint at exactly this width (it wins at 64b/1024b/4096b). Low priority; a shared
-   scratch buffer for the round-trip would close it.
-4. **mul at 4096b (1.03×), gcd at 1024b (1.02×), sub at 4096b (1.02×), to_decimal_string at 4096b (1.04×),
+3. **mul at 4096b (1.03×), gcd at 1024b (1.02×), sub at 4096b (1.02×), to_decimal_string at 4096b (1.04×),
    the 64b add/sub/mul tiers (~1.1–1.25×).** At or near parity; num-bigint's edge at the largest tiers is
    Toom-3 mul and a Lehmer gcd.
 

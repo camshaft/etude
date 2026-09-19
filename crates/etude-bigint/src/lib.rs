@@ -605,7 +605,8 @@ impl Big {
 
     /// Serialize to the canonical sign-magnitude byte encoding.
     pub fn to_sign_magnitude_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        // Sign byte + 8 bytes/limb, reserved up front so the byte-at-a-time growth never reallocates.
+        let mut out = Vec::with_capacity(1 + self.mag.len() * 8);
         out.push(self.neg as u8);
         // Limbs (LE u64) → LE bytes, then strip trailing zero bytes for canonicality.
         for &limb in &self.mag {
@@ -672,8 +673,9 @@ impl Big {
         if self.is_zero() {
             return Vec::new();
         }
-        // Magnitude → LE bytes (strip trailing zeros).
-        let mut mbytes = Vec::new();
+        // Magnitude → LE bytes (strip trailing zeros). Reserve up front (8 bytes/limb + a possible sign
+        // guard/extension byte) so the byte-at-a-time growth never reallocates.
+        let mut mbytes = Vec::with_capacity(self.mag.len() * 8 + 1);
         for &limb in &self.mag {
             mbytes.extend_from_slice(&limb.to_le_bytes());
         }
