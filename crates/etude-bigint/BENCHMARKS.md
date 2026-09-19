@@ -292,6 +292,12 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   peel: 1024b 3.14 → 1.63 µs (1.42× → **0.74×**), 4096b 17.1 → 14.3 µs (0.81× → **0.68×**) — both cross to
   wins. 64b/256b were already linear (unchanged). The recursive path (and its skip-top-squaring win) is
   retained for magnitudes wider than 64 limbs, where the subquadratic split eventually pays off.
+- **`last_decimal_digit` by limb sum (no per-limb divide)** — `|self| mod 10` for a divisibility-by-10 /
+  rounding check, computed as `limb₀ + 6·Σ_{i≥1} limbᵢ (mod 10)` (since `2⁶⁴ ≡ 6 (mod 10)`): a `% 10` and
+  an add per limb, no reciprocal-remainder scan. A decimal canonicalizing every even coefficient ran this
+  as `rem_u64(10)`; the limb sum is 3.4–7.3× faster and the gap widens with size — 64b 2.4 vs 8.1 ns
+  (**0.30×**), 256b 7.5 vs 41.3 ns (**0.18×**), 1024b 15.7 vs 107 ns (**0.15×**), 4096b 49.6 vs 363 ns
+  (**0.14×**).
 
 ## Where the gaps remain (optimization order)
 
