@@ -50,7 +50,7 @@ macro_rules! static_bytevec_tag {
                 if len > 0 {
                     COUNT.fetch_add(len as _, core::sync::atomic::Ordering::Relaxed);
                     // Track the grow in the handle's own remembered length, or a later Clone/Drop
-                    // would charge/release the STALE initial length and drift the owner budget.
+                    // would charge/release the stale initial length and drift the owner budget.
                     self.0 += len;
                 }
             }
@@ -245,12 +245,12 @@ mod tests {
         assert_eq!(tag_b::Tag::current(), 0);
     }
 
-    /// RED reproducer (breaker-bytevec): the static-tag macro's `Handle` adjusts the global
+    /// red reproducer (breaker-bytevec): the static-tag macro's `Handle` adjusts the global
     /// `COUNT` in `increment`/`decrement` but never updates its own remembered length (`self.0`),
-    /// while `Clone`/`Drop` charge/release that STALE initial length. Any `Tagged` that grows or
+    /// while `Clone`/`Drop` charge/release that stale initial length. Any `Tagged` that grows or
     /// shrinks after creation corrupts the owner budget on clone/drop/untag: grow-then-drop leaks
-    /// the growth FOREVER (observed: budget 2 after dropping a 3-byte rope grown by 2; expected 0).
-    /// `etude-bytevec`'s `static_bytevec_tag!` has the IDENTICAL bug — fix both macros together
+    /// the growth forever (observed: budget 2 after dropping a 3-byte rope grown by 2; expected 0).
+    /// `etude-bytevec`'s `static_bytevec_tag!` has the identical bug — fix both macros together
     /// (`increment`/`decrement` must also do `self.0 += len` / `self.0 -= len`).
     #[test]
     fn handle_drop_releases_current_len_not_initial() {
@@ -268,9 +268,9 @@ mod tests {
         );
     }
 
-    /// Companion reproducer: a clone of a GROWN rope charges only the stale initial length, so the
+    /// Companion reproducer: a clone of a grown rope charges only the stale initial length, so the
     /// owner budget undercounts live bytes (two 5-byte ropes charged 8, not 10), and shrink-then-
-    /// drop over-releases (a split_to below the initial length drives the budget NEGATIVE/wraps).
+    /// drop over-releases (a split_to below the initial length drives the budget negative/wraps).
     #[test]
     fn handle_clone_charges_current_len_and_shrink_does_not_over_release() {
         mod tag_e {

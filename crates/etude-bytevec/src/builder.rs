@@ -337,8 +337,8 @@ impl Builder {
             .unwrap_err();
 
         // The callback was handed a slice of exactly `preferred_read_size` uninitialized bytes, so it
-        // can only have initialized bytes WITHIN that slice. A reported length beyond it (a buggy or
-        // hostile socket read claiming more than the buffer it was given) must NOT reach the unsafe
+        // can only have initialized bytes within that slice. A reported length beyond it (a buggy or
+        // hostile socket read claiming more than the buffer it was given) must not reach the unsafe
         // `advance_mut`, or uninitialized heap memory past the slice would be committed as rope content
         // (a safe-code info-leak). Clamp to the slice length so the commit is always sound; debug builds
         // additionally assert the contract to surface caller misuse early.
@@ -593,10 +593,10 @@ mod tests {
         assert_eq!(out, b"seed-tail");
     }
 
-    /// RED reproducer (breaker-bytevec): `for_socket_read` is a SAFE fn that trusts the SAFE
+    /// red reproducer (breaker-bytevec): `for_socket_read` is a safe fn that trusts the safe
     /// callback's returned length and feeds it to `unsafe BytesMut::advance_mut`. A callback that
     /// returns `len > preferred_read_size` (but within the head's spare capacity) commits
-    /// UNINITIALIZED heap memory as rope content — safe code exposing uninit bytes (observed: a
+    /// uninitialized heap memory as rope content — safe code exposing uninit bytes (observed: a
     /// 3-byte write claiming 100 yields a 100-byte rope whose tail is stale allocator garbage).
     /// A sound implementation must either clamp the commit to the provided slice's length or
     /// panic on the contract violation — either passes this test; committing past the slice fails.

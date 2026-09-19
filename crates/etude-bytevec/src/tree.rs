@@ -3,7 +3,7 @@
 
 //! The deep tier's relaxed-radix tree of chunk *blocks*.
 //!
-//! A leaf is a *block* of `1..=FANOUT` [`Bytes`] chunks; interior branches hold `1..=FANOUT`
+//! A leaf is a *block* of `1..=fanout` [`Bytes`] chunks; interior branches hold `1..=fanout`
 //! children. Every node sits behind an [`Arc`], so cloning the tree (and therefore a `Deep`
 //! [`crate::ByteVec`]) is O(1) and shares structure. Nodes are **relaxed**: each branch carries a
 //! per-child byte-size table plus cached `total` bytes and `count` chunks, and is keyed by child
@@ -33,7 +33,7 @@ struct Block {
 
 #[derive(Clone)]
 struct Branch {
-    /// `1..=FANOUT` children, in a `VecDeque` (reserved to `FANOUT`) for O(1) push/pop at both ends.
+    /// `1..=fanout` children, in a `VecDeque` (reserved to `fanout`) for O(1) push/pop at both ends.
     children: VecDeque<Node>,
     /// Per-child byte sizes: `sizes[i] == children[i].byte_len()`. Parallel to `children`.
     sizes: VecDeque<usize>,
@@ -77,7 +77,7 @@ impl InsertResult {
     }
 }
 
-/// Installs the (possibly grown) `chunks` into `block`, splitting the leaf when it overflows `FANOUT`
+/// Installs the (possibly grown) `chunks` into `block`, splitting the leaf when it overflows `fanout`
 /// and returning the overflow sibling. Byte total is conserved, so an un-split block keeps its cached
 /// `bytes`; a split recomputes the retained left portion's total.
 fn finish_leaf(block: &mut Block, mut chunks: Vec<Bytes>, added: usize) -> InsertResult {
@@ -129,7 +129,7 @@ fn splice_cow_vec(chunks: &mut Vec<Bytes>, i: usize, edit: crate::CowEdit) -> us
 
 /// Absorbs a child's [`InsertResult`] into `branch` at child index `i`: bumps the chunk `count`, and
 /// when the child split, fixes the boundary `sizes` and inserts the sibling, splitting this branch (and
-/// bubbling a new overflow) if it exceeds `FANOUT`. `total` is unchanged (bytes are conserved).
+/// bubbling a new overflow) if it exceeds `fanout`. `total` is unchanged (bytes are conserved).
 fn absorb_child_insert(branch: &mut Branch, i: usize, res: InsertResult) -> InsertResult {
     branch.count += res.added;
     if let Some(sib) = res.overflow {
@@ -150,7 +150,7 @@ fn absorb_child_insert(branch: &mut Branch, i: usize, res: InsertResult) -> Inse
     }
 }
 
-/// Splits an over-full branch at `FANOUT`, moving the right half into a new sibling branch and
+/// Splits an over-full branch at `fanout`, moving the right half into a new sibling branch and
 /// recomputing both halves' cached `total`/`count`.
 fn split_branch_off(branch: &mut Branch) -> Node {
     let right_children = branch.children.split_off(FANOUT);
@@ -237,7 +237,7 @@ impl Node {
     }
 
     /// Returns the chunk at chunk-`index` within this subtree (`index < self.chunk_len()`), descending
-    /// by the per-child cached chunk counts. O(FANOUT · height).
+    /// by the per-child cached chunk counts. O(fanout · height).
     fn get_chunk(&self, mut index: usize) -> &Bytes {
         match self {
             Node::Leaf(b) => &b.chunks[index],
@@ -301,7 +301,7 @@ impl Node {
 
     /// Sets the byte at `offset` (< `byte_len`). FBIP: `Arc::make_mut` mutates a uniquely-owned node
     /// in place and path-copies only shared spine nodes. The leaf chunk is edited in place when
-    /// unique; when it is a large *shared* chunk it is SPLIT (bounded copy-on-write, see
+    /// unique; when it is a large *shared* chunk it is split (bounded copy-on-write, see
     /// [`crate::cow_edit`]) rather than copied whole, which can grow the leaf block and, on overflow,
     /// split the leaf and propagate the split up the spine. Byte totals are unchanged (the edit
     /// preserves length), so only chunk counts and the split boundary's cached sizes are fixed up.
@@ -363,9 +363,9 @@ impl Node {
     /// place and path-copies only shared spine nodes; each covered leaf chunk is edited with the
     /// bounded [`crate::cow_edit`] — in place when uniquely owned, else a copy bounded by the edited
     /// span, sharing the untouched prefix/suffix of a large shared chunk rather than copying it whole.
-    /// Byte totals are conserved, but a bounded-COW split of a boundary chunk GROWS the chunk count, so
+    /// Byte totals are conserved, but a bounded-COW split of a boundary chunk grows the chunk count, so
     /// this threads a B-tree [`InsertResult`] back up the spine (like [`Node::set_byte`]): a leaf may
-    /// split at `FANOUT` and a branch may split once after absorbing its children's inserts. Only the
+    /// split at `fanout` and a branch may split once after absorbing its children's inserts. Only the
     /// first- and last-covered child of a branch can split (interior children are fully covered, so
     /// every chunk is rewritten whole → `InPlace`, no new chunks), so a branch gains at most two
     /// children per overwrite — one `split_branch_off` suffices. O(log₃₂ + covered chunks).
@@ -412,7 +412,7 @@ impl Node {
                 let mut remaining = count;
                 let mut total_added = 0;
                 while remaining > 0 {
-                    // Byte totals are conserved, so the child's covered span is fixed by its ORIGINAL
+                    // Byte totals are conserved, so the child's covered span is fixed by its original
                     // cached size even if it splits below.
                     let here = (branch.sizes[i] - local).min(remaining);
                     let res = branch.children[i].overwrite(local, here, value);
@@ -423,7 +423,7 @@ impl Node {
                     let mut step = 1;
                     if let Some(sib) = res.overflow {
                         // The child split: fix its now-shrunk boundary size and splice the sibling in.
-                        // Defer any split of THIS branch until the whole walk finishes so indices stay
+                        // Defer any split of this branch until the whole walk finishes so indices stay
                         // stable (only the first/last-covered child can reach here, ≤2 inserts total).
                         branch.sizes[i] = branch.children[i].byte_len();
                         let sib_bytes = sib.byte_len();
@@ -599,7 +599,7 @@ impl Tree {
         }
     }
 
-    /// Appends a block (`1..=FANOUT` chunks) at the back. In-place when uniquely owned.
+    /// Appends a block (`1..=fanout` chunks) at the back. In-place when uniquely owned.
     pub(crate) fn push_block(&mut self, chunks: Vec<Bytes>) {
         debug_assert!(!chunks.is_empty() && chunks.len() <= FANOUT);
         let lc = chunks.len();
@@ -767,7 +767,7 @@ impl Tree {
         }
     }
 
-    /// Extracts the sub-tree over the byte range `[start, end)` in a SINGLE descent, sharing every
+    /// Extracts the sub-tree over the byte range `[start, end)` in a single descent, sharing every
     /// interior subtree (O(1) Arc clone) and recursing only into the ≤2 boundary children whose span
     /// straddles `start`/`end`. O(log₃₂). Unlike two composed [`Tree::split`]s this never materializes
     /// the discarded ends. `start == end` yields an empty tree; the full range clones the root.
@@ -1007,7 +1007,7 @@ fn merge(left: Node, hl: u32, right: Node, hr: u32) -> (Vec<Node>, u32) {
     }
 }
 
-/// Packs `chunks` (≤ 2·FANOUT) into 1 or 2 leaves of ≤ FANOUT chunks each.
+/// Packs `chunks` (≤ 2·fanout) into 1 or 2 leaves of ≤ fanout chunks each.
 fn repack_leaves(mut chunks: Vec<Bytes>) -> Vec<Node> {
     debug_assert!(chunks.len() <= 2 * FANOUT);
     if chunks.len() <= FANOUT {
@@ -1018,7 +1018,7 @@ fn repack_leaves(mut chunks: Vec<Bytes>) -> Vec<Node> {
     }
 }
 
-/// Packs `children` (≤ 2·FANOUT nodes at some height `h-1`) into 1 or 2 branches at height `h`.
+/// Packs `children` (≤ 2·fanout nodes at some height `h-1`) into 1 or 2 branches at height `h`.
 fn repack_branches(mut children: Vec<Node>) -> Vec<Node> {
     debug_assert!(children.len() <= 2 * FANOUT);
     if children.len() <= FANOUT {
@@ -1096,7 +1096,7 @@ fn split_node(node: &Node, offset: usize) -> (Option<Node>, Option<Node>) {
 }
 
 /// Extracts `[start, end)` from `node` (`0 <= start < end <= node.byte_len()`), returning a node at
-/// the SAME height as `node` (branches are always re-wrapped, so the caller's `from_root` normalizes
+/// the same height as `node` (branches are always re-wrapped, so the caller's `from_root` normalizes
 /// any single-child spine). Interior children that fall entirely inside the range are shared whole
 /// (O(1) clone via the full-span fast path); only the boundary children recurse. `None` iff empty.
 fn subrange_node(node: &Node, start: usize, end: usize) -> Option<Node> {
@@ -1219,7 +1219,7 @@ fn remove_at_deque(kids: &mut VecDeque<Node>, end: End) {
 /// Ordered, **double-ended** iterator over a tree's `Bytes` chunks. See [`Tree::chunks`].
 ///
 /// Front and back cursors descend the leftmost / rightmost spines independently (each its own DFS
-/// stack). `remaining` — the exact number of chunks not yet yielded — is decremented by BOTH ends
+/// stack). `remaining` — the exact number of chunks not yet yielded — is decremented by both ends
 /// and checked before every step, so the two cursors provably never yield the same chunk and both
 /// report `None` the instant they meet (the front cursor only ever advances rightward, the back
 /// leftward; while `remaining > 0` the next front chunk is strictly left of the next back chunk).
