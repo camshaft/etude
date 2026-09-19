@@ -954,6 +954,7 @@ fn differential_against_model() {
         PushShared,
         StartsEndsWith(usize, Vec<u8>),
         DoubleEndedCheck,
+        InterleavedChunksCheck(Vec<bool>),
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1191,6 +1192,47 @@ fn differential_against_model() {
                     assert_eq!(
                         front, want,
                         "interleaved front/back must partition the chunks"
+                    );
+                }
+                Op::InterleavedChunksCheck(pattern) => {
+                    // Fuzz-CHOSEN front/back interleave (the fixed alternation in DoubleEndedCheck
+                    // always meets near the middle chunk): an arbitrary pattern moves the meet point
+                    // into every sub-iterator — inside the head deque, mid-leaf in the tree, in the
+                    // tail — and back-first starts exercise the lazy back-cursor build. After the
+                    // ends meet, BOTH must keep returning None.
+                    let want: Vec<*const u8> = rope.chunks().map(|c| c.as_ptr()).collect();
+                    let mut it = rope.chunks();
+                    let mut front: Vec<*const u8> = Vec::new();
+                    let mut back: Vec<*const u8> = Vec::new();
+                    let mut len = want.len();
+                    for take_front in pattern
+                        .iter()
+                        .copied()
+                        .chain([true, false].into_iter().cycle())
+                    {
+                        assert_eq!(it.len(), len, "len must track both-ends consumption");
+                        let got = if take_front {
+                            it.next()
+                        } else {
+                            it.next_back()
+                        };
+                        match got {
+                            Some(c) if take_front => front.push(c.as_ptr()),
+                            Some(c) => back.push(c.as_ptr()),
+                            None => break,
+                        }
+                        len -= 1;
+                    }
+                    assert_eq!(it.len(), 0, "iterator reported None while len > 0");
+                    assert!(it.next().is_none(), "front must stay None after the meet");
+                    assert!(
+                        it.next_back().is_none(),
+                        "back must stay None after the meet"
+                    );
+                    front.extend(back.into_iter().rev());
+                    assert_eq!(
+                        front, want,
+                        "fuzz-interleaved front/back must partition the chunks"
                     );
                 }
             }
