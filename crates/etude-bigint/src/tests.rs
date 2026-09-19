@@ -139,6 +139,12 @@ fn check_pair(a: &Big, b: &Big) {
         // num-bigint's / and % are truncating (toward zero), matching our divmod.
         assert_eq!(to_ref(&q), &ra / &rb, "div {a:?} {b:?}");
         assert_eq!(to_ref(&r), &ra % &rb, "rem {a:?} {b:?}");
+        // The quotient-only fast path returns EXACTLY divmod's quotient (just without the remainder).
+        assert_eq!(
+            a.div_exact(b),
+            Some(q.clone()),
+            "div_exact == divmod.0 {a:?} {b:?}"
+        );
         // The defining identity: a == q*b + r.
         assert_eq!(*a, q.mul(b).add(&r), "divmod identity {a:?} {b:?}");
         // |remainder| < |divisor|.
@@ -156,6 +162,7 @@ fn check_pair(a: &Big, b: &Big) {
         );
     } else {
         assert!(a.divmod(b).is_none(), "div by zero → None");
+        assert!(a.div_exact(b).is_none(), "div_exact by zero → None");
     }
 
     // gcd: sign-agnostic, non-negative; gcd(0,0)=0; divides both operands exactly.
@@ -485,6 +492,12 @@ fn divmod_edge_cases_and_wide_operands() {
         let (q, r) = a.divmod(&b).unwrap();
         assert_eq!(to_ref(&q), &ra / &rb, "wide div {a:?} {b:?}");
         assert_eq!(to_ref(&r), &ra % &rb, "wide rem {a:?} {b:?}");
+        // Quotient-only path on WIDE operands (exercises the Knuth want_rem=false branch).
+        assert_eq!(
+            a.div_exact(&b),
+            Some(q.clone()),
+            "wide div_exact {a:?} {b:?}"
+        );
         assert_eq!(a, q.mul(&b).add(&r), "wide divmod identity");
         // |remainder| < |divisor| (the division invariant).
         assert_eq!(
