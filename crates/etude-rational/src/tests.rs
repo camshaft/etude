@@ -293,6 +293,57 @@ fn cmp_large_continued_fraction() {
     }
 }
 
+#[test]
+fn add_sub_large_shared_denominator_factor() {
+    // Exercise the Big `add`/`sub` path (components > i64) for BOTH the coprime-denominator branch and the
+    // shared-factor (gcd(b, d) > 1) branch, which take different reductions (skip-gcd vs lcm + gcd(N, g)).
+    // Cross-check against num-rational for many operand pairs, including sign combinations.
+    fn big(seed: u64, nbytes: usize) -> (Big, BigInt) {
+        let mut x = seed | 1;
+        let mut sm = alloc::vec![0u8]; // non-negative
+        for _ in 0..nbytes {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            sm.push((x >> 24) as u8);
+        }
+        *sm.last_mut().unwrap() |= 0x80;
+        let b = Big::from_sign_magnitude_bytes(&sm);
+        let bi = BigInt::from_signed_bytes_le(&b.to_le_twos_complement_bytes());
+        (b, bi)
+    }
+    let nbytes = 40; // > 8 bytes ⇒ exceeds i64 ⇒ the Big add/sub path (not the native i128 fast path)
+    for i in 0..30u64 {
+        let (n1, bn1) = big(i * 5 + 1, nbytes);
+        let (n2, bn2) = big(i * 5 + 2, nbytes);
+        // A shared factor `p` planted into both denominators forces gcd(b, d) > 1 (the lcm branch).
+        let (p, bp) = big(i * 5 + 3, nbytes / 2);
+        let (q, bq) = big(i * 5 + 4, nbytes / 2);
+        let (r, br) = big(i * 5 + 5, nbytes / 2);
+        let d1 = p.mul(&q);
+        let d2 = p.mul(&r); // gcd(d1, d2) >= p > 1
+        let bd1 = &bp * &bq;
+        let bd2 = &bp * &br;
+        for (na, ba, nb, bb, dx, bdx, dy, bdy) in [
+            (&n1, &bn1, &n2, &bn2, &d1, &bd1, &d2, &bd2), // shared-factor denominators
+            (&n1, &bn1, &n2, &bn2, &q, &bq, &r, &br),     // coprime-ish denominators
+        ] {
+            let a = Rational::new(na.clone(), dx.clone()).unwrap();
+            let b = Rational::new(nb.clone(), dy.clone()).unwrap();
+            let ra = BigRational::new(ba.clone(), bdx.clone());
+            let rb = BigRational::new(bb.clone(), bdy.clone());
+            for (ours, theirs) in [
+                (a.add(&b), &ra + &rb),
+                (a.sub(&b), &ra - &rb),
+                (a.neg().add(&b), -&ra + &rb),
+                (a.sub(&b.neg()), &ra - &(-&rb)),
+            ] {
+                assert_same(&ours, &theirs);
+            }
+        }
+    }
+}
+
 // ─── the differential op-driver (the growing oracle) ──────────────────────────────────────────────
 
 /// One operation over a small register file of rationals. Binary ops read two registers and push the

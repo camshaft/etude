@@ -172,10 +172,7 @@ impl Rational {
             return normalize(self.num.add(&other.num), self.den.clone())
                 .expect("common denominator is positive");
         }
-        let num = self.num.mul(&other.den).add(&other.num.mul(&self.den));
-        let den = self.den.mul(&other.den);
-        // Both denominators are strictly positive, so the product is nonzero: normalize cannot fail.
-        normalize(num, den).expect("product of positive denominators is nonzero")
+        addsub_big(&self.num, &self.den, &other.num, &other.den, false)
     }
 
     /// Exact difference `self - other`.
@@ -189,9 +186,7 @@ impl Rational {
             return normalize(self.num.sub(&other.num), self.den.clone())
                 .expect("common denominator is positive");
         }
-        let num = self.num.mul(&other.den).sub(&other.num.mul(&self.den));
-        let den = self.den.mul(&other.den);
-        normalize(num, den).expect("product of positive denominators is nonzero")
+        addsub_big(&self.num, &self.den, &other.num, &other.den, true)
     }
 
     /// Native `i128` add (`subtract == false`) or subtract for the general different-denominator case when
@@ -493,6 +488,47 @@ fn cmp_magnitude_owned(
         };
         return if reverse { frac.reverse() } else { frac };
     }
+}
+
+/// Exact `a/b ± c/d` for two canonical fractions (`b, d > 0`, `gcd(a,b) = gcd(c,d) = 1`), reduced without a
+/// wide `gcd`. Let `g = gcd(b, d)` (an n-bit gcd on the denominators only).
+///
+/// - **`g == 1` (coprime denominators, the common case):** `(a*d ± c*b)/(b*d)` is ALREADY in lowest terms —
+///   the numerator is coprime to `b` (`≡ a*d (mod b)`, and `a ⊥ b`, `d ⊥ b`) and to `d` (symmetrically),
+///   and `b ⊥ d`, so `gcd(num, b*d) == 1`. Construct directly, skipping any reduce gcd.
+/// - **`g > 1`:** work over the lcm `b·(d/g)`. The numerator is `N = a·(d/g) ± c·(b/g)`, and the standard
+///   identity `gcd(N, lcm) = gcd(N, g)` holds (`N` is coprime to `b/g` and `d/g`), so the final reduction
+///   is a gcd against the *small* `g`, never the `2n`-bit product.
+///
+/// This replaces the previous "multiply out then `normalize` (a `2n`-bit gcd)" path — the reduction gcd is
+/// now at most n-bit (on the denominators / on `g`), which is where nearly all of `add`/`sub`'s large-tier
+/// cost lived.
+fn addsub_big(a: &Big, b: &Big, c: &Big, d: &Big, subtract: bool) -> Rational {
+    let combine = |x: Big, y: &Big| if subtract { x.sub(y) } else { x.add(y) };
+    let g = b.gcd(d); // gcd(|b|, |d|)
+    if g.bit_len() == 1 {
+        // Coprime denominators ⇒ num/(b*d) already canonical (den = b*d > 0, gcd(num, den) == 1).
+        let num = combine(a.mul(d), &c.mul(b));
+        if num.is_zero() {
+            return Rational::zero();
+        }
+        return Rational { num, den: b.mul(d) };
+    }
+    // Shared factor: reduce the denominators first so the product is the lcm, and the final gcd is on `g`.
+    let d_over_g = d.div_exact(&g).expect("g divides d");
+    let b_over_g = b.div_exact(&g).expect("g divides b");
+    let num = combine(a.mul(&d_over_g), &c.mul(&b_over_g));
+    if num.is_zero() {
+        return Rational::zero();
+    }
+    let lcm = b.mul(&d_over_g); // b*(d/g) = lcm(b, d) > 0
+    let h = num.gcd(&g); // gcd(num, lcm) == gcd(num, g) — reduce against the small g
+    if h.bit_len() == 1 {
+        return Rational { num, den: lcm };
+    }
+    let num = num.div_exact(&h).expect("h divides num");
+    let den = lcm.div_exact(&h).expect("h divides lcm");
+    Rational { num, den }
 }
 
 /// Normalize a raw `num/den` pair into canonical form: strictly-positive denominator (sign moved to the

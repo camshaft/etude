@@ -20,12 +20,12 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 
 | op         | tier   | etude     | num-rational | ratio     |
 |------------|--------|-----------|--------------|-----------|
-| add        | 64b    | 1.85 µs   | 3.72 µs      | **0.50**  |
-| add        | 256b   | 10.2 µs   | 16.5 µs      | **0.62**  |
-| add        | 1024b  | 72.6 µs   | 93.9 µs      | **0.77**  |
-| sub        | 64b    | 1.95 µs   | 3.82 µs      | **0.51**  |
-| sub        | 256b   | 9.88 µs   | 16.3 µs      | **0.60**  |
-| sub        | 1024b  | 73.0 µs   | 93.6 µs      | **0.78**  |
+| add        | 64b    | 0.94 µs   | 3.88 µs      | **0.24**  |
+| add        | 256b   | 10.3 µs   | 16.7 µs      | **0.62**  |
+| add        | 1024b  | 24.1 µs   | 94.0 µs      | **0.26**  |
+| sub        | 64b    | 0.95 µs   | 3.98 µs      | **0.24**  |
+| sub        | 256b   | 10.5 µs   | 16.5 µs      | **0.63**  |
+| sub        | 1024b  | 24.1 µs   | 94.1 µs      | **0.26**  |
 | mul        | 64b    | 2.08 µs   | 5.02 µs      | **0.41**  |
 | mul        | 256b   | 8.16 µs   | 20.8 µs      | **0.39**  |
 | mul        | 1024b  | 50.1 µs   | 117 µs       | **0.43**  |
@@ -137,17 +137,18 @@ Sample ratios at the large tiers (`ratio = etude / num-rational`; full numbers v
 |-----|---------|---------|
 | mul | **0.43**| **0.47**|
 | div | **0.42**| **0.46**|
-| add | **0.77**| 0.98    |
+| add | **0.26**| **0.26**|
 
-`mul`/`div` **hold** their ~2× lead at 4096b (cross-reduction halves the gcd work), but `add`/`sub`
-**narrow to ~parity** as size grows. This is EXPECTED, not a fixable gap: etude-bigint already has a
-Karatsuba multiply (#53, `O(n^1.585)` above a 40-limb crossover, so engaged at 4096b = 64 limbs), and so
-does num-bigint — so at 4096b both sides share the same multiply asymptotics and the random-operand add
-`(a*d + c*b)/(b*d)` + reduce converges. Reopening a large-tier `add`/`sub` LEAD would need a faster-still
-multiply than num-bigint's (Toom-3 in etude-bigint — roadmapped, later); Karatsuba alone cannot beat
-num-bigint's Karatsuba. The one remaining locally-relevant bignum lever is a **Lehmer gcd** in
-etude-bigint (its next algorithmic slice): Stein already matches num-bigint at 1024b, and Lehmer would
-push the gcd-bound `normalize`/`add_eqden`@≥1024b parity cells below 1.0.
+`mul`/`div` **hold** their ~2× lead (cross-reduction halves the gcd work), and `add`/`sub` now hold a
+**~4× lead** too (**0.26×** at 1024b/4096b). Earlier these narrowed to ~parity, which was mis-diagnosed as
+multiply-bound (awaiting Toom-3) — the real cost was the `2n`-bit reduce gcd over the `(a*d + c*b)/(b*d)`
+product. `add`/`sub` now reduce over `gcd(b, d)` on the *denominators* (an n-bit gcd) and, when they are
+coprime (the common random case), skip the reduce gcd entirely; when they share a factor `g`, they work
+over the lcm and reduce against the small `g` (`gcd(N, lcm) = gcd(N, g)`). So the multiply — not a wide
+gcd — is now the floor for add/sub, and it is already competitive with num-bigint's. (The 256b/2048b bench
+seeds happen to have `gcd(b, d) > 1`, so those cells sit at the lcm-branch ratio ~0.62/0.80 rather than the
+coprime ~0.26; both branches beat num-rational.) The remaining bignum lever is a **Lehmer gcd** in
+etude-bigint for the still-gcd-bound `normalize`/`add_eqden`@≥1024b (raw unreduced pairs), which is deferred.
 
 ## Rendering (`to_string` / `Display`)
 
@@ -254,3 +255,10 @@ they are attacking next — re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 23** — `add`/`sub` reduce over `gcd(b, d)` (denominators, n-bit) instead of the full
+  `gcd(a*d ± c*b, b*d)` (2n-bit). Coprime denominators (common) ⇒ the result is already lowest-terms, skip
+  the reduce gcd; shared factor ⇒ work over the lcm and reduce against the small `g` (`gcd(N, lcm) =
+  gcd(N, g)`). This corrects the earlier "add/sub@large is multiply-bound / needs Toom-3" diagnosis — it was
+  the wide reduce gcd. **add/sub 1024b 0.77× → 0.26×, 4096b 0.98× → 0.26×, 64b 0.50× → 0.24×** (≈4×
+  num-rational); coprime cells only. Guarded by the oracle + a new `add_sub_large_shared_denominator_factor`
+  test covering the Big lcm/`g > 1` branch.
