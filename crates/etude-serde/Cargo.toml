@@ -17,12 +17,10 @@ default = ["std"]
 # `std` feature and pulls etude-bytevec with default features), so depending on it transitively
 # requires std today — the same known gap flagged to etude-str-migration for #147. This spike inherits
 # it; it resolves for free once etude-strrope gains `#![no_std]` + a `std` feature.
-std = ["etude-bytevec/std", "etude-span/std"]
+std = ["etude-bytevec/std"]
 
 [dependencies]
 # A borrowed string value is an O(1) structural-share of the source rope (no copy).
 etude-strrope = { version = "0.1", path = "../etude-strrope", default-features = false }
-# A borrowed bytes value is an O(1) sub-rope.
+# Borrowed bytes and number digit runs are O(1) sub-ropes of the source.
 etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
-# Number tokens are byte-offset spans into the source rope.
-etude-span = { version = "0.1", path = "../etude-span", default-features = false }

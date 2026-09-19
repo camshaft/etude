@@ -1,0 +1,30 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-json-serde"
+version = "0.1.0"
+description = "Adapter: an etude-serde Deserializer over the etude-json Tokenizer (the grammar/parser layer on the lexer). DRAFT/SPIKE — first consumer of the rope-native serde seam, pending design review."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = ["etude-json/std", "etude-serde/std", "etude-bytevec/std"]
+
+[dependencies]
+# The lexer this adapter drives.
+etude-json = { version = "0.1", path = "../etude-json", default-features = false }
+# The rope-native value model / Visitor seam this adapter implements.
+etude-serde = { version = "0.1", path = "../etude-serde", default-features = false }
+# The input rope (string decode is resolved against it).
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
+
+[dev-dependencies]
+# Differential oracle: the adapter is now a grammar-enforcing parser, so its accept/reject must match
+# serde_json (unlike the bare lexer).
+serde_json = "1"
+# Build input ropes with explicit chunk layouts.
+bytes = "1"

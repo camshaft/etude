@@ -36,7 +36,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use etude_bytevec::ByteVec;
-use etude_span::Span;
 use etude_strrope::StrRope;
 
 /// A string value: an O(1) structural-share of the source rope when the content needs no
@@ -94,29 +93,31 @@ impl RopeBytes {
     }
 }
 
-/// A number, as the byte-offset [`Span`]s of its components in the source rope — never a borrow of a
-/// parsed value, always a lazy, skippable decode.
+/// A number, as the digit runs of its components — never a borrow of a parsed value, always a lazy,
+/// skippable decode. Each run is an owned-shared [`ByteVec`] sub-rope of the source (zero-copy, ASCII
+/// digits `0`–`9` only, guaranteed by the decoder's grammar scan).
 ///
 /// A value is produced on demand by handing these validated components to a value-type constructor
 /// (the decoder ↔ value boundary, §6): the coefficient digits are `integer` then `fraction`, and the
 /// effective power of ten is `±exponent − fraction.len()`.
 ///
 /// NOTE (fit-feedback for the design): §5 sketches a number token as "a raw `Span` + int/frac/exp
-/// flags". Flags alone are not enough to feed `Decimal::from_components(sign, int_digits, frac_digits,
-/// exp)` — that needs the *component sub-spans*, which is what a real decoder
-/// (`etude_json::Token::number_parts`) already records. So this token carries the sub-spans directly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// flags", but a bare `Span` is *not self-contained* — the [`Visitor`] receiving it has no handle on
+/// the source rope, so it cannot resolve the span to digits, and flags alone cannot feed
+/// `Decimal::from_components(sign, int_digits, frac_digits, exp)`. Carrying the component runs as
+/// owned-shared sub-ropes keeps the token self-contained and still zero-copy (numbers are short; a
+/// sub-rope is O(1) structural sharing). A decoder builds these from its recorded component spans
+/// (`etude_json::Token::number_parts`) with one `ByteVec::slice` each.
+#[derive(Clone, Debug)]
 pub struct NumberToken {
-    /// The whole number lexeme, `-?int(.frac)?([eE][+-]?exp)?`.
-    pub span: Span,
     /// The lexeme has a leading `-`.
     pub negative: bool,
-    /// The integer-part digits (no sign); always a non-empty span for a valid number.
-    pub integer: Span,
+    /// The integer-part digits (no sign) — a non-empty run for a valid number.
+    pub integer: ByteVec,
     /// The fraction digits after `.` (digits only), or `None` if there is no fraction.
-    pub fraction: Option<Span>,
+    pub fraction: Option<ByteVec>,
     /// The exponent digits after `e`/`E` and its optional sign (digits only), or `None`.
-    pub exponent: Option<Span>,
+    pub exponent: Option<ByteVec>,
     /// The exponent carries an explicit `-`. `false` when there is no exponent or it is `+`/unsigned.
     pub exponent_negative: bool,
 }
