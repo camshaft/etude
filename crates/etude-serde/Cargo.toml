@@ -1,0 +1,28 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-serde"
+version = "0.1.0"
+description = "Rope-native, zero-copy value model and Visitor/Deserializer seam (no 'de lifetime; borrowed values are owned-shared rope handles). DRAFT/SPIKE — pending operator review of the design (Decision 0)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+# The library floor is `no_std` + `alloc`; `std` only adds `std::error::Error` for the error type and
+# forwards the byte/span crates' `std` features. NOTE: etude-strrope is not yet `no_std` (it has no
+# `std` feature and pulls etude-bytevec with default features), so depending on it transitively
+# requires std today — the same known gap flagged to etude-str-migration for #147. This spike inherits
+# it; it resolves for free once etude-strrope gains `#![no_std]` + a `std` feature.
+std = ["etude-bytevec/std", "etude-span/std"]
+
+[dependencies]
+# A borrowed string value is an O(1) structural-share of the source rope (no copy).
+etude-strrope = { version = "0.1", path = "../etude-strrope", default-features = false }
+# A borrowed bytes value is an O(1) sub-rope.
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
+# Number tokens are byte-offset spans into the source rope.
+etude-span = { version = "0.1", path = "../etude-span", default-features = false }
