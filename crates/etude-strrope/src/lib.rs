@@ -342,10 +342,11 @@ impl core::fmt::Display for StrRope {
         // Linearize to one contiguous buffer, then view as &str (valid by the invariant). Individual
         // chunks can't be written as &str — a codepoint may straddle a chunk boundary.
         let contiguous = self.0.copy_to_bytes();
-        // SAFETY-equivalent: the invariant guarantees valid UTF-8, but use the checked path (Display is
-        // already O(n) here) to avoid any unsafe.
+        // The invariant guarantees valid UTF-8, but use the checked path (Display is already O(n) here)
+        // to avoid any unsafe. Route through `Formatter::pad` — as `str`'s own Display does — so the
+        // width, fill, alignment, and precision (char-count truncation) format parameters are honored.
         match core::str::from_utf8(&contiguous) {
-            Ok(s) => f.write_str(s),
+            Ok(s) => f.pad(s),
             Err(_) => Err(core::fmt::Error), // unreachable given the invariant
         }
     }
