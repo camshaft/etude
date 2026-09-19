@@ -230,6 +230,24 @@ fn escape_free_strings_are_borrowed_escaped_are_owned() {
 }
 
 #[test]
+fn deep_nesting_is_bounded_like_serde_json() {
+    // n nested arrays, innermost empty: `[`*n + `]`*n. Recursive descent uses one stack frame per
+    // level, so without a depth guard a large n would overflow; the adapter must instead reject it —
+    // and agree with serde_json on both a shallow (accepted) and an adversarial (rejected) depth.
+    let nest = |n: usize| -> Vec<u8> {
+        let mut v = Vec::with_capacity(2 * n);
+        v.resize(n, b'[');
+        v.resize(2 * n, b']');
+        v
+    };
+    // Well under the limit: both accept and build the same (deeply nested empty array) value.
+    check(&nest(100));
+    // Far past the limit: both reject (the adapter returns "recursion limit exceeded", not a crash).
+    check(&nest(1000));
+    // The same for objects would need keys; arrays suffice to exercise the shared depth guard.
+}
+
+#[test]
 fn nested_structure_threads_through_the_seam() {
     // A deeper document: the no-'de SeqAccess/MapAccess threading must carry nested containers.
     let doc = br#"[{"k":[1,{"n":null}]},[],{"z":"end"}]"#;

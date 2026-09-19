@@ -54,12 +54,20 @@ fn map_err(e: etude_json::Error) -> Error {
     Error::custom(e)
 }
 
+/// Maximum container nesting depth. Recursive descent uses one Rust stack frame per level, so an
+/// adversarial deeply-nested input (`[[[[…`) would otherwise overflow the stack; past this depth the
+/// parser returns an error instead. Matches `serde_json`'s default recursion limit so accept/reject
+/// stays in parity with the differential oracle.
+const MAX_DEPTH: usize = 128;
+
 /// The token stream with one-token lookahead. Owns the tokenizer + the input rope (string decode is
 /// resolved against it). A cached lookahead makes grammar decisions (is the next token `]`? `,`?).
+/// `depth` tracks open-container nesting so unbounded recursion can't overflow the stack.
 struct Stream<'a> {
     iter: Tokenizer<'a>,
     input: &'a ByteVec,
     peeked: Option<Result<Option<Token>, Error>>,
+    depth: usize,
 }
 
 impl<'a> Stream<'a> {
@@ -68,6 +76,7 @@ impl<'a> Stream<'a> {
             iter: Tokenizer::new(input),
             input,
             peeked: None,
+            depth: 0,
         }
     }
 
@@ -153,14 +162,32 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                     exponent_negative: p.exponent_negative,
                 })
             }
-            TokenKind::BeginArray => visitor.visit_seq(Seq {
-                stream: self.stream,
-                first: true,
-            }),
-            TokenKind::BeginObject => visitor.visit_map(Map {
-                stream: self.stream,
-                first: true,
-            }),
+            TokenKind::BeginArray => {
+                self.stream.depth += 1;
+                if self.stream.depth > MAX_DEPTH {
+                    return Err(Error::custom("recursion limit exceeded"));
+                }
+                // Reborrow so the depth can be restored once the sub-parse returns (its Value is owned,
+                // so it does not keep the borrow alive).
+                let out = visitor.visit_seq(Seq {
+                    stream: &mut *self.stream,
+                    first: true,
+                });
+                self.stream.depth -= 1;
+                out
+            }
+            TokenKind::BeginObject => {
+                self.stream.depth += 1;
+                if self.stream.depth > MAX_DEPTH {
+                    return Err(Error::custom("recursion limit exceeded"));
+                }
+                let out = visitor.visit_map(Map {
+                    stream: &mut *self.stream,
+                    first: true,
+                });
+                self.stream.depth -= 1;
+                out
+            }
             TokenKind::EndArray | TokenKind::EndObject | TokenKind::Colon | TokenKind::Comma => {
                 Err(Error::custom(
                     "unexpected structural token where a value was expected",
