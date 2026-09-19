@@ -65,6 +65,19 @@ of the operand — no intermediate negated value is allocated.
 | 2048b | 1.695 µs  | 1.511 µs  | 1.12 |
 | 4096b | 5.743 µs  | 5.010 µs  | 1.15 |
 
+### `add_small` / `sub_small` / `mul_small` — i64-fitting values (the common real decimal) — we win
+
+When both coefficients fit an `i64` and the aligned sum / product stays within `i64`, the arithmetic runs
+natively (align by a native `10^k` multiply, `checked_add`/`checked_sub`/`checked_mul`), building one
+`Big` for the result — no `Big` power-of-ten, scale, or intermediate. Overflow falls back to the exact
+`Big` path (so the large tiers above are unchanged). Operands `12345.6789` and `9876.54321`:
+
+| op | etude (before) | etude (now) | bigdecimal | ratio |
+|----|---------------:|------------:|-----------:|------:|
+| `add_small` | 101.5 ns | 27.79 ns | 52.97 ns | **0.52** |
+| `sub_small` | 100.5 ns | 27.70 ns | 67.81 ns | **0.41** |
+| `mul_small` | 32.73 ns | 23.93 ns | 22.01 ns | 1.09 |
+
 ### `div_round` — rounded quotient, 34 sig-digits, HalfEven — we win every tier
 
 | tier | etude | bigdecimal | ratio |
@@ -231,9 +244,10 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   scalar primitives (`is_even`, `rem_u64`, `divmod_u64` — #133). Canonicalization used to divide the
   coefficient by ten on every result; now an odd result is rejected in `O(1)` and only a result ending in
   zero is divided. `add` now wins at 256b–1024b; the residual at large tiers is the underlying `Big`
-  add/mul cost, which is `etude-bigint`'s to shave. `sub` now subtracts coefficients directly (`Big::sub`)
-  instead of `add(neg)`, so no negated clone is allocated — it edges below `add` at large tiers because a
-  difference of same-magnitude operands can cancel to a shorter result.
+  add/mul cost, which is `etude-bigint`'s to shave. `sub` subtracts coefficients directly (`Big::sub`)
+  instead of `add(neg)`, so no negated clone is allocated. For **i64-fitting values** — the common real
+  decimal — `add`/`sub`/`mul` take a native fast path (`add_small`/`sub_small`/`mul_small` above): `add`
+  and `sub` beat `bigdecimal` ~2×, `mul` is near parity.
 - **`cmp`** (equal exponents) is a flat ~6 ns at every width — near parity with `bigdecimal` — now that
   the magnitude compare is a signed `Big` compare with no `abs()` clone. The **`cmp_uneq`** (unequal
   exponent) path bounds the adjusted exponent from `bit_len` (`O(1)`) and decides disjoint magnitudes with
