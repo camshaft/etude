@@ -284,7 +284,7 @@ impl Rational {
         })
     }
 
-    /// Native product when every component's MAGNITUDE fits `u64` but a component exceeds `i64` (so
+    /// Native product when every component's magnitude fits `u64` but a component exceeds `i64` (so
     /// `mul_small` misses it — the ~1-limb `64b` band). After cross-reducing on the u64 magnitudes, each
     /// reduced factor is `<= u64::MAX`, so the products `num`/`den` fit `u128` (`<= (2^64-1)^2 < 2^128`) with
     /// no overflow — but they can exceed `i128`, so the sign is carried separately and boxed via
@@ -440,7 +440,7 @@ impl core::fmt::Display for Rational {
     ///
     /// # Format flags
     /// Honors the `Formatter` **padding** flags — width, fill, alignment, the `+` sign flag, and sign-aware
-    /// zero-padding — via [`Formatter::pad_integral`], matching `num-rational`'s `Ratio` byte-for-byte (this
+    /// zero-padding — via [`Formatter::pad_integral`](core::fmt::Formatter::pad_integral), matching `num-rational`'s `Ratio` byte-for-byte (this
     /// crate is a drop-in): the numerator's sign is the value's sign, and the `num/den` magnitude is padded
     /// as a single integral field (e.g. `{:>8}` → `"    3/10"`, `{:+}` → `"+3/10"`, `{:08}` → `"00003/10"`,
     /// `{:08}` on `-3/10` → `"-0003/10"`). **Precision is ignored** — a `Rational` is an *exact* fraction
@@ -657,7 +657,7 @@ fn cmp_magnitude_owned(
 /// Exact `a/b ± c/d` for two canonical fractions (`b, d > 0`, `gcd(a,b) = gcd(c,d) = 1`), reduced without a
 /// wide `gcd`. Let `g = gcd(b, d)` (an n-bit gcd on the denominators only).
 ///
-/// - **`g == 1` (coprime denominators, the common case):** `(a*d ± c*b)/(b*d)` is ALREADY in lowest terms —
+/// - **`g == 1` (coprime denominators, the common case):** `(a*d ± c*b)/(b*d)` is already in lowest terms —
 ///   the numerator is coprime to `b` (`≡ a*d (mod b)`, and `a ⊥ b`, `d ⊥ b`) and to `d` (symmetrically),
 ///   and `b ⊥ d`, so `gcd(num, b*d) == 1`. Construct directly, skipping any reduce gcd.
 /// - **`g > 1`:** work over the lcm `b·(d/g)`. The numerator is `N = a·(d/g) ± c·(b/g)`, and the standard
@@ -813,7 +813,7 @@ fn big_from_u128(mag: u128, negative: bool) -> Big {
     Big::from_sign_magnitude_bytes(&buf)
 }
 
-/// `n / g` where `g` is a known divisor of `n`, WITHOUT allocating when the division is a no-op: returns a
+/// `n / g` where `g` is a known divisor of `n`, without allocating when the division is a no-op: returns a
 /// borrow of `n` when `g == 1` (an O(1), allocation-free `bit_len() == 1` check — `g` is a non-negative gcd,
 /// so `bit_len() == 1` ⟺ `g == 1`), else the owned `Big::div_exact` quotient (no discarded remainder). The
 /// borrow avoids cloning the operand in the common coprime case, where the caller only reads it (to
