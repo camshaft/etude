@@ -24,10 +24,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | add                       | 256b   | 21.6 ns   | 72.3 ns    | **0.30**  |
 | add                       | 1024b  | 41.3 ns   | 87.8 ns    | **0.47**  |
 | add                       | 4096b  | 123 ns    | 172 ns     | **0.71**  |
-| sub                       | 64b    | 30.4 ns   | 17.3 ns    | 1.76      |
-| sub                       | 256b   | 30.8 ns   | 30.9 ns    | **1.00**  |
-| sub                       | 1024b  | 50.3 ns   | 44.1 ns    | 1.14      |
-| sub                       | 4096b  | 133 ns    | 95.3 ns    | 1.40      |
+| sub                       | 64b    | 21.5 ns   | 17.2 ns    | 1.25      |
+| sub                       | 256b   | 22.7 ns   | 30.2 ns    | **0.75**  |
+| sub                       | 1024b  | 39.6 ns   | 43.4 ns    | **0.91**  |
+| sub                       | 4096b  | 114 ns    | 95.0 ns    | 1.20      |
 | mul                       | 64b    | 21.6 ns   | 19.2 ns    | 1.12      |
 | mul                       | 256b   | 42.3 ns   | 52.8 ns    | **0.80**  |
 | mul                       | 1024b  | 390 ns    | 389 ns     | 1.00      |
@@ -90,20 +90,23 @@ canonical map-key encode+decode; num-bigint has no matching operation.)
 - **Karatsuba multiply** above a 40-limb crossover (three half-size products via
   `z1 = (a0+a1)(b0+b1) − z0 − z2`; recurses through the schoolbook base case): mul/4096b 6.19 µs → 5.14 µs
   (1.24× → 1.03× num-bigint). Smaller tiers stay schoolbook (unchanged).
+- **Direct signed subtract** — a shared `add_signed` core takes the second operand's sign as a
+  parameter, so `sub` no longer allocates a negated copy of `other`: sub/256b 30.8 → 22.7 ns (**0.75×**),
+  sub/1024b 50.3 → 39.6 ns (**0.91×**), sub/4096b 133 → 114 ns (1.20×, was 1.40×).
 
 ## Where the gaps remain (optimization order)
 
 1. **to_decimal_string — ~2.2–2.9×.** Now chunked; the residual is num-bigint's recursive/divide-and-
    conquer base conversion. A recursive split (halve by a power of ten) would close more.
-2. **sub (1.0–1.76×).** Routes through `add(neg())`, allocating an extra magnitude; a direct signed
-   subtract removes that.
-3. **mul at 4096b (1.03×) / gcd at 1024b (1.02×).** Both essentially at parity; num-bigint's edge at the
-   largest tiers is Toom-3 mul and a Lehmer gcd (word-sized transforms) — later slices.
+2. **sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the 64b tiers (add/sub/mul ~1.1–1.25×).**
+   Largely at parity; num-bigint's edge at the largest tiers is Toom-3 mul and a Lehmer gcd, and at the
+   smallest an inline small-int fast path (avoiding a heap `Vec` for ≤1-limb values) would help.
 
 ## Roadmap
 
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-direct signed sub → recursive to_decimal_string → (later) Toom-3 mul, Lehmer gcd. num-bigint stays both
+recursive to_decimal_string → small-value inline fast path → (later) Toom-3 mul, Lehmer gcd. num-bigint
+stays both
 the correctness oracle and the perf yardstick.
 
 ## Target notes: wasm / 32-bit

@@ -213,30 +213,35 @@ impl Big {
         Ordering::Equal
     }
 
-    /// `self + other`.
-    pub fn add(&self, other: &Big) -> Big {
-        let mut r = if self.neg == other.neg {
-            // Same sign: add magnitudes, keep the sign.
+    /// Signed add/sub core over `(sign, magnitude)` operands. Same sign → add magnitudes; opposite →
+    /// subtract the smaller from the larger with the larger's sign. Taking the second operand's sign as
+    /// a parameter lets `sub` reuse this WITHOUT allocating a negated copy of `other`.
+    fn add_signed(a_neg: bool, a: &[u64], b_neg: bool, b: &[u64]) -> Big {
+        let mut r = if a_neg == b_neg {
             Big {
-                neg: self.neg,
-                mag: Big::add_mag(&self.mag, &other.mag),
+                neg: a_neg,
+                mag: Big::add_mag(a, b),
             }
         } else {
-            // Opposite signs: subtract the smaller magnitude from the larger; sign follows the larger.
-            match Big::cmp_mag(&self.mag, &other.mag) {
+            match Big::cmp_mag(a, b) {
                 Ordering::Equal => Big::zero(),
                 Ordering::Greater => Big {
-                    neg: self.neg,
-                    mag: Big::sub_mag(&self.mag, &other.mag),
+                    neg: a_neg,
+                    mag: Big::sub_mag(a, b),
                 },
                 Ordering::Less => Big {
-                    neg: other.neg,
-                    mag: Big::sub_mag(&other.mag, &self.mag),
+                    neg: b_neg,
+                    mag: Big::sub_mag(b, a),
                 },
             }
         };
         r.normalize();
         r
+    }
+
+    /// `self + other`.
+    pub fn add(&self, other: &Big) -> Big {
+        Big::add_signed(self.neg, &self.mag, other.neg, &other.mag)
     }
 
     /// `-self`.
@@ -250,9 +255,11 @@ impl Big {
         }
     }
 
-    /// `self - other`.
+    /// `self - other`. Computes `self + (-other)` by flipping `other`'s sign as a parameter — no negated
+    /// copy of `other`'s magnitude is allocated. (`other`'s sign is irrelevant when it is zero: an empty
+    /// magnitude normalizes to canonical zero regardless.)
     pub fn sub(&self, other: &Big) -> Big {
-        self.add(&other.neg())
+        Big::add_signed(self.neg, &self.mag, !other.neg, &other.mag)
     }
 
     /// `self * other`.
