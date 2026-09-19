@@ -253,6 +253,14 @@ fn to_f64_matches_float_parse() {
         "1e10",
         "1.5e-3",
         "123456.789",
+        // Fast-path boundaries: exact-power-of-ten range (10^0..=10^22) and the largest exact-mantissa
+        // coefficient. Just outside each edge must fall to the exact path and still match.
+        "1e22",              // exp at the positive fast-path edge
+        "1e-22",             // exp at the negative fast-path edge
+        "1e23",              // exp just past the fast path → exact big-int method
+        "1e-23",             // exp just past the fast path → exact big-int method
+        "9007199254740991",  // 2^53 - 1: the largest coefficient the fast path accepts
+        "90071992547409.91", // (2^53 - 1) with exp -2 → fast-path division
         // Rounding boundaries around the 53-bit mantissa.
         "9007199254740992",   // 2^53
         "9007199254740993",   // 2^53 + 1 (not representable → rounds to even)

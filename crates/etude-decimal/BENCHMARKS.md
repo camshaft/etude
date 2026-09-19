@@ -143,6 +143,15 @@ short-circuiting on overflow. Our direct method scales far better than `bigdecim
 | 2048b | 1.871 µs  | 13.73 µs  | **0.14** |
 | 4096b | 4.020 µs  | 53.81 µs  | **0.075** |
 
+Small values (`|coefficient| < 2^53`, `|exp| ≤ 22`) — the common decimal-literal case — take a fast path:
+one correctly-rounded IEEE multiply/divide of two exactly-representable `f64`s (the coefficient and an
+exact power of ten). The `TIERS` sweep above cannot reach it (those coefficients exceed the `f64`
+mantissa), so it has its own cell — `12345678.9012345` (15 significant digits):
+
+| case | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 15 digits | 5.94 ns | 137.70 ns | **0.043** |
+
 ### `div_exact` — exact division by a terminating divisor (etude only)
 
 `bigdecimal` has no exact-terminating division — its `/` is precision-bounded (that comparison is the
@@ -196,9 +205,10 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   (base-`10¹⁹` Horner absorb). **`to_string`** still trails on the reverse conversion; it improves once we
   adopt `Big::write_decimal` for the coefficient digits (a requested follow-up already landed on the
   bigint side).
-- **`to_f64` wins at scale** — from 1024b up it is 3×–13× faster than `bigdecimal`, because the direct
-  big-int-ratio method costs `O(coefficient)` where `bigdecimal`'s conversion grows super-linearly. Small
-  values (64b) trail bigdecimal's fast path; a small-magnitude shortcut would close that.
+- **`to_f64` wins at scale and for small values** — from 1024b up the direct big-int-ratio method is
+  3×–13× faster than `bigdecimal` (its conversion grows super-linearly), and small decimal literals take a
+  single-IEEE-op fast path that is ~23× faster (5.9 ns vs 138 ns). The mid-range large tiers (64b/256b,
+  full-width coefficients that miss the fast path but are small enough for bigdecimal's) still trail.
 - **`neg`/`abs`** sit at parity from 256b up (both are an `O(limbs)` clone plus a sign flip); only at 64b
   does `bigdecimal`'s small-value representation edge ahead.
 
@@ -208,4 +218,5 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
    `to_decimal_string` allocation) to match `bigdecimal` at the small tiers.
 2. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) and an exact
    `decimal_digit_count()` so the unequal-exponent path drops its decimal-string render.
-3. **`to_f64` small-magnitude fast path** — close the 64b gap (we already win 3×–13× at 1024b+).
+3. **`from_str` / `to_string` small-value fast paths** — mirror the `to_f64` small-value win for the
+   common decimal-literal case (a coefficient that fits a `u64`).
