@@ -195,6 +195,71 @@ impl PartialEq<&str> for Str {
     }
 }
 
+// Integration with the `etude-buffer` copy-avoiding reader (the `buffer` feature): read UTF-8 text OUT
+// of any byte reader. Reading a `Str` IN as a byte source needs no wiring — `into_bytes()` is O(1) and
+// `bytes::Bytes` already implements `etude_buffer::reader::Buffer`, so a `Str` is consumed by the reader
+// framework for free. (Draining a `Str` IN PLACE as a reader would be unsound: `read_chunk` can split a
+// multi-byte UTF-8 char, leaving the remaining `Str` non-UTF-8 and making `as_str` undefined behaviour —
+// so we deliberately do NOT implement `reader::Buffer` for `Str`; go through `into_bytes()` instead.)
+#[cfg(feature = "buffer")]
+impl Str {
+    /// Drain every buffered byte out of `reader` and validate the result as UTF-8, producing a `Str`.
+    ///
+    /// The bytes are collected into a `bytes::BytesMut` and frozen with no copy, so on the common path
+    /// (a single contiguous chunk) the resulting `Str` shares that one allocation.
+    ///
+    /// # Errors
+    /// Returns [`FromReaderError::Read`] if `reader` errors while draining, or [`FromReaderError::Utf8`]
+    /// if the drained bytes are not valid UTF-8.
+    pub fn from_reader<B>(reader: &mut B) -> Result<Self, FromReaderError<B::Error>>
+    where
+        B: etude_buffer::reader::Buffer,
+    {
+        let mut out = bytes::BytesMut::new();
+        // `copy_into` drains up to the (unbounded) dest capacity or one contiguous chunk, so loop until
+        // the reader is empty. Guard against a non-advancing implementation so we can never spin forever.
+        while !reader.buffer_is_empty() {
+            let before = reader.buffered_len();
+            reader.copy_into(&mut out).map_err(FromReaderError::Read)?;
+            if reader.buffered_len() == before {
+                break;
+            }
+        }
+        Str::from_utf8(out.freeze()).map_err(FromReaderError::Utf8)
+    }
+}
+
+/// The error returned by [`Str::from_reader`]: either the underlying reader errored, or the drained
+/// bytes were not valid UTF-8.
+#[cfg(feature = "buffer")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FromReaderError<E> {
+    /// The reader errored while draining.
+    Read(E),
+    /// The drained bytes were not valid UTF-8.
+    Utf8(Utf8Error),
+}
+
+#[cfg(feature = "buffer")]
+impl<E: fmt::Display> fmt::Display for FromReaderError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(e) => write!(f, "reader error while reading a Str: {e}"),
+            Self::Utf8(e) => write!(f, "invalid UTF-8 while reading a Str: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "buffer")]
+impl<E: std::error::Error + 'static> std::error::Error for FromReaderError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(e) => Some(e),
+            Self::Utf8(e) => Some(e),
+        }
+    }
+}
+
 // Property/fuzz generation (the `bolero-generator` feature; also available inside this crate's own
 // tests). Generate a `String`, then `Str::from` — so the produced `Str` is always valid UTF-8 by
 // construction and the wrapped-bytes invariant can never be violated by a generated value.
@@ -337,5 +402,43 @@ mod tests {
             assert_eq!(s.len(), s.as_str().len());
             assert_eq!(s.clone(), *s);
         });
+    }
+}
+
+#[cfg(all(test, feature = "buffer"))]
+mod buffer_tests {
+    use super::{FromReaderError, Str};
+    use bytes::Bytes;
+    use etude_buffer::reader::Buffer as _;
+
+    #[test]
+    fn from_reader_reads_and_validates() {
+        // A `bytes::Bytes` is a `reader::Buffer` source; from_reader drains it and validates UTF-8.
+        let mut r = Bytes::from_static("héllo".as_bytes());
+        let s = Str::from_reader(&mut r).unwrap();
+        assert_eq!(s, "héllo");
+        assert!(r.buffer_is_empty(), "reader must be fully drained");
+
+        // an empty reader yields the empty Str.
+        let mut empty = Bytes::new();
+        assert_eq!(Str::from_reader(&mut empty).unwrap(), "");
+    }
+
+    #[test]
+    fn from_reader_rejects_invalid_utf8() {
+        let mut r = Bytes::from_static(&[0xFF, 0xFE]);
+        assert!(matches!(
+            Str::from_reader(&mut r),
+            Err(FromReaderError::Utf8(_))
+        ));
+    }
+
+    #[test]
+    fn from_reader_reassembles_multibyte_char_split_across_chunks() {
+        // "é" == 0xC3 0xA9, split across two reader chunks. from_reader collects ALL bytes before
+        // validating, so the multi-byte char survives the chunk boundary (a per-chunk validation would
+        // wrongly reject each half).
+        let mut r = Bytes::from_static(&[0xC3]).chain(Bytes::from_static(&[0xA9]));
+        assert_eq!(Str::from_reader(&mut r).unwrap(), "é");
     }
 }
