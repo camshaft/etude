@@ -263,8 +263,16 @@ impl Rational {
         // `__umodti3` libcall on aarch64). `b, d > 0`; `a, c` nonzero (the `mul` zero-guard ran first).
         let g1 = gcd_u64(a.unsigned_abs(), d.unsigned_abs()) as i64; // gcd(|a|, d)
         let g2 = gcd_u64(c.unsigned_abs(), b.unsigned_abs()) as i64; // gcd(|c|, b)
-        let num = (a / g1) as i128 * (c / g2) as i128; // |·| <= 2^126, no overflow
-        let den = (b / g2) as i128 * (d / g1) as i128; // b, d > 0 ⇒ den > 0
+        // Coprime cross-pairs are the common case; skip the four `x/1` cancellations (each a hardware
+        // `sdiv` even when the divisor is 1). `a⊥b`, `c⊥d`, `a⊥d`, `c⊥b` ⇒ the product is already reduced.
+        let (num, den) = if g1 == 1 && g2 == 1 {
+            (a as i128 * c as i128, b as i128 * d as i128)
+        } else {
+            (
+                (a / g1) as i128 * (c / g2) as i128, // |·| <= 2^126, no overflow
+                (b / g2) as i128 * (d / g1) as i128, // b, d > 0 ⇒ den > 0
+            )
+        };
         Some(Rational {
             num: big_from_i128(num),
             den: big_from_i128(den),
@@ -310,8 +318,16 @@ impl Rational {
         // the numerator.
         let g1 = gcd_u64(a.unsigned_abs(), c.unsigned_abs()) as i64; // gcd(|a|, |c|)
         let g2 = gcd_u64(d.unsigned_abs(), b.unsigned_abs()) as i64; // gcd(d, b)
-        let mut num = (a / g1) as i128 * (d / g2) as i128;
-        let mut den = (b / g2) as i128 * (c / g1) as i128; // sign(den) = sign(c)
+        // Coprime cross-pairs (common): skip the four `x/1` cancellations (a hardware `sdiv` each). The
+        // product `a*d / (b*c)` is then already reduced (`a⊥b`, `c⊥d`, `a⊥c`, `d⊥b`).
+        let (mut num, mut den) = if g1 == 1 && g2 == 1 {
+            (a as i128 * d as i128, b as i128 * c as i128) // sign(den) = sign(c)
+        } else {
+            (
+                (a / g1) as i128 * (d / g2) as i128,
+                (b / g2) as i128 * (c / g1) as i128, // sign(den) = sign(c)
+            )
+        };
         if den < 0 {
             num = -num;
             den = -den;

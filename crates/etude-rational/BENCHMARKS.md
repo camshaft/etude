@@ -87,8 +87,8 @@ num-rational always uses `BigInt`, so this is a large win:
 
 | op      | operands | etude    | num-rational | ratio     |
 |---------|----------|----------|--------------|-----------|
-| mul_i64 | 48-bit   | 0.21 µs  | 4.13 µs      | **0.050** |
-| div_i64 | 48-bit   | 0.25 µs  | 4.26 µs      | **0.058** |
+| mul_i64 | 48-bit   | 0.20 µs  | 4.13 µs      | **0.048** |
+| div_i64 | 48-bit   | 0.23 µs  | 4.26 µs      | **0.054** |
 | add_i64 | 48-bit   | 0.16 µs  | 3.14 µs      | **0.050** |
 | sub_i64 | 48-bit   | 0.16 µs  | 3.18 µs      | **0.049** |
 | cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
@@ -258,6 +258,12 @@ re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 29** — native `mul_small`/`div_small` add a coprime fast path: when both cross-gcds are 1 (the
+  common case for random canonical operands), skip the four `x/1` cancellations — each a hardware `sdiv`
+  (~12–20 cycles on aarch64) even when the divisor is 1 — and multiply the originals directly (the result
+  is already lowest-terms). `mul_i64` 208.7 ns → **197.2 ns (−5.5%)**, `div_i64` 249.6 ns → **231.6 ns
+  (−7.2%)**. Refines slice 26 (the gcds themselves stay; only the redundant divisions are elided). Oracle
+  (i64 seeds) covers both branches.
 - **slice 28** — mixed-magnitude coverage: `add_mixed`/`mul_mixed`/`div_mixed` bench a small (i64-fitting)
   rational against a 1024b one — a real workload (nudging an accumulated big rational by a small correction)
   that the same-width tiers miss. Confirms no hidden loss when the native i128 path can't fire (the wide
