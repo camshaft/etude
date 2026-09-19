@@ -27,8 +27,8 @@ ops. Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4
 | clear | 10.3 µs | 7.89 µs | 1.30 |
 | push_back | 22.6 µs | 17.4 µs | 1.30 |
 | advance (drain) | 16.9 µs | 11.5 µs | 1.47 |
-| pop_front (drain) | 15.2 µs | 9.04 µs | 1.68 |
-| pop_back (drain) | 15.7 µs | 9.06 µs | 1.74 |
+| pop_front (drain) | 14.7 µs | 9.20 µs | 1.60 |
+| pop_back (drain) | 15.4 µs | 9.34 µs | 1.65 |
 | chunks_iter | 2.09 µs | 197 ns | 10.6 (accepted exception) |
 | get(index) | 31.6 ns | 1.81 ns | 17 (abs 32 ns — trivial) |
 
@@ -43,7 +43,10 @@ from a known-large source now routes through the same bulk bottom-up build as `f
 `FANOUT` blocks into the tree) instead of a `push_back`-per-chunk loop — that took `extend/deep` 1.19 →
 1.04 (~15%); the gate matches `from_iter`'s size threshold so the shallow path stays on the plain loop
 (within ~1 ns). `pop_back`/`pop_front` drain already use O(1) block-buffer adoption (the leading refill cost was
-removed); the residual is the tree's per-block `pop`/`Arc::get_mut` descent. `chunks_iter` is the one
+removed), and the post-pop demote check is now split so the hot path inlines only a couple of cached-count
+loads and a branch while the flatten body stays out-of-line behind `#[cold]` — that took `pop_front/deep`
+1.68 → 1.60 and `pop_back/deep` 1.74 → 1.65 (~6–7%). The residual is the tree's per-block `pop`/`Arc::get_mut`
+descent. `chunks_iter` is the one
 accepted exception (cache locality — see below). The levers that could shrink the deep build/drain
 gaps (a node arena, a single-allocation/DST leaf) each break a core guarantee (O(1) structural-sharing
 clone, or in-place bounded copy-on-write), so the gaps are the expected persistent-structure tradeoff.
