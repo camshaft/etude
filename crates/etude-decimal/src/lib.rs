@@ -689,10 +689,35 @@ impl Decimal {
             // Equal scale: |a·10^e| vs |b·10^e| is |a| vs |b| — a direct coefficient compare.
             return by_mag(&self.coeff, &other.coeff);
         }
-        // Adjusted exponent = position of the most-significant digit = (digit count - 1) + exp, computed
-        // from an exact base-10 digit count with no rendering. In i128 so a near-`i64::MAX` exponent
-        // cannot overflow the addition. This is a pure magnitude comparison (larger adjusted exponent =
-        // larger magnitude), independent of the shared sign.
+        // Adjusted exponent = position of the most-significant digit = (digit count - 1) + exp. Larger
+        // adjusted exponent = larger magnitude (independent of the shared sign). Computed in i128 so a
+        // near-`i64::MAX` exponent cannot overflow the addition.
+        //
+        // When at least one operand is multi-limb (so its exact `decimal_digit_count` would be
+        // `O(magnitude)`), first bound the adjusted exponent from `bit_len` alone (`O(1)`): for a
+        // magnitude of bit length `b`, the decimal digit count lies in `((b-1)·log10 2, b·log10 2 + 1]`,
+        // so `adj` lies in a small interval. Padded to absorb f64 rounding, if the two intervals are
+        // disjoint the order is decided with no `decimal_digit_count`. (Two single-limb values skip this:
+        // their `decimal_digit_count` is a native `ilog10`, cheaper than the bound arithmetic.)
+        if self.coeff.bit_len() > 64 || other.coeff.bit_len() > 64 {
+            let adj_bounds = |coeff: &Big, exp: i64| -> (i128, i128) {
+                let b = coeff.bit_len() as f64; // ≥ 1 (nonzero)
+                // `as i128` truncates toward zero — floor here, since both products are non-negative (no
+                // `f64::floor`, which is std-only and this crate is no_std).
+                let dc_lo = ((b - 1.0) * core::f64::consts::LOG10_2) as i128 - 1; // ≤ true dc
+                let dc_hi = (b * core::f64::consts::LOG10_2) as i128 + 2; // ≥ true dc
+                (dc_lo - 1 + exp as i128, dc_hi - 1 + exp as i128)
+            };
+            let (a_lo, a_hi) = adj_bounds(&self.coeff, self.exp);
+            let (b_lo, b_hi) = adj_bounds(&other.coeff, other.exp);
+            if a_lo > b_hi {
+                return Ordering::Greater; // |self| clearly larger
+            }
+            if a_hi < b_lo {
+                return Ordering::Less; // |self| clearly smaller
+            }
+        }
+        // Exact adjusted-exponent comparison (either both single-limb, or the bounds overlapped).
         let adj_a = self.coeff.decimal_digit_count() as i128 - 1 + self.exp as i128;
         let adj_b = other.coeff.decimal_digit_count() as i128 - 1 + other.exp as i128;
         if adj_a != adj_b {

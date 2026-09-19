@@ -88,21 +88,21 @@ negatives) — no `abs()` coefficient clone. Flat ~6 ns at every width, near par
 | 2048b | 6.27 ns | 5.53 ns | 1.13 |
 | 4096b | 6.24 ns | 5.55 ns | 1.12 |
 
-### `cmp_uneq` — three-way ordering, unequal exponents (adjusted-exponent digit-count compare)
+### `cmp_uneq` — three-way ordering, unequal exponents (bit-length adjusted-exponent bound)
 
-The unequal-exponent path compares adjusted exponents `(digit count - 1) + exp` using an exact
-`Big::decimal_digit_count` (no rendering), and only scales when they tie. This drops the two decimal
-strings the old path rendered just to count digits. It wins at 64b (single-limb `ilog10`); at larger
-tiers it trails `bigdecimal`'s flat ~6 ns because `decimal_digit_count` of a multi-limb magnitude is
-itself `O(magnitude)` — that residual is now inside the digit-count primitive, not a string allocation.
+The unequal-exponent path compares adjusted exponents `(digit count - 1) + exp`. When either operand is
+multi-limb it first bounds the adjusted exponent from `bit_len` alone (`O(1)`: the digit count lies in a
+small interval around `bit_len · log10 2`); if the bounds are disjoint — the common case, magnitudes at
+different scales — the order is decided with no `decimal_digit_count` at all. This flattened the large
+tiers from hundreds of ns / microseconds to a constant ~25 ns.
 
-| tier | etude | bigdecimal | ratio |
-|------|------:|-----------:|------:|
-| 64b   | 16.01 ns  | 5.85 ns | 2.73 |
-| 256b  | 391.98 ns | 5.85 ns | 67.0 |
-| 1024b | 887.32 ns | 5.86 ns | 151 |
-| 2048b | 1.985 µs  | 5.84 ns | 340 |
-| 4096b | 5.364 µs  | 5.85 ns | 917 |
+| tier | etude (before) | etude (now) | bigdecimal | ratio |
+|------|---------------:|------------:|-----------:|------:|
+| 64b   | 16.01 ns  | 18.15 ns | 5.87 ns | 3.09 |
+| 256b  | 391.98 ns | 24.78 ns | 5.89 ns | 4.20 |
+| 1024b | 887.32 ns | 24.77 ns | 5.87 ns | 4.22 |
+| 2048b | 1.985 µs  | 24.73 ns | 5.89 ns | 4.20 |
+| 4096b | 5.364 µs  | 24.82 ns | 5.92 ns | 4.19 |
 
 ### `to_string` — render to a decimal literal — we win at scale
 
@@ -236,10 +236,10 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   difference of same-magnitude operands can cancel to a shorter result.
 - **`cmp`** (equal exponents) is a flat ~6 ns at every width — near parity with `bigdecimal` — now that
   the magnitude compare is a signed `Big` compare with no `abs()` clone. The **`cmp_uneq`** (unequal
-  exponent) path compares adjusted exponents with an exact `Big::decimal_digit_count` (allocation-free, no
-  render) and only scales on a tie; it wins at 64b but trails at large tiers because the digit-count of a
-  multi-limb magnitude is itself `O(magnitude)` (that residual is inside the digit-count primitive, not a
-  string allocation).
+  exponent) path bounds the adjusted exponent from `bit_len` (`O(1)`) and decides disjoint magnitudes with
+  no digit count — a constant ~25 ns at every width — falling to the exact `decimal_digit_count` only when
+  the bounds overlap (near-equal orders of magnitude). It trails `bigdecimal`'s ~6 ns by the `bit_len` +
+  bound arithmetic.
 - **`from_str` and `to_string` now win at scale.** `from_str` groups digits into base-`10¹⁹` limbs
   (`from_base_10_pow_k_limbs`); `to_string` streams digits via `Big::write_decimal` and splits a wide
   coefficient with a single-limb divide. Both beat `bigdecimal` from ~2048b up; small/mid values sit
@@ -256,7 +256,7 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
 1. **`to_string` / `from_str` small-mid tiers** — the residual ~1.1–1.8× is the base-10 ↔ binary
    conversion itself (`Big::write_decimal` / `from_base_10_pow_k_limbs`), which is `etude-bigint`'s to
    sharpen at small limb counts.
-2. **`cmp_uneq` at large tiers** — a cheaper adjusted-exponent decision than a full multi-limb digit
-   count (or a faster `decimal_digit_count` on the `etude-bigint` side).
-3. **`sub` / `mul` large tiers** — bottlenecked on the underlying `Big` subtract/multiply
+2. **`sub` / `mul` large tiers** — bottlenecked on the underlying `Big` subtract/multiply
    (`etude-bigint`'s to shave).
+3. **`to_f64` at 64b/256b** — full-width coefficients miss both the `< 2^53` fast path and the exact
+   method's efficiency at those sizes.
