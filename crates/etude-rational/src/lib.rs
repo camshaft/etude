@@ -419,6 +419,22 @@ impl Rational {
     }
 }
 
+/// `(⌊a/b⌋, a mod b)` for non-negative `a` and strictly positive `b`, fast-pathing the quotients 0 and 1
+/// that dominate the continued-fraction comparison of similar-magnitude operands (each step's operands are
+/// within a factor of ~2, so `⌊a/b⌋ ∈ {0, 1}`). A full `divmod` — schoolbook `O(n²)` or a reciprocal
+/// setup — is then replaced by a single `Big` comparison (`q = 0`) or a comparison plus one subtraction
+/// (`q = 1`), both `O(n)`. Falls back to `divmod` only when `q >= 2`.
+fn divmod_small_q(a: &Big, b: &Big) -> (Big, Big) {
+    if a.cmp(b) == Ordering::Less {
+        return (Big::zero(), a.clone()); // q = 0, remainder a
+    }
+    let r = a.sub(b);
+    if r.cmp(b) == Ordering::Less {
+        return (Big::from_i64(1), r); // q = 1, remainder a - b
+    }
+    a.divmod(b).expect("b > 0") // q >= 2: full division
+}
+
 /// Compare `a/b` vs `c/d` for non-negative `a`, `c` and strictly positive `b`, `d`, by the
 /// continued-fraction method. Compares integer parts `⌊a/b⌋` vs `⌊c/d⌋`; on a tie compare the fractional
 /// remainders `r1/b` vs `r2/d`, which — being in `[0, 1)` — reverse order under reciprocation, so the next
@@ -429,8 +445,8 @@ impl Rational {
 /// touching the owned loop. Only a same-integer-part tie with fractional remainders on both sides recurses,
 /// and only then are the (owned) denominators needed as the next step's numerators.
 fn cmp_magnitude(a: &Big, b: &Big, c: &Big, d: &Big) -> Ordering {
-    let (q1, r1) = a.divmod(b).expect("b > 0");
-    let (q2, r2) = c.divmod(d).expect("d > 0");
+    let (q1, r1) = divmod_small_q(a, b);
+    let (q2, r2) = divmod_small_q(c, d);
     let qc = q1.cmp(&q2);
     if qc != Ordering::Equal {
         return qc; // top level: reverse == false
@@ -456,8 +472,8 @@ fn cmp_magnitude_owned(
     mut reverse: bool,
 ) -> Ordering {
     loop {
-        let (q1, r1) = a.divmod(&b).expect("b > 0");
-        let (q2, r2) = c.divmod(&d).expect("d > 0");
+        let (q1, r1) = divmod_small_q(&a, &b);
+        let (q2, r2) = divmod_small_q(&c, &d);
         let qc = q1.cmp(&q2);
         if qc != Ordering::Equal {
             return if reverse { qc.reverse() } else { qc };
