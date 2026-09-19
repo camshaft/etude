@@ -235,6 +235,36 @@ view pinning a large backing another handle holds) is copied out into a fresh ri
 release the backing (one 64 KiB copy, ~2 µs), while a *uniquely-owned* lone chunk — nothing to consolidate
 or release — is a ~19 ns no-op.
 
+### Streaming / FIFO workloads (runnable: `cargo bench -p etude-bytevec -- stream_`)
+
+The isolated `push_back` and `pop_front` benches never *interleave*, yet the canonical use of a byte
+rope — a socket or pipe buffer — does exactly that: bytes flow in at the back and out at the front while
+the buffer sits at some backlog. Two shapes, each 64 push/pop rounds (aarch64, jemalloc, release):
+
+| workload | shape | rope | naive deque | ratio |
+|----------|-------|------|-------------|-------|
+| stream_fifo | shallow (backlog 4) | 1.86 µs | 1.47 µs | 1.27 |
+| stream_fifo | boundary (backlog 48) | 2.82 µs | 2.22 µs | 1.27 |
+| stream_fifo | deep (backlog 1000) | 4.47 µs | 2.82 µs | 1.58 |
+| stream_churn | oscillate 20↔80 | 3.61 µs | 2.18 µs | 1.66 |
+
+What the numbers confirm — no surprises, and one thing worth pinning:
+
+- **The hysteresis works.** `boundary` holds the backlog at 48, *between* `DEMOTE_AT` (32) and
+  `PROMOTE_AT` (64), so the rope stays in the flat tier and never churns its representation — its ratio
+  (1.27×) is identical to `shallow`, not elevated. A single-threshold design (promote and demote at the
+  same count) would thrash here on every push/pop that crossed the line; the 32-wide band is what keeps a
+  buffer parked near the boundary flat.
+- **Steady-state deep (1.58×)** is the interleaved per-node tree cost: the rope keeps two buffered ends
+  (`head` + `tail` deques) around the tree where the flat deque has one contiguous buffer, plus the
+  amortized block freeze/adopt every `FANOUT` ops. Same persistent-structure tradeoff as the isolated
+  `push_back`/`pop_front` deep rows, no worse for being interleaved.
+- **Churn (1.66×)** is the deliberate worst case: an oscillation whose amplitude (60) exceeds the
+  hysteresis band, so each cycle pays one full `promote` (deque → tree) and one `demote` (tree → deque).
+  This is inherent to an amplitude that large — a wider band would not help a 20↔80 swing — and `promote`
+  already builds the tree by folding whole `FANOUT` blocks (the bulk path), so there is no cheap lever
+  here beyond the representation changes ruled out below. It is bounded and predictable, not a blow-up.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
