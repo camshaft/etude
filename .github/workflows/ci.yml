@@ -103,9 +103,14 @@ jobs:
       - run: cargo miri test --workspace --all-features
 
   # Model-check the `vectored_copy` proof (and any future proofs) with Kani.
-  # Advisory for now: the pinned kani-github-action is incompatible with the current
-  # toolchain (`cargo kani` passes an empty input filename). Run `cargo kani` locally.
+  # DISABLED (operator-authorized 2026-09-19): model-checking/kani-github-action@v1.1 (the
+  # newest tag) is incompatible with the current toolchain — `cargo kani` fails during target
+  # probing with "multiple input filenames provided (first two filenames are `-` and ``)".
+  # `continue-on-error: true` still rendered a red check, so the job is skipped outright.
+  # TODO: re-enable when a fixed kani-github-action ships (> v1.1); until then run
+  # `cargo kani` locally in crates/etude-buffer for the vectored_copy proof.
   kani:
+    if: false
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
