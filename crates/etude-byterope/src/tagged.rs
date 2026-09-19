@@ -75,6 +75,22 @@ macro_rules! static_byterope_tag {
     };
 }
 
+/// `etude_bytevec`-compatible alias of [`static_byterope_tag!`]: a bytevec consumer's
+/// `static_bytevec_tag!()` recompiles unchanged against byterope. The no-argument form declares the
+/// tagged-buffer type under bytevec's `ByteVec` name (`pub type ByteVec = Tagged<Tag>`); the
+/// path form emits just the `Tag`/`Handle` machinery. Mirrors `etude_bytevec::static_bytevec_tag!`.
+#[macro_export]
+macro_rules! static_bytevec_tag {
+    () => {
+        $crate::static_byterope_tag!($crate::tagged);
+
+        pub type ByteVec = $crate::Tagged<Tag>;
+    };
+    ($($tagged_path:tt)*) => {
+        $crate::static_byterope_tag!($($tagged_path)*);
+    };
+}
+
 /// Mints [`Handle`]s that track a byte budget owned by `Self`.
 pub trait Owner: 'static + fmt::Debug {
     type Handle: Handle;

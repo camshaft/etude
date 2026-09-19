@@ -24,7 +24,8 @@
 extern crate alloc;
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
-use bytes::{Bytes, BytesMut};
+// Re-exported (`pub`) to mirror `etude_bytevec`, which re-exports `Bytes`/`BytesMut` at its crate root.
+pub use bytes::{Bytes, BytesMut};
 
 mod tree;
 use tree::Tree;
@@ -34,6 +35,21 @@ pub use builder::Builder;
 
 pub mod tagged;
 pub use tagged::Tagged;
+
+// ---- bytevec compat aliases -------------------------------------------------------------------
+// `etude-byterope` is a SUPERSET drop-in for `etude-bytevec` (operator ruling 2026-09-19): a consumer
+// that swaps ONLY the Cargo dependency recompiles with zero source changes. These aliases expose the
+// byterope types under the `etude_bytevec` names. (`Builder`, `Tagged`, `Bytes`, `BytesMut` above
+// already match by name; `Owner`/`Handle` live in the `tagged` module as in bytevec.)
+
+/// Alias of [`ByteRope`] under `etude_bytevec`'s `ByteVec` name, for a zero-source-change dep swap.
+pub type ByteVec = ByteRope;
+/// Alias of [`ByteRopeError`] under `etude_bytevec`'s `ByteVecError` name.
+pub type ByteVecError = ByteRopeError;
+/// Alias of [`Chunks`] under `etude_bytevec`'s `ChunkIter` iterator name.
+pub type ChunkIter<'a> = Chunks<'a>;
+/// Alias of [`IntoChunks`] under `etude_bytevec`'s `DrainIter` draining-iterator name.
+pub type DrainIter = IntoChunks;
 
 /// Radix width: children per interior node / chunks per leaf block.
 const BITS: u32 = 5;
