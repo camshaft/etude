@@ -203,6 +203,22 @@ impl Big {
         out
     }
 
+    /// `a -= b` in place over magnitudes, requiring `a >= b` (caller ensures). Reuses `a`'s buffer
+    /// (no allocation) and re-strips the high zero limbs the subtraction exposes. Same branchless
+    /// `u64` borrow chain as [`Big::sub_mag`]; used by the [`Big::gcd`] inner loop, which subtracts
+    /// thousands of times and would otherwise allocate a fresh magnitude each step.
+    fn sub_mag_inplace(a: &mut Vec<u64>, b: &[u64]) {
+        let mut borrow = 0u64;
+        for (i, ai) in a.iter_mut().enumerate() {
+            let bv = *b.get(i).unwrap_or(&0);
+            let (d1, b1) = ai.overflowing_sub(bv);
+            let (d2, b2) = d1.overflowing_sub(borrow);
+            *ai = d2;
+            borrow = (b1 | b2) as u64;
+        }
+        strip(a);
+    }
+
     /// `a * b` over magnitudes, returning a normalized magnitude. Schoolbook O(n·m) below
     /// [`KARATSUBA_THRESHOLD`] limbs; Karatsuba (O(n^1.585)) once both operands are at least that wide.
     fn mul_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
@@ -427,7 +443,7 @@ impl Big {
             if Big::cmp_mag(&a, &b) == Ordering::Greater {
                 core::mem::swap(&mut a, &mut b);
             }
-            b = Big::sub_mag(&b, &a); // odd − odd = even, ≥ 0
+            Big::sub_mag_inplace(&mut b, &a); // odd − odd = even, ≥ 0; reuses b's buffer
             if b.is_empty() {
                 break; // gcd of the odd parts is `a`
             }
