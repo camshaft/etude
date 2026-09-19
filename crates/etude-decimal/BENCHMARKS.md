@@ -92,15 +92,20 @@ cargo bench -p etude-decimal --bench arith
 | 2048b | 8.707 µs  | 8.976 µs  | 0.97 |
 | 4096b | 22.31 µs  | 21.09 µs  | 1.06 |
 
-### `from_str` — parse a decimal literal
+### `from_str` — parse a decimal literal — we win at scale
 
-| tier | etude | bigdecimal | ratio |
-|------|------:|-----------:|------:|
-| 64b   | 407.81 ns | 145.64 ns | 2.80 |
-| 256b  | 1.319 µs  | 375.84 ns | 3.51 |
-| 1024b | 5.480 µs  | 1.111 µs  | 4.93 |
-| 2048b | 12.32 µs  | 2.482 µs  | 4.96 |
-| 4096b | 31.90 µs  | 6.449 µs  | 4.95 |
+The coefficient is now assembled by grouping the parsed digits into 19-digit base-`10¹⁹` limbs and calling
+`etude_bigint::Big::from_base_10_pow_k_limbs` (a wide `u64` multiply-add Horner pass, no per-chunk `Big`
+allocated), rather than the old 18-digit `i64`-chunk `mul`/`add` loop. This turned the worst multi-tier
+gap into a win from 1024b up.
+
+| tier | etude (before) | etude (now) | bigdecimal | ratio |
+|------|---------------:|------------:|-----------:|------:|
+| 64b   | 407.81 ns | 190.87 ns | 146.30 ns | 1.30 |
+| 256b  | 1.319 µs  | 390.37 ns | 371.97 ns | 1.05 |
+| 1024b | 5.480 µs  | 1.065 µs  | 1.112 µs  | **0.96** |
+| 2048b | 12.32 µs  | 2.060 µs  | 2.465 µs  | **0.84** |
+| 4096b | 31.90 µs  | 4.820 µs  | 6.127 µs  | **0.79** |
 
 ### `neg` — negate
 
@@ -183,8 +188,10 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   `bigdecimal`'s cached-length ~6 ns is the two `abs()` clones plus the unequal-exponent path (which still
   renders decimal strings). A magnitude-only `Big` compare and an exact `decimal_digit_count()` (requested
   from `etude-bigint`) would close it.
-- **`from_str`/`to_string`** trail on the base-10 ↔ binary conversion; both improve once we adopt
-  `etude-bigint`'s chunked base-`10^k` digit emit/absorb (the absorb helper is a requested follow-up).
+- **`from_str` now wins from 1024b up** after adopting `etude-bigint`'s `from_base_10_pow_k_limbs`
+  (base-`10¹⁹` Horner absorb). **`to_string`** still trails on the reverse conversion; it improves once we
+  adopt `Big::write_decimal` for the coefficient digits (a requested follow-up already landed on the
+  bigint side).
 - **`to_f64` wins at scale** — from 1024b up it is 3×–13× faster than `bigdecimal`, because the direct
   big-int-ratio method costs `O(coefficient)` where `bigdecimal`'s conversion grows super-linearly. Small
   values (64b) trail bigdecimal's fast path; a small-magnitude shortcut would close that.
@@ -195,8 +202,8 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
 
 1. **Direct `sub`** — subtract coefficients in place instead of `add(neg)`, dropping the `neg` clone that
    makes `sub` trail `add`.
-2. **`from_str` via chunked base-`10^k` absorb** — the biggest remaining multi-tier gap (≈5×); consume
-   `etude-bigint`'s forthcoming base-`10^k` build helper instead of the 18-digit-chunk `i64` loop.
+2. **`to_string`** — adopt `Big::write_decimal` for the coefficient digits (drop the intermediate
+   `to_decimal_string` allocation) to match `bigdecimal` at the small tiers.
 3. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) and an exact
    `decimal_digit_count()` so the unequal-exponent path drops its decimal-string render.
-4. **`to_string`** — adopt a chunked base-`10^k` digit emitter to match `bigdecimal` at the small tiers.
+4. **`to_f64` small-magnitude fast path** — close the 64b gap (we already win 3×–13× at 1024b+).
