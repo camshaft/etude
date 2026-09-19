@@ -141,22 +141,24 @@ tiers from hundreds of ns / microseconds to a constant ~25 ns.
 
 Digits stream into the sink via `Big::write_decimal` (no intermediate `String`). For a wide coefficient
 with a `u64`-sized point shift, a single-limb divide splits the value so the integer and fractional parts
-each write directly — this wins the large tiers (2048b/4096b now beat `bigdecimal`). Below ~512 bits the
-split's fixed cost does not pay, so small/mid values keep the single-render path (unchanged).
+each write directly. This wins every tier from `1024b` up (the `1024b` tier crossed to a win after
+`etude-bigint` raised its `to_decimal` recursion threshold in #197, which `write_decimal` rides). Below
+~512 bits the split's fixed cost does not pay, so small/mid values keep the single-render path and still
+trail on the base-2↔base-10 conversion itself (`etude-bigint`'s to sharpen at small limb counts).
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 199 ns    | 154.54 ns | 1.29 |
-| 256b  | 496 ns    | 281.38 ns | 1.76 |
-| 1024b | 3.139 µs  | 2.333 µs  | 1.35 |
-| 2048b | 6.768 µs  | 8.970 µs  | **0.75** |
-| 4096b | 17.74 µs  | 21.04 µs  | **0.84** |
+| 64b   | 186 ns    | 150.11 ns | 1.24 |
+| 256b  | 486 ns    | 281.87 ns | 1.72 |
+| 1024b | 1.712 µs  | 2.332 µs  | **0.73** |
+| 2048b | 4.227 µs  | 8.914 µs  | **0.47** |
+| 4096b | 12.78 µs  | 21.01 µs  | **0.61** |
 
 Small value (`12345678.9012345`, 15 digits — single-render path):
 
 | case | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 15 digits | 169.4 ns | 149.2 ns | 1.13 |
+| 15 digits | 160.5 ns | 142.0 ns | 1.13 |
 
 ### `from_str` — parse a decimal literal — we win at scale
 
@@ -286,8 +288,10 @@ rejecting it, so there is no same-semantics comparison to run.
   bound arithmetic.
 - **`from_str` and `to_string` now win at scale.** `from_str` groups digits into base-`10¹⁹` limbs
   (`from_base_10_pow_k_limbs`); `to_string` streams digits via `Big::write_decimal` and splits a wide
-  coefficient with a single-limb divide. Both beat `bigdecimal` from ~2048b up; small/mid values sit
-  ~1.1–1.8× behind on the base-conversion cost.
+  coefficient with a single-limb divide. `from_str` beats `bigdecimal` from 1024b up; `to_string` from
+  1024b up as well (its 1024b tier crossed to a win — `0.73` — after `etude-bigint` #197 raised the
+  `to_decimal` recursion threshold that `write_decimal` rides, and 2048b/4096b deepened to `0.47`/`0.61`).
+  Small/mid values sit ~1.1–1.7× behind on the base-conversion cost itself.
 - **`to_f64` wins at scale and for small values** — from 1024b up the direct big-int-ratio method is
   3×–13× faster than `bigdecimal` (its conversion grows super-linearly), and small decimal literals take a
   single-IEEE-op fast path that is ~23× faster (5.9 ns vs 138 ns). The mid-range large tiers (64b/256b,
