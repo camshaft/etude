@@ -283,6 +283,30 @@ What the numbers confirm — no surprises, and one thing worth pinning:
   already builds the tree by folding whole `FANOUT` blocks (the bulk path), so there is no cheap lever
   here beyond the representation changes ruled out below. It is bounded and predictable, not a blow-up.
 
+### Build: bulk vs incremental crossover (runnable: `cargo bench -p etude-bytevec -- build_crossover`)
+
+Building the same rope two ways, swept across sizes: bulk (`collect` / `from_iter`, which folds whole
+`FANOUT` blocks bottom-up in one pass when the size hint exceeds `PROMOTE_AT`) vs incremental (a
+`push_back` loop). Locates where the bulk build's amortization starts to pay (aarch64, jemalloc, release):
+
+| chunks | bulk | incremental | ratio (bulk ÷ incr) |
+|--------|------|-------------|---------------------|
+| 16 | 378 ns | 362 ns | 1.04 |
+| 32 | 711 ns | 674 ns | 1.05 |
+| 64 | 1.34 µs | 1.25 µs | 1.07 |
+| 128 | 2.34 µs | 3.31 µs | **0.71** |
+| 256 | 4.60 µs | 6.03 µs | **0.76** |
+| 1024 | 19.1 µs | 23.6 µs | **0.81** |
+
+The crossover sits between 64 and 128 chunks. At and below `PROMOTE_AT` (64) the two are the *same code*
+— `from_iter` only takes the bulk tree path when the size hint exceeds `PROMOTE_AT`, so a small `collect`
+runs the identical flat `push_back` loop, and the ~4–7% it trails there is just the iterator-adapter
+overhead of `Cloned<Iter>` over a direct `for` loop, not a rope cost. Above the threshold the incremental
+path takes on the per-chunk tree descent for every chunk past promotion, while the bulk build folds whole
+blocks in one bottom-up pass — so bulk pulls ~20–30% ahead and stays there. This confirms the `from_iter`
+gate is well-placed: the bulk machinery is spent only once it is solidly the cheaper path, and small
+builds stay on the plain loop.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
