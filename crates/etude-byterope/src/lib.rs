@@ -701,13 +701,17 @@ impl ByteRope {
     /// Panics if the range is out of bounds or `start > end`.
     pub fn slice(&self, range: impl core::ops::RangeBounds<usize>) -> Self {
         use core::ops::Bound;
+        // `saturating_add` so an excluded start / inclusive end of `usize::MAX` cannot wrap the
+        // `+ 1` to 0 (which would silently slice the whole rope in release); it saturates to
+        // `usize::MAX`, which is always `> self.len` and so trips the documented out-of-bounds
+        // panic below.
         let start = match range.start_bound() {
             Bound::Included(&s) => s,
-            Bound::Excluded(&s) => s + 1,
+            Bound::Excluded(&s) => s.saturating_add(1),
             Bound::Unbounded => 0,
         };
         let end = match range.end_bound() {
-            Bound::Included(&e) => e + 1,
+            Bound::Included(&e) => e.saturating_add(1),
             Bound::Excluded(&e) => e,
             Bound::Unbounded => self.len,
         };
@@ -1331,13 +1335,20 @@ fn resolve_range(
     len: usize,
 ) -> Result<(usize, usize), ByteRopeError> {
     use core::ops::Bound;
+    // `+ 1` on a bound must be CHECKED: an excluded start / inclusive end of `usize::MAX` would
+    // wrap to 0 in release (silently resolving to an empty in-bounds range and mutating instead of
+    // erroring) and panic in debug. An overflow is unconditionally out of bounds.
     let start = match range.start_bound() {
         Bound::Included(&s) => s,
-        Bound::Excluded(&s) => s + 1,
+        Bound::Excluded(&s) => s
+            .checked_add(1)
+            .ok_or(ByteRopeError::OutOfBounds(usize::MAX))?,
         Bound::Unbounded => 0,
     };
     let end = match range.end_bound() {
-        Bound::Included(&e) => e + 1,
+        Bound::Included(&e) => e
+            .checked_add(1)
+            .ok_or(ByteRopeError::OutOfBounds(usize::MAX))?,
         Bound::Excluded(&e) => e,
         Bound::Unbounded => len,
     };

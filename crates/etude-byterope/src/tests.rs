@@ -207,6 +207,50 @@ fn replace_in_both_tiers_and_cow_preserves_shared() {
     }
 }
 
+/// RED reproducer (breaker-byterope): the range-bound resolution in `replace` (`resolve_range`)
+/// and `slice` computes `Included(e) => e + 1` / `Excluded(s) => s + 1` UNCHECKED. In release
+/// builds the add wraps: `replace(0..=usize::MAX, v)` resolves to `(0, 0)` and silently INSERTS
+/// at the front returning `Ok` (observed: b"Xhello world") instead of the documented
+/// `Err(OutOfBounds)`; `slice((Excluded(usize::MAX), Unbounded))` silently returns the whole
+/// rope instead of the documented panic. In debug builds both die with an arithmetic-overflow
+/// panic, which for `replace` also violates the documented `Err` contract. Fix shape:
+/// `checked_add(1)` — `None` maps to `Err(OutOfBounds(usize::MAX))` in `resolve_range` and to
+/// the documented out-of-bounds panic in `slice`. This test asserts the contract and FAILS in
+/// BOTH build modes today (debug: overflow panic; release: Ok + mutation).
+#[test]
+fn replace_with_inclusive_max_end_errors_instead_of_wrapping() {
+    let mut rope = ByteRope::from(b"hello world");
+    assert_eq!(
+        rope.replace(0..=usize::MAX, &b"X"[..]),
+        Err(ByteRopeError::OutOfBounds(usize::MAX)),
+        "an out-of-bounds inclusive end must error, not wrap"
+    );
+    assert_eq!(rope, b"hello world", "the failed replace must not mutate the rope");
+    // excluded start overflow takes the same unchecked path in resolve_range
+    assert_eq!(
+        rope.replace(
+            (core::ops::Bound::Excluded(usize::MAX), core::ops::Bound::Unbounded),
+            &b"X"[..]
+        ),
+        Err(ByteRopeError::OutOfBounds(usize::MAX)),
+        "an out-of-bounds excluded start must error, not wrap"
+    );
+    assert_eq!(rope, b"hello world");
+}
+
+/// Companion to `replace_with_inclusive_max_end_errors_instead_of_wrapping` for the `slice` path:
+/// an excluded start of `usize::MAX` must hit `slice`'s documented out-of-bounds panic, not wrap
+/// the `+ 1` to 0 and silently return the whole rope (release) or arithmetic-overflow (debug).
+#[test]
+#[should_panic(expected = "out of bounds")]
+fn slice_with_excluded_max_start_panics_instead_of_wrapping() {
+    let rope = ByteRope::from(b"hello world");
+    let _ = rope.slice((
+        core::ops::Bound::Excluded(usize::MAX),
+        core::ops::Bound::Unbounded,
+    ));
+}
+
 #[test]
 fn replace_equal_length_overwrite_is_in_place() {
     // A unique single-chunk rope overwritten with equal-length values must stay ONE chunk (the
