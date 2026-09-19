@@ -138,6 +138,28 @@ impl NaiveVec {
         }
         buf.freeze()
     }
+    fn clear(&mut self) {
+        self.chunks.clear();
+        self.len = 0;
+    }
+    fn split_to_copy(&mut self, at: usize) -> Bytes {
+        let at = at.min(self.len);
+        let mut out = BytesMut::with_capacity(at);
+        let mut remaining = at;
+        while remaining > 0 {
+            let front = self.chunks.front_mut().expect("bytes remaining");
+            let take = front.len().min(remaining);
+            out.extend_from_slice(&front[..take]);
+            if take < front.len() {
+                bytes::Buf::advance(front, take);
+            } else {
+                self.chunks.pop_front();
+            }
+            self.len -= take;
+            remaining -= take;
+        }
+        out.freeze()
+    }
 }
 
 impl FromIterator<Bytes> for NaiveVec {
@@ -327,6 +349,28 @@ fn bench_mutating(c: &mut Criterion) {
             label,
             |r| r.copy_to_bytes(),
             |v| v.copy_to_bytes(),
+        );
+        pair_mut(
+            c,
+            "split_to_copy_mid",
+            n,
+            label,
+            move |mut r| r.split_to_copy(mid).unwrap(),
+            move |mut v| v.split_to_copy(mid),
+        );
+        pair_mut(
+            c,
+            "clear",
+            n,
+            label,
+            |mut r| {
+                r.clear();
+                r
+            },
+            |mut v| {
+                v.clear();
+                v
+            },
         );
         pair_mut(
             c,
