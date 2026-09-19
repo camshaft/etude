@@ -14,7 +14,7 @@ the current tokenizer against `serde_json` (the reference) on two axes, **alloca
 Runnable: `cargo bench -p etude-json --bench tokenize`. Input is fed through a chunked rope (8 KiB
 leaves), exercising the chunk-streaming cursor; `serde_json` gets the same bytes contiguous. Rope
 construction is outside the measured region. Allocation counts are exact/deterministic; timings below
-are an indicative short run (aarch64, jemalloc, release, 1.5 s measurement) — rerun for authoritative
+are an indicative short run (aarch64, jemalloc, release, 1.0 s measurement) — rerun for authoritative
 numbers.
 
 ## Allocation scoreboard (per parse) — headline
@@ -36,20 +36,26 @@ decoded numbers), and skipped values cost zero heap.
 
 | shape             | etude_json tokenize | serde_json parse | ratio | note |
 |-------------------|--------------------:|-----------------:|------:|------|
-| nested_100        | 2.53 µs             | 5.49 µs          | **0.46** | 2× faster |
-| objects_1k        | 384 µs              | 775 µs           | **0.50** | 2× faster |
-| array_10k_floats  | 329 µs              | 344 µs           | 0.95  | ~equal |
-| array_5k_strings  | 225 µs              | 224 µs           | 1.00  | equal |
-| array_10k_ints    | 286 µs              | 251 µs           | 1.14  | slightly slower |
-| big_string_100k   | 232 µs              | 23.6 µs          | **9.8**  | ⚠ see below |
+| nested_100        | 2.26 µs             | 5.61 µs          | **0.40** | 2.5× faster |
+| objects_1k        | 306 µs              | 734 µs           | **0.42** | 2.4× faster |
+| array_5k_strings  | 128 µs              | 240 µs           | **0.53** | 1.9× faster |
+| array_10k_floats  | 248 µs              | 365 µs           | **0.68** | 1.5× faster |
+| array_10k_ints    | 239 µs              | 269 µs           | **0.89** | faster |
+| big_string_100k   | 78 µs               | 23.9 µs          | 3.26  | slower — see below |
 
-## Known gap / next optimization target
+etude_json is faster on 5 of 6 shapes with zero allocations. The one remaining loss is a single
+huge string.
 
-**`big_string_100k` is ~10× slower.** The string scan advances the cursor one byte at a time looking
-for `"` / `\` / control bytes; `serde_json` finds the closing quote and escapes with a bulk (SIMD /
-`memchr`-style) search. For a large escape-free string this per-byte loop dominates.
+## String bulk-scan optimization (applied) + residual gap
 
-Next perf slice: bulk-scan within the current rope leaf — search `chunk[pos..]` for the first
-`"`/`\`/`<0x20` byte in one vectorized pass and advance the cursor in bulk, refilling only at leaf
-boundaries. Expected to close the `big_string` gap and speed up all string-heavy shapes; the
-allocation column stays zero. This scoreboard is the baseline that optimization must beat.
+The string scan bulk-skips runs of ordinary bytes: within the current rope leaf it finds the next
+significant byte (`"`, `\`, or a control byte) in one contiguous-slice pass and advances the cursor
+in bulk, refilling only at leaf boundaries — instead of one `peek`/`bump` per byte. Measured effect
+vs the per-byte baseline: **`big_string_100k` 231 µs → 78 µs (−66%)**, `array_5k_strings` −46%
+(now 1.9× faster than serde_json).
+
+**Residual:** `big_string_100k` is still ~3.3× slower than `serde_json`, which uses a SIMD scan for
+the closing quote/escapes. The `position` predicate over the leaf may not fully vectorize (it tests
+three byte classes, including a `< 0x20` range). Next lever, if this workload matters: a SIMD /
+`memchr`-style leaf scan (e.g. `memchr2` for `"`/`\` plus a vectorized control-byte check). The
+allocation column stays zero regardless.
