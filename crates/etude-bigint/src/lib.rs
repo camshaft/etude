@@ -7,12 +7,12 @@
 //! unit-testable, with a differential test against `num-bigint` (a dev-dependency) as the safety net.
 //!
 //! # Representation
-//! [`Big`] is `{ neg: bool, mag: Vec<u64> }` — base-2⁶⁴ limbs, LITTLE-ENDIAN (`mag[0]` is the
-//! least-significant limb), with NO trailing zero limbs. Zero is the canonical `{ neg: false, mag: [] }`.
+//! [`Big`] is `{ neg: bool, mag: Vec<u64> }` — base-2⁶⁴ limbs, little-endian (`mag[0]` is the
+//! least-significant limb), with no trailing zero limbs. Zero is the canonical `{ neg: false, mag: [] }`.
 //! Every operation `normalize`s its result (strips trailing zero limbs; forces `neg = false` when the
-//! magnitude is zero), so a value has exactly ONE in-memory form. This canonical form is required when a
+//! magnitude is zero), so a value has exactly one in-memory form. This canonical form is required when a
 //! `Big` is used as a map key or compared for equality: the sign-magnitude byte encoding
-//! ([`Big::to_sign_magnitude_bytes`]) is what such comparisons operate on, so equal values MUST produce
+//! ([`Big::to_sign_magnitude_bytes`]) is what such comparisons operate on, so equal values must produce
 //! identical bytes.
 
 #![cfg_attr(not(test), no_std)]
@@ -25,7 +25,7 @@ use core::cmp::Ordering;
 
 /// An arbitrary-precision signed integer. See the module doc for the canonical-form invariant.
 ///
-/// The internal representation is PRIVATE and not part of the stable API — the limb width, endianness,
+/// The internal representation is private and not part of the stable API — the limb width, endianness,
 /// and any future small-value inlining may change without notice. Construct values through the
 /// constructors ([`Big::zero`], [`Big::from_i64`], the `from_*_bytes` parsers) and inspect them through
 /// the accessors ([`Big::is_zero`], [`Big::is_negative`], [`Big::cmp`], the `to_*` conversions).
@@ -163,7 +163,7 @@ impl Big {
         out
     }
 
-    /// `a - b` over magnitudes, REQUIRING `a >= b` (caller ensures via `cmp_mag`). Returns normalized.
+    /// `a - b` over magnitudes, requiring `a >= b` (caller ensures via `cmp_mag`). Returns normalized.
     /// Branchless `u64` borrow chain — two `overflowing_sub`s per limb (subtract the limb, then the
     /// incoming borrow), staying on native `u64` (no `i128` widen or per-limb branch). At most one of the
     /// two subtractions can borrow, so the outgoing borrow is their OR.
@@ -210,8 +210,8 @@ impl Big {
         }
     }
 
-    /// Three-way compare TWO values given their canonical sign-magnitude byte encodings DIRECTLY — the
-    /// same result as decoding both to `Big` and calling [`Big::cmp`], but with NO limb `Vec` allocated.
+    /// Three-way compare two values given their canonical sign-magnitude byte encodings directly — the
+    /// same result as decoding both to `Big` and calling [`Big::cmp`], but with no limb `Vec` allocated.
     /// A comparison over encoded operands is therefore allocation-free. Bytes are
     /// `[sign][LE magnitude, trailing-zeros-stripped]` (the [`Big::to_sign_magnitude_bytes`] form); a
     /// canonical zero is `[0]` (sign byte only), and zero is never negative — so the sign-differ arms
@@ -248,7 +248,7 @@ impl Big {
 
     /// Signed add/sub core over `(sign, magnitude)` operands. Same sign → add magnitudes; opposite →
     /// subtract the smaller from the larger with the larger's sign. Taking the second operand's sign as
-    /// a parameter lets `sub` reuse this WITHOUT allocating a negated copy of `other`.
+    /// a parameter lets `sub` reuse this without allocating a negated copy of `other`.
     fn add_signed(a_neg: bool, a: &[u64], b_neg: bool, b: &[u64]) -> Big {
         let mut r = if a_neg == b_neg {
             Big {
@@ -328,11 +328,11 @@ impl Big {
         Some((q, r))
     }
 
-    /// The QUOTIENT ONLY of the truncating division `self / divisor` (toward zero — the same quotient as
+    /// The quotient only of the truncating division `self / divisor` (toward zero — the same quotient as
     /// [`Big::divmod`]`.0`), `None` when `divisor` is zero. Unlike `divmod` this never allocates the
     /// remainder, so callers that divide by a known factor and discard the remainder (e.g. reducing a
     /// fraction by its gcd, or cross-reduction) skip that allocation. The name reflects the intended use
-    /// on EXACT divisions (remainder zero); a non-exact division still returns the truncating quotient.
+    /// on exact divisions (remainder zero); a non-exact division still returns the truncating quotient.
     pub fn div_exact(&self, divisor: &Big) -> Option<Big> {
         if divisor.is_zero() {
             return None;
@@ -376,7 +376,7 @@ impl Big {
         Some((q, rem))
     }
 
-    /// The greatest common divisor of `|self|` and `|other|` — always NON-NEGATIVE (gcd is sign-agnostic:
+    /// The greatest common divisor of `|self|` and `|other|` — always non-negative (gcd is sign-agnostic:
     /// `gcd(a, b) = gcd(|a|, |b|)`). `gcd(0, 0) = 0`; `gcd(a, 0) = |a|`.
     ///
     /// Binary GCD (Stein's algorithm): factor out the common power of two, then repeatedly make the
@@ -418,7 +418,7 @@ impl Big {
 
     // ─── conversions ──────────────────────────────────────────────────────────────────────────
 
-    /// The DECIMAL string of this value (leading `-` if negative), size-independent. `0` → `"0"`.
+    /// The decimal string of this value (leading `-` if negative), size-independent. `0` → `"0"`.
     ///
     /// A thin allocating wrapper over [`Big::write_decimal`] — the same digits written into a fresh
     /// `String`. When rendering into an existing sink (e.g. a `Display` impl), prefer `write_decimal`.
@@ -555,8 +555,8 @@ impl Big {
         }
     }
 
-    /// The checked i64 narrowing DIRECTLY from the canonical sign-magnitude byte encoding — the same
-    /// result as `from_sign_magnitude_bytes(bytes).to_i64_checked()` but with NO limb `Vec` allocated,
+    /// The checked i64 narrowing directly from the canonical sign-magnitude byte encoding — the same
+    /// result as `from_sign_magnitude_bytes(bytes).to_i64_checked()` but with no limb `Vec` allocated,
     /// so the read-only narrowing is allocation-free (like [`Big::cmp_sign_magnitude_bytes`]). Bytes are
     /// `[sign][LE magnitude, trailing-zeros-stripped]`; a value needing >8 magnitude bytes cannot fit
     /// i64. Differential-tested against [`Big::to_i64_checked`].
@@ -584,10 +584,10 @@ impl Big {
         }
     }
 
-    /// Read the value DIRECTLY from its canonical sign-magnitude byte encoding as an `i128`, or `None`
+    /// Read the value directly from its canonical sign-magnitude byte encoding as an `i128`, or `None`
     /// if it needs more than 127 magnitude bits (i.e. cannot fit `i128`). Like
     /// [`Big::i64_checked_from_sign_magnitude_bytes`] but into the wider `i128`, so a small-operand
-    /// arithmetic fast path can compute with native `checked_*` ops and NO limb `Vec`. Bytes are
+    /// arithmetic fast path can compute with native `checked_*` ops and no limb `Vec`. Bytes are
     /// `[sign][LE magnitude, trailing-zeros-stripped]`; >16 magnitude bytes cannot fit i128, and exactly
     /// 16 bytes fit only if the magnitude ≤ `i128::MAX`+1 (that boundary is `i128::MIN`). A canonical zero
     /// is `[0]`/empty → `Some(0)`. No allocation.
@@ -618,9 +618,9 @@ impl Big {
         }
     }
 
-    /// Serialize an `i128` DIRECTLY to the canonical sign-magnitude byte encoding in `buf`, returning the
+    /// Serialize an `i128` directly to the canonical sign-magnitude byte encoding in `buf`, returning the
     /// byte length — or `None` if they don't fit `buf`. The write half of a small-operand arithmetic fast
-    /// path: an `i128` result serializes with NO intermediate `Big`/`Vec`. Byte-IDENTICAL to
+    /// path: an `i128` result serializes with no intermediate `Big`/`Vec`. Byte-identical to
     /// `Big::from_i128(v).to_sign_magnitude_bytes()` — `[sign][LE magnitude, trailing-zeros-stripped]`,
     /// zero → `[0]`, never negative-zero. `unsigned_abs` handles `i128::MIN`.
     pub fn i128_to_sign_magnitude_bytes_into(v: i128, buf: &mut [u8]) -> Option<usize> {
@@ -663,10 +663,10 @@ impl Big {
         out
     }
 
-    /// Serialize the sign-magnitude bytes DIRECTLY into `buf` (no heap Vec), returning the byte length —
+    /// Serialize the sign-magnitude bytes directly into `buf` (no heap Vec), returning the byte length —
     /// or `None` if they don't fit (`buf` too small). A small-value fast path: a single-limb value is
     /// `[sign] + ≤8 magnitude bytes` = ≤9 bytes, so it serializes into a caller-provided buffer without
-    /// a transient `Vec`. Byte-IDENTICAL to [`Big::to_sign_magnitude_bytes`].
+    /// a transient `Vec`. Byte-identical to [`Big::to_sign_magnitude_bytes`].
     pub fn to_sign_magnitude_bytes_into(&self, buf: &mut [u8]) -> Option<usize> {
         let need = 1 + self.mag.len() * 8; // upper bound before the trailing-zero strip
         if need > buf.len() {
@@ -710,7 +710,7 @@ impl Big {
 
     // ─── two's-complement bytes (a signed little-endian interchange form) ────────────────────────
 
-    /// Serialize to little-endian two's-complement bytes. The MINIMAL length that round-trips: the sign
+    /// Serialize to little-endian two's-complement bytes. The minimal length that round-trips: the sign
     /// bit of the top byte must equal the value's sign, so a positive value whose top byte is ≥0x80 gets
     /// a `0x00` guard byte, and a negative one whose top byte is <0x80 gets a `0xff` guard byte. Zero is
     /// the empty slice.
@@ -793,9 +793,9 @@ impl Big {
 /// Widening multiply `u64 * u64 -> (high, low)`.
 ///
 /// On 64-bit targets this is one native `u128` multiply. On 32-bit targets — including `wasm32`, which
-/// has native 64-bit integers but EMULATES 128-bit ones (a `u64 * u64 -> u128` lowers to a `__multi3`
+/// has native 64-bit integers but emulates 128-bit ones (a `u64 * u64 -> u128` lowers to a `__multi3`
 /// libcall) — it is synthesized from four native `u32 * u32 -> u64` partial products, so it stays on
-/// native wasm `i64` ops with no 128-bit intrinsic. The limb STORAGE is `u64` on both (native on wasm);
+/// native wasm `i64` ops with no 128-bit intrinsic. The limb storage is `u64` on both (native on wasm);
 /// only this intermediate differs. The `synth-mul` feature forces the synthesized path for testing.
 #[cfg(all(
     not(feature = "synth-mul"),
@@ -836,7 +836,7 @@ fn wide_mul(a: u64, b: u64) -> (u64, u64) {
     (hi, lo)
 }
 
-/// Divide the double word `(u1·2⁶⁴ + u0)` by a NORMALIZED single-word divisor `d` (top bit set), using a
+/// Divide the double word `(u1·2⁶⁴ + u0)` by a normalized single-word divisor `d` (top bit set), using a
 /// precomputed reciprocal `v = ⌊(2¹²⁸−1)/d⌋ − 2⁶⁴` — returns `(quotient, remainder)`. Requires `u1 < d`
 /// (so the quotient fits one word). Möller & Granlund, "Improved division by invariant integers",
 /// Algorithm 4 (DIV2BY1): a widening multiply plus two conditional corrections replace the hardware
@@ -956,8 +956,8 @@ fn write_decimal_rec<W: core::fmt::Write>(
 
 /// Linear base conversion for a narrow magnitude (`2..=DECIMAL_RECURSIVE_THRESHOLD` limbs — the
 /// single-limb case is handled upstream): peel 19-digit chunks (value mod `10^19`) off `mag`, dividing
-/// the running quotient IN PLACE, then emit most-significant chunk first at natural width, the rest
-/// zero-padded to 19. Both the quotient and the chunk list live in STACK buffers (bounded by the limb
+/// the running quotient in place, then emit most-significant chunk first at natural width, the rest
+/// zero-padded to 19. Both the quotient and the chunk list live in stack buffers (bounded by the limb
 /// threshold), so this path allocates nothing. `mag` nonzero.
 fn emit_decimal_linear<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt::Result {
     let mut cur = [0u64; DECIMAL_RECURSIVE_THRESHOLD];
@@ -1023,7 +1023,7 @@ fn write_decimal_chunk<W: core::fmt::Write>(
     w.write_str(core::str::from_utf8(&buf[i..]).expect("ascii digits"))
 }
 
-/// Below this many limbs (in the SMALLER operand), schoolbook multiply beats Karatsuba (whose
+/// Below this many limbs (in the smaller operand), schoolbook multiply beats Karatsuba (whose
 /// splitting/recombination overhead dominates for small inputs). Tuned on the `mul` benchmark.
 const KARATSUBA_THRESHOLD: usize = 40;
 
@@ -1157,7 +1157,7 @@ fn bitlen_mag(m: &[u64]) -> usize {
     }
 }
 
-/// Count of trailing zero BITS in a nonzero little-endian magnitude (its 2-adic valuation).
+/// Count of trailing zero bits in a nonzero little-endian magnitude (its 2-adic valuation).
 fn trailing_zeros_mag(m: &[u64]) -> usize {
     for (i, &limb) in m.iter().enumerate() {
         if limb != 0 {
@@ -1216,7 +1216,7 @@ fn shl_bits(m: &mut Vec<u64>, k: usize) {
 }
 
 /// Unsigned division of magnitudes: `(quotient, remainder)` with `a = quotient * b + remainder`,
-/// `0 <= remainder < b`. `b` MUST be non-empty (nonzero — the caller checks). Both results normalized.
+/// `0 <= remainder < b`. `b` must be non-empty (nonzero — the caller checks). Both results normalized.
 fn divmod_mag(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
     divmod_mag_impl(a, b, true)
 }
@@ -1250,15 +1250,15 @@ fn divmod_by_limb(a: &[u64], d: u64, want_rem: bool) -> (Vec<u64>, Vec<u64>) {
     (q, r)
 }
 
-/// The 2-by-1 reciprocal `⌊(2¹²⁸−1)/d⌋ − 2⁶⁴` of a NORMALIZED `d` (top bit set), for
+/// The 2-by-1 reciprocal `⌊(2¹²⁸−1)/d⌋ − 2⁶⁴` of a normalized `d` (top bit set), for
 /// [`udiv_qrnnd_preinv`]. One `u128` divide, amortized over a whole multi-limb division.
 fn reciprocal_2by1(d: u64) -> u64 {
     ((u128::MAX / d as u128) - (1u128 << 64)) as u64
 }
 
-/// Divide `m` by a single nonzero limb IN PLACE — `m` becomes the quotient (normalized) — returning the
+/// Divide `m` by a single nonzero limb in place — `m` becomes the quotient (normalized) — returning the
 /// remainder (`< d`, so it fits one limb). Uses the reciprocal 2-by-1 division ([`udiv_qrnnd_preinv`]):
-/// one `u128` divide to build the reciprocal, then a `wide_mul` per limb — NO per-limb `u128` divide
+/// one `u128` divide to build the reciprocal, then a `wide_mul` per limb — no per-limb `u128` divide
 /// (which is a `__udivti3` libcall on aarch64/wasm). The divisor is first normalized (shifted so its top
 /// bit is set); the dividend is processed as if shifted left by the same amount, and the remainder is
 /// shifted back at the end.
