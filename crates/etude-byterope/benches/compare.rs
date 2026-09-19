@@ -108,6 +108,33 @@ fn bench_push_back(c: &mut Criterion) {
     }
 }
 
+fn bench_push_front(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let chunks: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let mut g = group(c, "push_front");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| {
+                let mut r = ByteRope::new();
+                for c in &chunks {
+                    r.push_front(c.clone());
+                }
+                black_box(r)
+            })
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| {
+                let mut v = ByteVec::new();
+                for c in &chunks {
+                    v.push_front(c.clone());
+                }
+                black_box(v)
+            })
+        });
+        g.finish();
+    }
+}
+
 fn bench_mutating(c: &mut Criterion) {
     for &n in &[SHALLOW, DEEP] {
         let label = if n == SHALLOW { "shallow" } else { "deep" };
@@ -171,6 +198,26 @@ fn bench_mutating(c: &mut Criterion) {
             label,
             |r| r.copy_to_bytes(),
             |v| v.copy_to_bytes(),
+        );
+
+        // copy_to_bytes_mut (flatten into an owned, mutable buffer)
+        pair_mut(
+            c,
+            "copy_to_bytes_mut",
+            n,
+            label,
+            |r| r.copy_to_bytes_mut(),
+            |v| v.copy_to_bytes_mut(),
+        );
+
+        // split_to_copy at the midpoint (copies out the front as one contiguous Bytes)
+        pair_mut(
+            c,
+            "split_to_copy_mid",
+            n,
+            label,
+            move |mut r| r.split_to_copy(mid).unwrap(),
+            move |mut v| v.split_to_copy(mid).unwrap(),
         );
     }
 }
@@ -252,6 +299,27 @@ fn bench_random_access(c: &mut Criterion) {
     g.finish();
 }
 
+/// Random chunk-index access (`get(i)` / `Index`) — both types index into a deque, so this is a fair
+/// head-to-head. Deep buffer only.
+fn bench_get(c: &mut Criterion) {
+    let rope = rope_of(DEEP);
+    let vec = vec_of(DEEP);
+    let count = DEEP;
+    let mut state = 0x9E37_79B9u64;
+    let mut probe = move || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (state >> 33) as usize % count
+    };
+    let mut g = group(c, "get_chunk");
+    g.bench_function(BenchmarkId::new("ByteRope", "deep"), |b| {
+        b.iter(|| black_box(rope.get(probe()).map(|c| c.len())))
+    });
+    g.bench_function(BenchmarkId::new("ByteVec", "deep"), |b| {
+        b.iter(|| black_box(vec.get(probe()).map(|c| c.len())))
+    });
+    g.finish();
+}
+
 fn byte_via_walk(v: &ByteVec, mut offset: usize) -> Option<u8> {
     for chunk in v.chunks() {
         if offset < chunk.len() {
@@ -265,10 +333,12 @@ fn byte_via_walk(v: &ByteVec, mut offset: usize) -> Option<u8> {
 criterion_group!(
     benches,
     bench_push_back,
+    bench_push_front,
     bench_mutating,
     bench_append,
     bench_iterate,
     bench_clone,
-    bench_random_access
+    bench_random_access,
+    bench_get
 );
 criterion_main!(benches);
