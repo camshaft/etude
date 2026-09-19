@@ -165,6 +165,9 @@ impl Rational {
             return normalize(self.num.add(&other.num), self.den.clone())
                 .expect("common denominator is positive");
         }
+        if let Some(r) = self.addsub_small(other, false) {
+            return r;
+        }
         let num = self.num.mul(&other.den).add(&other.num.mul(&self.den));
         let den = self.den.mul(&other.den);
         // Both denominators are strictly positive, so the product is nonzero: normalize cannot fail.
@@ -178,9 +181,37 @@ impl Rational {
             return normalize(self.num.sub(&other.num), self.den.clone())
                 .expect("common denominator is positive");
         }
+        if let Some(r) = self.addsub_small(other, true) {
+            return r;
+        }
         let num = self.num.mul(&other.den).sub(&other.num.mul(&self.den));
         let den = self.den.mul(&other.den);
         normalize(num, den).expect("product of positive denominators is nonzero")
+    }
+
+    /// Native `i128` add (`subtract == false`) or subtract for the general different-denominator case when
+    /// all components fit `i64`: `(a*d ± c*b)/(b*d)`. `a*d`, `c*b`, `b*d` each fit `i128`, but the
+    /// numerator `a*d ± c*b` (two terms up to `2^126`) can overflow `i128`, so it is checked — on overflow
+    /// (or any component exceeding `i64`) return `None` to fall back to the `Big` path.
+    fn addsub_small(&self, other: &Rational, subtract: bool) -> Option<Rational> {
+        let a = self.num.to_i64_checked()? as i128;
+        let b = self.den.to_i64_checked()? as i128;
+        let c = other.num.to_i64_checked()? as i128;
+        let d = other.den.to_i64_checked()? as i128;
+        let ad = a * d; // fits i128 (|a*d| <= 2^126)
+        let cb = c * b; // fits i128
+        let num = if subtract {
+            ad.checked_sub(cb)?
+        } else {
+            ad.checked_add(cb)?
+        };
+        let den = b * d; // b, d > 0 ⇒ den > 0
+        // gcd(0, den) = den, so a zero numerator correctly normalizes to 0/1.
+        let g = gcd_u128(num.unsigned_abs(), den as u128) as i128; // g >= 1
+        Some(Rational {
+            num: big_from_i128(num / g),
+            den: big_from_i128(den / g),
+        })
     }
 
     /// Exact product `self * other` = `(a/b) * (c/d)`.

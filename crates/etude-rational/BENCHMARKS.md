@@ -73,12 +73,16 @@ num-rational always uses `BigInt`, so this is a large win:
 |---------|----------|----------|--------------|-----------|
 | mul_i64 | 48-bit   | 0.43 µs  | 4.04 µs      | **0.107** |
 | div_i64 | 48-bit   | ~0.43 µs | ~4.1 µs      | **~0.11** |
+| add_i64 | 48-bit   | 0.40 µs  | 3.14 µs      | **0.126** |
+| sub_i64 | 48-bit   | ~0.40 µs | ~3.1 µs      | **~0.13** |
 
-~9× faster than num-rational on small operands. (The byte-width tiers below UNDER-represent this case:
-their top magnitude bit is set, so a "64b" coefficient exceeds `i64` and takes the `Big` path.) The
-residual ~0.43 µs is the two result-`Big` allocations (`from_i64`) — both implementations must allocate
-the result; only our *arithmetic* went native. `add`/`sub` will get the same native path (with a checked
-`i128` add for the `a*d + c*b` overflow edge) in a follow-up.
+**~8–9× faster than num-rational on small operands** — all four arithmetic ops now take the native path
+(`add`/`sub` via `(a*d ± c*b)/(b*d)` with a checked `i128` numerator for the overflow edge, falling back to
+`Big`). (The byte-width tiers below UNDER-represent this case: their top magnitude bit is set, so a "64b"
+coefficient exceeds `i64` and takes the `Big` path.) The residual ~0.4 µs is the two result-`Big`
+allocations (`from_i64`) — both implementations must allocate the result; only our *arithmetic* went
+native, and etude-bigint's 1-limb `Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr
+item), so that residual will shrink further when that lands.
 
 ## Large-tier scaling (2048b/4096b tiers — now part of the default board)
 
@@ -132,7 +136,10 @@ bignum-render-bound, not addressable locally.
 - **slice 11** — native `i128` fast path for `mul`/`div` on i64-fitting operands (the common small case):
   compute in `i128` (overflow-free for products of i64s), native `u128` gcd, box back — no bignum
   arithmetic. `mul_i64` 0.107× num-rational (~9× faster); `div` symmetric. Guarded by the differential
-  oracle (its i64 seeds exercise the native path). add/sub native path (checked add) to follow.
+  oracle (its i64 seeds exercise the native path).
+- **slice 12** — extended the native `i128` fast path to `add`/`sub` (`(a*d ± c*b)/(b*d)` with a checked
+  `i128` numerator for the `2^126 + 2^126` overflow edge → falls back to `Big`). `add_i64` 0.126×
+  num-rational (~8× faster); `sub` symmetric. All four arithmetic ops now native on small operands.
 - **slice 10** — re-add the `to_string` render bench (now a 64b WIN, 0.66, via etude-bigint's single-limb
   `to_decimal` fast path #82 + our alloc-lean Display) + corrected the large-tier scaling analysis:
   Karatsuba is already landed (#53), so add/sub@4096b parity is expected (num-bigint has it too) — a lead
