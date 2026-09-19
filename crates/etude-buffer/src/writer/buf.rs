@@ -102,6 +102,32 @@ impl_buf_mut!(&mut [core::mem::MaybeUninit<u8>]);
 mod tests {
     use crate::{reader::Buffer as _, writer::Buffer as _};
 
+    /// Red (breaker-byterope): `put_uninit_slice` commits `payload_len` bytes on `Ok(())` without
+    /// any guarantee the closure initialized them — the trait documents no initialization
+    /// requirement, yet the `BufMut` bridge (and the standard-type impls routed through it, like
+    /// `Vec<u8>`) run `advance_mut(payload_len)` on trust. A safe no-op closure therefore commits
+    /// stale heap as initialized content: an information leak in the same class as the
+    /// `for_socket_read` finding (#33), reachable from fully safe code. The buffer is pre-poisoned
+    /// so the stale bytes are deterministic rather than possibly-fresh zero pages; `cargo miri`
+    /// gives the definitive undefined-behavior verdict on the same sequence. Fix-shape-agnostic: a
+    /// conforming implementation may decline the write (`false`), zero-initialize before calling
+    /// the closure, or otherwise guarantee initialization — committing stale bytes fails.
+    #[test]
+    fn put_uninit_slice_must_not_commit_stale_heap_on_noop_closure() {
+        // Poison the allocation, then reset len so the spare capacity holds stale 0xAB bytes.
+        let mut v: Vec<u8> = vec![0xAB; 64];
+        v.clear();
+        let did = v
+            .put_uninit_slice(32, |_slice| Ok::<(), core::convert::Infallible>(()))
+            .unwrap();
+        assert!(
+            !did || v.iter().all(|&b| b == 0),
+            "stale heap committed as initialized content: len={} first_bytes={:?}",
+            v.len(),
+            &v[..v.len().min(8)]
+        );
+    }
+
     #[test]
     fn vec_test() {
         let mut buffer: Vec<u8> = vec![];
