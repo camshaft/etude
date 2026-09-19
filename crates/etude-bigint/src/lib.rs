@@ -90,6 +90,36 @@ impl Big {
         self.bit_len().div_ceil(8)
     }
 
+    /// The number of decimal digits in the base-10 representation of `|self|` — the length of
+    /// [`Big::to_decimal_string`] ignoring any leading `-`. Zero has one digit (`"0"`).
+    ///
+    /// Exact, and it does not render the value. A single-limb value uses the native `u64::ilog10`; a
+    /// wider one estimates the count from [`Big::bit_len`] (`≈ bits · log₁₀2`) and corrects it with a
+    /// few `10^d` threshold comparisons. This is an order of magnitude cheaper than the decimal render a
+    /// caller would otherwise run just to count digits — e.g. a decimal comparing adjusted exponents
+    /// (digit count + scale) needs the count, not the digits.
+    pub fn decimal_digit_count(&self) -> u64 {
+        match self.mag.len() {
+            0 => 1, // zero renders as "0"
+            // Fits one limb: the native base-10 ilog is exact (`ilog10(v) + 1` digits for `v ≥ 1`).
+            1 => self.mag[0].ilog10() as u64 + 1,
+            _ => {
+                let bits = self.bit_len() as u64;
+                // `1233/4096 = 0.30102539… < log₁₀2`, so `⌊bits·1233/4096⌋ ≤ D` (the true digit count);
+                // one less keeps `d` a strict lower bound, so `10^(d-1) ≤ |self|` and the loop runs.
+                let mut d = ((bits * 1233) >> 12).saturating_sub(1).max(1);
+                let mut p = pow10_mag(d); // 10^d
+                // Raise `d` until `10^d` strictly exceeds `|self|`. The last raise established
+                // `10^(d-1) ≤ |self|`, so at exit `10^(d-1) ≤ |self| < 10^d` — exactly `d` digits.
+                while Big::cmp_mag(&self.mag, &p) != Ordering::Less {
+                    mul_add_u64_inplace(&mut p, 10, 0); // p *= 10
+                    d += 1;
+                }
+                d
+            }
+        }
+    }
+
     /// Strip trailing zero limbs and force a zero magnitude to non-negative — re-establishes the
     /// canonical form after an operation that may have produced trailing zeros or a signed zero.
     fn normalize(&mut self) {
@@ -1047,6 +1077,23 @@ fn mul_add_u64_inplace(mag: &mut Vec<u64>, mul: u64, add: u64) {
     if carry != 0 {
         mag.push(carry);
     }
+}
+
+/// `10^e` as a little-endian magnitude, by binary exponentiation (`O(log e)` multiplies over the
+/// squaring `base = 10^(2ⁱ)`). The decimal-order threshold builder for [`Big::decimal_digit_count`].
+fn pow10_mag(mut e: u64) -> Vec<u64> {
+    let mut result = alloc::vec![1u64];
+    let mut base = alloc::vec![10u64];
+    while e > 0 {
+        if e & 1 == 1 {
+            result = Big::mul_mag(&result, &base);
+        }
+        e >>= 1;
+        if e > 0 {
+            base = Big::mul_mag(&base, &base);
+        }
+    }
+    result
 }
 
 /// Count of trailing zero BITS in a nonzero little-endian magnitude (its 2-adic valuation).
