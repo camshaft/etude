@@ -17,7 +17,7 @@
 //! `cargo bench -p etude-bytevec`.
 
 use bytes::{Bytes, BytesMut};
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_bytevec::ByteVec;
 use std::collections::VecDeque;
 use std::hint::black_box;
@@ -165,7 +165,10 @@ fn naive_of(n: usize) -> NaiveVec {
     (0..n).map(|i| mtu_chunk(i as u8)).collect()
 }
 
-fn group<'a>(c: &'a mut Criterion, name: &str) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
+fn group<'a>(
+    c: &'a mut Criterion,
+    name: &str,
+) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
     let mut g = c.benchmark_group(name);
     g.warm_up_time(Duration::from_millis(500));
     g.measurement_time(Duration::from_secs(2));
@@ -282,8 +285,16 @@ fn bench_mutating(c: &mut Criterion) {
             "advance_drain",
             n,
             label,
-            |mut r| while !r.is_empty() { let _ = r.advance(700); },
-            |mut v| while !v.is_empty() { v.advance(700); },
+            |mut r| {
+                while !r.is_empty() {
+                    let _ = r.advance(700);
+                }
+            },
+            |mut v| {
+                while !v.is_empty() {
+                    v.advance(700);
+                }
+            },
         );
 
         let mid = n * 1400 / 2;
@@ -309,7 +320,14 @@ fn bench_mutating(c: &mut Criterion) {
                 v
             },
         );
-        pair_mut(c, "copy_to_bytes", n, label, |r| r.copy_to_bytes(), |v| v.copy_to_bytes());
+        pair_mut(
+            c,
+            "copy_to_bytes",
+            n,
+            label,
+            |r| r.copy_to_bytes(),
+            |v| v.copy_to_bytes(),
+        );
         pair_mut(
             c,
             "append_mid",
@@ -356,7 +374,9 @@ fn bench_clone(c: &mut Criterion) {
         let label = format!("{n}");
         let rope = rope_of(n);
         let naive = naive_of(n);
-        g.bench_function(BenchmarkId::new("rope", &label), |b| b.iter(|| black_box(rope.clone())));
+        g.bench_function(BenchmarkId::new("rope", &label), |b| {
+            b.iter(|| black_box(rope.clone()))
+        });
         g.bench_function(BenchmarkId::new("naive_deque", &label), |b| {
             b.iter(|| black_box(naive.clone()))
         });
@@ -394,7 +414,9 @@ fn bench_random_byte(c: &mut Criterion) {
         (state >> 33) as usize % total
     };
     let mut g = group(c, "random_byte_access");
-    g.bench_function("rope_byte_at", |b| b.iter(|| black_box(rope.byte_at(probe()))));
+    g.bench_function("rope_byte_at", |b| {
+        b.iter(|| black_box(rope.byte_at(probe())))
+    });
     g.bench_function("naive_walk_to_byte", |b| {
         b.iter(|| black_box(byte_via_walk(&naive, probe())))
     });
