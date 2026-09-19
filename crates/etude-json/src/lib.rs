@@ -76,12 +76,18 @@ pub enum TokenKind {
     Number,
 }
 
-/// The extra data a [`TokenKind::String`] token carries: the span of its content between the quotes
-/// and whether that content contains escape sequences.
+/// The kind-specific payload a [`Token`] carries. A token is at most one of a string or a number, so
+/// this is an enum (its size is the larger arm) rather than two `Option` fields (whose sizes add) —
+/// it keeps [`Token`] small on the hot path, where it is moved through the parser's lookahead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StringInfo {
-    content: Span,
-    has_escapes: bool,
+enum Payload {
+    /// Structural / keyword tokens carry no extra data.
+    None,
+    /// A [`TokenKind::String`]: the span of its content between the quotes and whether that content
+    /// contains any escape sequence.
+    Str { content: Span, has_escapes: bool },
+    /// A [`TokenKind::Number`]: its decomposition into sign / integer / fraction / exponent spans.
+    Num(NumberParts),
 }
 
 /// The parts of a [`TokenKind::Number`] lexeme, recorded during the mandatory boundary scan as
@@ -115,9 +121,13 @@ pub struct NumberParts {
 pub struct Token {
     kind: TokenKind,
     span: Span,
-    string: Option<StringInfo>,
-    number: Option<NumberParts>,
+    payload: Payload,
 }
+
+// A `Token` is moved through the parser's one-token lookahead on the hot path, so keep it small.
+// Folding the mutually-exclusive string/number data into one `Payload` enum (rather than two `Option`
+// fields whose sizes add) holds it here; a regression is a conscious change, not a silent regrowth.
+const _: () = assert!(core::mem::size_of::<Token>() <= 96);
 
 impl Token {
     /// The token's lexical class.
@@ -135,13 +145,19 @@ impl Token {
     /// `None` for any other kind. When [`Token::string_has_escapes`] is `false`, a rope slice of this
     /// span is the string's exact bytes with no decoding needed.
     pub fn string_span(&self) -> Option<Span> {
-        self.string.map(|s| s.content)
+        match self.payload {
+            Payload::Str { content, .. } => Some(content),
+            _ => None,
+        }
     }
 
     /// For a [`TokenKind::String`] token, whether its content contains any escape sequence (`\` …);
     /// `None` for any other kind. `false` means the content span is the literal string bytes.
     pub fn string_has_escapes(&self) -> Option<bool> {
-        self.string.map(|s| s.has_escapes)
+        match self.payload {
+            Payload::Str { has_escapes, .. } => Some(has_escapes),
+            _ => None,
+        }
     }
 
     /// Materialize the unescaped content of a [`TokenKind::String`] token as an owned `String`;
@@ -154,8 +170,10 @@ impl Token {
     /// `input` must be the rope this token was tokenized from; the content span is resolved against
     /// it. The token's content was validated during tokenization, so decoding does not fail.
     pub fn decode_string(&self, input: &ByteVec) -> Option<String> {
-        let info = self.string?;
-        Some(decode_content(input, info.content))
+        match self.payload {
+            Payload::Str { content, .. } => Some(decode_content(input, content)),
+            _ => None,
+        }
     }
 
     /// For a [`TokenKind::Number`] token, whether the literal is an integer — no fraction and no
@@ -164,8 +182,10 @@ impl Token {
     /// This is derived from the parts recorded during the scan the tokenizer already had to perform,
     /// so a decoder can pick an integer fast path without re-reading the number's bytes.
     pub fn number_is_integer(&self) -> Option<bool> {
-        self.number
-            .map(|n| n.fraction.is_none() && n.exponent.is_none())
+        match self.payload {
+            Payload::Num(n) => Some(n.fraction.is_none() && n.exponent.is_none()),
+            _ => None,
+        }
     }
 
     /// For a [`TokenKind::Number`] token, its decomposition into sign / integer / fraction / exponent
@@ -175,7 +195,10 @@ impl Token {
     /// directly from the digit spans — resolve each span against the originating rope for its bytes —
     /// with no re-scan and no digits copied by the tokenizer.
     pub fn number_parts(&self) -> Option<NumberParts> {
-        self.number
+        match self.payload {
+            Payload::Num(n) => Some(n),
+            _ => None,
+        }
     }
 }
 
@@ -316,8 +339,7 @@ impl<'a> Tokenizer<'a> {
         Token {
             kind,
             span: Span::new(start, self.cursor.offset()),
-            string: None,
-            number: None,
+            payload: Payload::None,
         }
     }
 
@@ -393,11 +415,10 @@ impl<'a> Tokenizer<'a> {
                     return Ok(Token {
                         kind: TokenKind::String,
                         span: Span::new(start, self.cursor.offset()),
-                        string: Some(StringInfo {
+                        payload: Payload::Str {
                             content,
                             has_escapes,
-                        }),
-                        number: None,
+                        },
                     });
                 }
                 b'\\' => {
@@ -568,8 +589,7 @@ impl<'a> Tokenizer<'a> {
         Ok(Token {
             kind: TokenKind::Number,
             span: Span::new(start, self.cursor.offset()),
-            string: None,
-            number: Some(NumberParts {
+            payload: Payload::Num(NumberParts {
                 negative,
                 integer,
                 fraction,
@@ -595,8 +615,7 @@ impl<'a> Tokenizer<'a> {
         Ok(Token {
             kind,
             span: Span::new(start, self.cursor.offset()),
-            string: None,
-            number: None,
+            payload: Payload::None,
         })
     }
 }
