@@ -1,0 +1,524 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Differential test suite: every operation is checked against `num-bigint` (the oracle). Two
+//! engines drive it — a fast deterministic xorshift RNG for a dense fixed corpus, and a `bolero`
+//! property harness for coverage-guided exploration + shrinking.
+
+use super::*;
+use num_bigint::BigInt as Ref;
+use num_traits::{Signed, Zero};
+
+// Convert a native `Big` to the reference `num_bigint::BigInt` for differential comparison.
+fn to_ref(b: &Big) -> Ref {
+    // Build from sign + LE u32 limbs.
+    let mut bytes = Vec::new();
+    for &limb in &b.mag {
+        bytes.extend_from_slice(&limb.to_le_bytes());
+    }
+    let mag = num_bigint::BigUint::from_bytes_le(&bytes);
+    let sign = if b.is_zero() {
+        num_bigint::Sign::NoSign
+    } else if b.neg {
+        num_bigint::Sign::Minus
+    } else {
+        num_bigint::Sign::Plus
+    };
+    Ref::from_biguint(sign, mag)
+}
+
+fn from_i128(v: i128) -> Big {
+    // Build a Big from an i128 for test seeding (covers > i64 range).
+    if v == 0 {
+        return Big::zero();
+    }
+    let neg = v < 0;
+    let mut m = v.unsigned_abs();
+    let mut mag = Vec::new();
+    while m != 0 {
+        mag.push((m & 0xffff_ffff) as u32);
+        m >>= 32;
+    }
+    let mut b = Big { neg, mag };
+    b.normalize();
+    b
+}
+
+/// Reference gcd via Euclid over non-negative num-bigint values (avoids a `num-integer` dep).
+fn ref_gcd(mut a: Ref, mut b: Ref) -> Ref {
+    while !b.is_zero() {
+        let r = &a % &b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+/// Check every operation of a `(Big, Ref)` pair against the oracle. Shared by the RNG corpus and the
+/// bolero harness so both engines exercise the identical assertions.
+fn check_pair(a: &Big, b: &Big) {
+    let (ra, rb) = (to_ref(a), to_ref(b));
+
+    assert_eq!(to_ref(&a.add(b)), &ra + &rb, "add {a:?} {b:?}");
+    assert_eq!(to_ref(&a.sub(b)), &ra - &rb, "sub {a:?} {b:?}");
+    assert_eq!(to_ref(&a.mul(b)), &ra * &rb, "mul {a:?} {b:?}");
+    assert_eq!(to_ref(&a.neg()), -&ra, "neg {a:?}");
+    assert_eq!(
+        a.to_decimal_string(),
+        ra.to_string(),
+        "to_decimal_string {a:?}"
+    );
+
+    let ord = a.cmp(b);
+    assert_eq!(ord, ra.cmp(&rb), "cmp {a:?} {b:?}");
+    // The byte-form compare (no `Big` decode) must give the SAME ordering as `Big::cmp`.
+    assert_eq!(
+        Big::cmp_sign_magnitude_bytes(&a.to_sign_magnitude_bytes(), &b.to_sign_magnitude_bytes()),
+        ord,
+        "byte-form cmp agrees with Big::cmp {a:?} {b:?}"
+    );
+    // The byte-form i64 narrowing (no `Big` decode) must match `Big::to_i64_checked`.
+    assert_eq!(
+        Big::i64_checked_from_sign_magnitude_bytes(&a.to_sign_magnitude_bytes()),
+        a.to_i64_checked(),
+        "byte-form i64-narrow agrees with to_i64_checked {a:?}"
+    );
+    // The byte-form i128 read: when Some, it must round-trip byte-identically and equal the value;
+    // when None the value genuinely exceeds i128.
+    let a_bytes = a.to_sign_magnitude_bytes();
+    match Big::i128_from_sign_magnitude_bytes(&a_bytes) {
+        Some(v) => {
+            let mut buf = [0u8; 17];
+            let n = Big::i128_to_sign_magnitude_bytes_into(v, &mut buf).unwrap();
+            assert_eq!(
+                &buf[..n],
+                &a_bytes[..],
+                "i128 byte round-trip is byte-identical {a:?}"
+            );
+            assert_eq!(
+                Big::from_sign_magnitude_bytes(&buf[..n]),
+                *a,
+                "i128 round-trip value {a:?}"
+            );
+        }
+        None => assert!(
+            a_bytes.get(1..).map_or(0, |m| m.len()) >= 16,
+            "i128 None only for >i64-ish wide {a:?}"
+        ),
+    }
+
+    // Sign-magnitude + two's-complement byte round-trips.
+    assert_eq!(
+        Big::from_sign_magnitude_bytes(&a_bytes),
+        *a,
+        "sign-mag round-trip {a:?}"
+    );
+    let tc = a.to_le_twos_complement_bytes();
+    assert_eq!(
+        Big::from_le_twos_complement_bytes(&tc),
+        *a,
+        "2c round-trip {a:?}"
+    );
+    assert_eq!(
+        Big::from_le_twos_complement_bytes(&ra.to_signed_bytes_le()),
+        *a,
+        "num-bigint 2c bytes parse to {a:?}"
+    );
+
+    if !b.is_zero() {
+        let (q, r) = a.divmod(b).unwrap();
+        // num-bigint's / and % are truncating (toward zero), matching our divmod.
+        assert_eq!(to_ref(&q), &ra / &rb, "div {a:?} {b:?}");
+        assert_eq!(to_ref(&r), &ra % &rb, "rem {a:?} {b:?}");
+        // The defining identity: a == q*b + r.
+        assert_eq!(*a, q.mul(b).add(&r), "divmod identity {a:?} {b:?}");
+        // |remainder| < |divisor|.
+        assert_eq!(
+            Big {
+                neg: false,
+                mag: r.mag.clone()
+            }
+            .cmp(&Big {
+                neg: false,
+                mag: b.mag.clone()
+            }),
+            Ordering::Less,
+            "|rem| < |divisor| {a:?} {b:?}"
+        );
+    } else {
+        assert!(a.divmod(b).is_none(), "div by zero → None");
+    }
+
+    // gcd: sign-agnostic, non-negative; gcd(0,0)=0; divides both operands exactly.
+    let g = a.gcd(b);
+    assert!(!g.neg, "gcd is non-negative {a:?} {b:?}");
+    assert_eq!(to_ref(&g), ref_gcd(ra.abs(), rb.abs()), "gcd {a:?} {b:?}");
+    if !g.is_zero() {
+        assert!(a.divmod(&g).unwrap().1.is_zero(), "gcd divides a exactly");
+        assert!(b.divmod(&g).unwrap().1.is_zero(), "gcd divides b exactly");
+    } else {
+        assert!(
+            a.is_zero() && b.is_zero(),
+            "gcd is 0 only when both operands are 0"
+        );
+    }
+}
+
+// A small deterministic PRNG (no rand dep; reproducibility matters for a differential corpus).
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        // xorshift64
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    fn big(&mut self) -> Big {
+        self.big_upto(5) // 0..=4 limbs
+    }
+    /// A random `Big` with 0..`max_limbs` limbs (wider magnitudes exercise the divmod limb-boundary
+    /// carry/borrow that ≤4-limb operands never reach).
+    fn big_upto(&mut self, max_limbs: u64) -> Big {
+        let limbs = (self.next() % max_limbs) as usize;
+        let mut mag = Vec::new();
+        for _ in 0..limbs {
+            mag.push(self.next() as u32);
+        }
+        let neg = self.next() & 1 == 1;
+        let mut b = Big { neg, mag };
+        b.normalize();
+        b
+    }
+}
+
+#[test]
+fn differential_arithmetic_vs_num_bigint() {
+    let mut rng = Rng(0x1234_5678_9abc_def1);
+    for _ in 0..5000 {
+        let a = rng.big();
+        let b = rng.big();
+        check_pair(&a, &b);
+    }
+}
+
+/// Coverage-guided + shrinking differential harness: build two `Big`s from arbitrary two's-complement
+/// byte strings (giving arbitrary sign and magnitude) and run the full oracle check on the pair. The
+/// bolero engine explores the operand space the fixed RNG corpus does not, and shrinks any failure to
+/// a minimal reproducer.
+#[test]
+fn differential_bolero() {
+    bolero::check!()
+        .with_type::<(Vec<u8>, Vec<u8>)>()
+        .cloned()
+        .for_each(|(ab, bb)| {
+            let a = Big::from_le_twos_complement_bytes(&ab);
+            let b = Big::from_le_twos_complement_bytes(&bb);
+            check_pair(&a, &b);
+        });
+}
+
+#[test]
+fn canonical_form_invariants() {
+    // Zero is unique and non-negative.
+    assert!(Big::zero().is_zero());
+    assert_eq!(
+        Big::zero(),
+        Big {
+            neg: false,
+            mag: Vec::new()
+        }
+    );
+    // A "-0" or trailing-zero-limb input normalizes to canonical zero / minimal form.
+    let mut z = Big {
+        neg: true,
+        mag: alloc::vec![0, 0],
+    };
+    z.normalize();
+    assert_eq!(z, Big::zero());
+    let mut t = Big {
+        neg: false,
+        mag: alloc::vec![5, 0, 0],
+    };
+    t.normalize();
+    assert_eq!(t.mag, alloc::vec![5]);
+    // Subtraction that reaches zero canonicalizes the sign.
+    let five = Big::from_i64(5);
+    assert_eq!(five.sub(&five), Big::zero());
+    assert!(!five.sub(&five).neg);
+}
+
+/// The `Big` primitives compose into a correct RATIONAL normalization (lowest terms via `gcd`,
+/// denominator strictly positive, sign on the numerator) — validating that `gcd` + `divmod` (exact
+/// division by the gcd) + `neg` compose canonically.
+#[test]
+fn gcd_and_divmod_compose_into_rational_normalization() {
+    // Normalize (num, den) → lowest terms, denominator > 0, sign on numerator. `den != 0`.
+    fn normalize(num: &Big, den: &Big) -> (Big, Big) {
+        assert!(
+            !den.is_zero(),
+            "the caller rejects a zero denominator before normalizing"
+        );
+        let g = num.gcd(den); // non-negative; gcd(0, d) = |d|
+        // Divide both by the gcd (exact — g divides both). divmod's quotient carries each operand's sign.
+        let (mut n, _) = num.divmod(&g).expect("gcd is nonzero when den != 0");
+        let (mut d, _) = den.divmod(&g).expect("gcd is nonzero when den != 0");
+        // Denominator strictly positive: if it came out negative, flip BOTH signs (value unchanged).
+        if d.neg {
+            n = n.neg();
+            d = d.neg();
+        }
+        (n, d)
+    }
+    // a/b == c/d iff a*d == c*b.
+    let cross_eq =
+        |n1: &Big, d1: &Big, n2: &Big, d2: &Big| n1.mul(d2).cmp(&n2.mul(d1)) == Ordering::Equal;
+    let cases: &[(i64, i64)] = &[
+        (1, 2),
+        (2, 4),
+        (6, 8),
+        (-1, 2),
+        (1, -2),
+        (-6, -8),
+        (0, 5),
+        (10, 5),
+        (-10, 5),
+        (7, 1),
+        (100, -35),
+        (-100, 35),
+        (i64::MAX, 3),
+        (3, i64::MAX),
+    ];
+    for &(n, d) in cases {
+        let (nn, nd) = normalize(&Big::from_i64(n), &Big::from_i64(d));
+        // (1) denominator strictly positive (never zero — den != 0 — and never negative).
+        assert!(
+            !nd.neg && !nd.is_zero(),
+            "normalized denominator is strictly positive for {n}/{d}"
+        );
+        // (2) lowest terms: gcd(|num'|, den') == 1 (or num' == 0 with den' == 1).
+        let g = nn.gcd(&nd);
+        if nn.is_zero() {
+            assert_eq!(nd, Big::from_i64(1), "0/d normalizes to 0/1 for {n}/{d}");
+        } else {
+            assert_eq!(
+                g,
+                Big::from_i64(1),
+                "num'/den' is in lowest terms for {n}/{d}"
+            );
+        }
+        // (3) value preserved: num'/den' == n/d (cross-multiply).
+        assert!(
+            cross_eq(&nn, &nd, &Big::from_i64(n), &Big::from_i64(d)),
+            "value preserved for {n}/{d}"
+        );
+        // (4) canonical: normalizing an already-normalized pair is a fixpoint.
+        let (nn2, nd2) = normalize(&nn, &nd);
+        assert_eq!(
+            (nn2, nd2),
+            (nn, nd),
+            "normalization is idempotent for {n}/{d}"
+        );
+    }
+    // Two equal-value pairs normalize to the SAME canonical form (the map-key property).
+    let (a_n, a_d) = normalize(&Big::from_i64(6), &Big::from_i64(8));
+    let (b_n, b_d) = normalize(&Big::from_i64(-9), &Big::from_i64(-12)); // == 6/8 == 3/4
+    assert_eq!(
+        (a_n, a_d),
+        (b_n, b_d),
+        "6/8 and -9/-12 normalize identically (both 3/4)"
+    );
+}
+
+#[test]
+fn i64_round_trip_and_bounds() {
+    for &v in &[
+        0i64,
+        1,
+        -1,
+        42,
+        -42,
+        i64::MAX,
+        i64::MIN,
+        1 << 40,
+        -(1 << 40),
+        0xffff_ffff,
+        -0xffff_ffff,
+    ] {
+        let b = Big::from_i64(v);
+        assert_eq!(b.to_i64_checked(), Some(v), "i64 round-trip {v}");
+        assert_eq!(to_ref(&b), Ref::from(v), "i64 vs ref {v}");
+    }
+    // Out-of-range narrowing → None.
+    let too_big = Big::from_i64(i64::MAX).add(&Big::from_i64(1)); // 2^63
+    assert_eq!(too_big.to_i64_checked(), None, "2^63 does not fit i64");
+    let way_big = from_i128((i64::MAX as i128) * 1000);
+    assert_eq!(way_big.to_i64_checked(), None);
+    // i64::MIN (= -2^63) DOES fit.
+    assert_eq!(Big::from_i64(i64::MIN).to_i64_checked(), Some(i64::MIN));
+}
+
+#[test]
+fn sign_magnitude_bytes_round_trip_and_canonical() {
+    let mut rng = Rng(0xdead_beef_cafe_0001);
+    for _ in 0..2000 {
+        let b = rng.big();
+        let bytes = b.to_sign_magnitude_bytes();
+        assert_eq!(
+            Big::from_sign_magnitude_bytes(&bytes),
+            b,
+            "sign-mag round-trip {b:?}"
+        );
+        // Canonical: equal values → identical bytes (the map-key requirement).
+        assert_eq!(bytes, b.clone().to_sign_magnitude_bytes());
+    }
+    // Zero is exactly [0x00].
+    assert_eq!(Big::zero().to_sign_magnitude_bytes(), alloc::vec![0u8]);
+    assert_eq!(Big::from_sign_magnitude_bytes(&[0]), Big::zero());
+}
+
+#[test]
+fn twos_complement_bytes_round_trip_vs_num_bigint() {
+    let mut rng = Rng(0x0badf00d_12345678);
+    for _ in 0..3000 {
+        let b = rng.big();
+        let bytes = b.to_le_twos_complement_bytes();
+        // Round-trips through our own parser.
+        assert_eq!(
+            Big::from_le_twos_complement_bytes(&bytes),
+            b,
+            "2c round-trip {b:?}"
+        );
+        // Matches num-bigint's signed LE two's-complement encoding.
+        let rbytes = to_ref(&b).to_signed_bytes_le();
+        // num-bigint encodes 0 as [0]; we encode 0 as [] — normalize both to "value" via re-parse.
+        assert_eq!(
+            Big::from_le_twos_complement_bytes(&rbytes),
+            b,
+            "num-bigint 2c bytes {rbytes:?} parse to {b:?}"
+        );
+    }
+}
+
+/// divmod is the algorithm with real subtlety (bit-at-a-time long division; a limb-boundary carry/
+/// borrow bug hides only on LARGE operands the ≤4-limb random fuzzer never reaches). Two prongs:
+/// (1) a WIDE differential vs num-bigint (up to ~20 limbs = ~640-bit); (2) structural corner cases —
+/// powers of two (all-carry shifts), a single-limb divisor of a huge dividend, dividend just below /
+/// at / above the divisor, all-`0xffffffff` limbs, and an EXACT multiple (`(k*d)/d == k`, rem 0).
+#[test]
+fn divmod_edge_cases_and_wide_operands() {
+    // (1) Wide differential — magnitudes up to ~20 limbs, both signs.
+    let mut rng = Rng(0xf00d_1234_5678_9abc);
+    for _ in 0..3000 {
+        let a = rng.big_upto(20);
+        let b = rng.big_upto(20);
+        let (ra, rb) = (to_ref(&a), to_ref(&b));
+        if b.is_zero() {
+            assert!(a.divmod(&b).is_none());
+            continue;
+        }
+        let (q, r) = a.divmod(&b).unwrap();
+        assert_eq!(to_ref(&q), &ra / &rb, "wide div {a:?} {b:?}");
+        assert_eq!(to_ref(&r), &ra % &rb, "wide rem {a:?} {b:?}");
+        assert_eq!(a, q.mul(&b).add(&r), "wide divmod identity");
+        // |remainder| < |divisor| (the division invariant).
+        assert_eq!(
+            Big {
+                neg: false,
+                mag: r.mag.clone()
+            }
+            .cmp(&Big {
+                neg: false,
+                mag: b.mag.clone()
+            }),
+            Ordering::Less,
+            "|rem| < |divisor| {a:?} {b:?}"
+        );
+    }
+
+    // (2) Structural corners.
+    let pow2 = |bits: u32| -> Big {
+        // 2^bits as a Big (a single set bit — exercises the shift/carry path).
+        let limb = (bits / 32) as usize;
+        let mut mag = alloc::vec![0u32; limb + 1];
+        mag[limb] = 1 << (bits % 32);
+        let mut b = Big { neg: false, mag };
+        b.normalize();
+        b
+    };
+    // 2^200 / 2^64 = 2^136, remainder 0.
+    let (q, r) = pow2(200).divmod(&pow2(64)).unwrap();
+    assert_eq!(q, pow2(136), "2^200 / 2^64 = 2^136");
+    assert!(r.is_zero(), "2^200 % 2^64 = 0");
+    // (2^200 - 1) / 2^64 → quotient 2^136 - 1, remainder 2^64 - 1 (all low bits set).
+    let big = pow2(200).sub(&Big::from_i64(1));
+    let (q2, r2) = big.divmod(&pow2(64)).unwrap();
+    assert_eq!(
+        to_ref(&q2),
+        to_ref(&big) / to_ref(&pow2(64)),
+        "(2^200-1)/2^64 vs ref"
+    );
+    assert_eq!(
+        to_ref(&r2),
+        to_ref(&big) % to_ref(&pow2(64)),
+        "(2^200-1)%2^64 vs ref"
+    );
+
+    // Single-limb divisor of a huge dividend (the common `n / small` shape).
+    let huge = pow2(300).add(&Big::from_i64(12345));
+    let small = Big::from_i64(7);
+    let (qs, rs) = huge.divmod(&small).unwrap();
+    assert_eq!(to_ref(&qs), to_ref(&huge) / to_ref(&small));
+    assert_eq!(to_ref(&rs), to_ref(&huge) % to_ref(&small));
+
+    // Dividend just-below / at / just-above the divisor.
+    let d = pow2(128);
+    let below = d.sub(&Big::from_i64(1));
+    assert_eq!(
+        below.divmod(&d).unwrap(),
+        (Big::zero(), below.clone()),
+        "a<d → (0, a)"
+    );
+    assert_eq!(
+        d.divmod(&d).unwrap(),
+        (Big::from_i64(1), Big::zero()),
+        "a==d → (1, 0)"
+    );
+    let above = d.add(&Big::from_i64(1));
+    assert_eq!(
+        above.divmod(&d).unwrap(),
+        (Big::from_i64(1), Big::from_i64(1)),
+        "a=d+1 → (1, 1)"
+    );
+
+    // All-0xffffffff limbs (max limb values — carry propagation stress).
+    let maxes = Big {
+        neg: false,
+        mag: alloc::vec![0xffff_ffff; 8],
+    };
+    let mref = to_ref(&maxes);
+    for div in [Big::from_i64(3), pow2(32), pow2(100), maxes.clone()] {
+        let (q, r) = maxes.divmod(&div).unwrap();
+        assert_eq!(to_ref(&q), &mref / to_ref(&div), "maxes / {div:?}");
+        assert_eq!(to_ref(&r), &mref % to_ref(&div), "maxes % {div:?}");
+    }
+
+    // Exact multiple: (k*d)/d == k, rem 0 — for random NON-NEGATIVE k, d.
+    let abs = |mut b: Big| {
+        b.neg = false;
+        b
+    };
+    for _ in 0..500 {
+        let k = abs(rng.big_upto(8));
+        let dd = abs(rng.big_upto(8));
+        if dd.is_zero() {
+            continue;
+        }
+        let prod = k.mul(&dd);
+        let (q, r) = prod.divmod(&dd).unwrap();
+        assert_eq!(q, k, "(k*d)/d == k");
+        assert!(r.is_zero(), "(k*d)%d == 0");
+    }
+}
