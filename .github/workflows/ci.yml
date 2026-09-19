@@ -28,6 +28,23 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # Every shipping crate must compile to wasm (operator directive 2026-09-19): the Cadenza
+  # platform runs these crates as wasm guests. Gate the LIB targets only — benches/tests
+  # (criterion, jemalloc, bolero engines) are dev-only and need not build for wasm.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32-wasip1
+      - uses: camshaft/rust-cache@v1
+      # pure-wasm (no OS): default features and the no_std/alloc floor
+      - run: cargo check --workspace --lib --target wasm32-unknown-unknown
+      - run: cargo check --workspace --lib --no-default-features --target wasm32-unknown-unknown
+      # WASI (if/where the platform runs wasmtime with WASI)
+      - run: cargo check --workspace --lib --target wasm32-wasip1
+
   clippy:
     runs-on: ubuntu-latest
     steps:
