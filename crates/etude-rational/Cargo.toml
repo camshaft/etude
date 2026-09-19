@@ -1,0 +1,28 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-rational"
+version = "0.1.0"
+description = "Exact rational numbers: a normalized (reduced, positive-denominator) num/den pair over etude-bigint's arbitrary-precision integers"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+etude-bigint = { version = "0.1", path = "../etude-bigint" }
+
+[dev-dependencies]
+# Differential oracle: every operation is checked against num-rational's BigRational (the reference
+# implementation). Kept out of the shipped crate so nothing but etude-bigint + alloc is a build dependency.
+num-rational = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+# Coverage-guided property + shrinking engine for the differential harness.
+bolero = "0.13"
+bolero-generator = "0.13"
+# Benchmark scoreboard vs num-rational across magnitude tiers.
+criterion = "0.5"
+# Match the host allocator so benchmarks reflect production allocation behavior.
+tikv-jemallocator = "0.6"
