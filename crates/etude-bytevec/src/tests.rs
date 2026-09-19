@@ -342,6 +342,64 @@ fn advance_partial_and_whole_chunks() {
 
 /// Drives the rope past `PROMOTE_AT` (into `Deep`) and back down (into `Small`), checking that
 /// order, length, and byte content stay correct across both transitions.
+/// Pins the exact tier-transition boundaries and the promote/demote hysteresis — the anti-thrash
+/// gap between `PROMOTE_AT` and `DEMOTE_AT`. `promotes_and_demotes_preserving_contents` only checks
+/// the tier at the extremes, so an off-by-one in either threshold (or a collapsed hysteresis band
+/// that thrashes tiers on every push/pop around the boundary) would preserve content and slip
+/// through. Growing must stay `Small` up to `PROMOTE_AT` chunks and promote only when the count
+/// exceeds it; a promoted rope must stay `Deep` all the way down to `DEMOTE_AT` and demote there,
+/// not earlier. Content and structural invariants are checked at every step.
+#[test]
+fn tier_transitions_hit_exact_boundaries_with_hysteresis() {
+    let mut rope = ByteVec::new();
+    let mut model: Vec<u8> = Vec::new();
+
+    // Grow to exactly PROMOTE_AT chunks: still Small (promote is strictly ABOVE the threshold).
+    for i in 0..PROMOTE_AT {
+        rope.push_back(chunk(&[i as u8]));
+        model.push(i as u8);
+        assert!(
+            matches!(rope.repr, Repr::Small { .. }),
+            "still Small at {} chunks (<= PROMOTE_AT={PROMOTE_AT})",
+            i + 1
+        );
+    }
+    assert_eq!(rope.chunks().len(), PROMOTE_AT);
+
+    // One more chunk crosses the boundary into Deep.
+    rope.push_back(chunk(&[0xEE]));
+    model.push(0xEE);
+    assert!(
+        matches!(rope.repr, Repr::Deep(_)),
+        "promoted at {} chunks (> PROMOTE_AT)",
+        PROMOTE_AT + 1
+    );
+    assert_eq!(rope, model[..], "content across promotion");
+
+    // Shrink from the front down to DEMOTE_AT. Hysteresis: the rope must stay Deep as long as the
+    // count is strictly above DEMOTE_AT, and demote exactly when the count reaches it — never
+    // demoting merely because the count fell back below PROMOTE_AT (the [DEMOTE_AT+1, PROMOTE_AT]
+    // band stays Deep once promoted). So after each pop the tier is Deep iff count > DEMOTE_AT.
+    while rope.chunks().len() > DEMOTE_AT {
+        rope.pop_front();
+        model.remove(0);
+        let count = rope.chunks().len();
+        if count > DEMOTE_AT {
+            assert!(
+                matches!(rope.repr, Repr::Deep(_)),
+                "stays Deep at {count} chunks (> DEMOTE_AT={DEMOTE_AT}) — hysteresis holds"
+            );
+        } else {
+            assert_eq!(count, DEMOTE_AT, "shrink lands exactly on DEMOTE_AT");
+            assert!(
+                matches!(rope.repr, Repr::Small { .. }),
+                "demoted at exactly DEMOTE_AT={DEMOTE_AT} chunks"
+            );
+        }
+        assert_eq!(rope, model[..], "content during shrink at {count} chunks");
+    }
+}
+
 #[test]
 fn promotes_and_demotes_preserving_contents() {
     let n = PROMOTE_AT * 4 + 5;
