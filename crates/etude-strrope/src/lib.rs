@@ -494,20 +494,40 @@ impl PartialEq<&str> for StrRope {
 
 impl core::fmt::Display for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Bulk-write whole-chunk `&str` runs (stitching only the ≤3-byte codepoint seams) — no
-        // whole-content allocation, and no per-char overhead.
-        for_each_str(self, |s| f.write_str(s))
+        // Fast path: with no width or precision set, `Formatter::pad` would just write the content
+        // verbatim, so stream whole-chunk `&str` runs (stitching only the ≤3-byte codepoint seams) —
+        // no whole-content allocation, no per-char overhead.
+        if f.width().is_none() && f.precision().is_none() {
+            return for_each_str(self, |s| f.write_str(s));
+        }
+        // Formatted: width, fill, alignment, and precision (char-count truncation) are applied by
+        // `Formatter::pad`, which operates on a contiguous `&str` — as `str`'s own Display does — so
+        // linearize the content and delegate for exact parity.
+        let contiguous = self.0.copy_to_bytes();
+        match core::str::from_utf8(&contiguous) {
+            Ok(s) => f.pad(s),
+            Err(_) => Err(core::fmt::Error), // unreachable given the UTF-8 invariant
+        }
     }
 }
 
 impl core::fmt::Debug for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         use core::fmt::Write as _;
-        // Same bulk `&str` runs, escaped per `<str as Debug>` (`str::escape_debug` is a bulk-writing
-        // Display adapter, so escaping stays out of the per-char path).
-        f.write_char('"')?;
-        for_each_str(self, |s| write!(f, "{}", s.escape_debug()))?;
-        f.write_char('"')
+        // Fast path (no width/precision): stream whole-chunk `&str` runs, escaped per `<str as Debug>`
+        // (`str::escape_debug` is a bulk-writing Display adapter, so escaping stays out of the per-char
+        // path) — no whole-content allocation.
+        if f.width().is_none() && f.precision().is_none() {
+            f.write_char('"')?;
+            for_each_str(self, |s| write!(f, "{}", s.escape_debug()))?;
+            return f.write_char('"');
+        }
+        // Formatted: delegate to `str`'s own Debug over the linearized content for exact flag parity.
+        let contiguous = self.0.copy_to_bytes();
+        match core::str::from_utf8(&contiguous) {
+            Ok(s) => core::fmt::Debug::fmt(s, f),
+            Err(_) => Err(core::fmt::Error),
+        }
     }
 }
 
