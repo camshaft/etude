@@ -18,7 +18,7 @@
 
 use bytes::{Bytes, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use etude_bytevec::{ByteVec, Rope, Utf8};
+use etude_bytevec::{ByteVec, CompactionConfig, Rope, Utf8};
 use std::collections::VecDeque;
 use std::hint::black_box;
 use std::time::Duration;
@@ -900,6 +900,88 @@ fn bench_reader(c: &mut Criterion) {
     }
 }
 
+/// Compaction: collapsing a fragmented rope into contiguous storage. Each "group" is a run of 8 small
+/// (64 B) fragments followed by one large (2 KiB) chunk. Full `compact()` copies every byte into one
+/// buffer; `compact_with(skip_above(1024))` coalesces each small run into one buffer but leaves the
+/// large chunk in place (no memcpy). Same input for both, so the delta is the copy the config saves.
+fn bench_compact(c: &mut Criterion) {
+    fn mixed(groups: usize) -> ByteVec {
+        let mut chunks: Vec<Bytes> = Vec::with_capacity(groups * 9);
+        for i in 0..groups {
+            for _ in 0..8 {
+                chunks.push(Bytes::from(vec![i as u8; 64]));
+            }
+            chunks.push(Bytes::from(vec![i as u8; 2 * 1024]));
+        }
+        chunks.into_iter().collect()
+    }
+    for &groups in &[SHALLOW, DEEP] {
+        let label = if groups == SHALLOW { "shallow" } else { "deep" };
+
+        let mut g = group(c, "compact_full");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter_batched(
+                || mixed(groups),
+                |mut r| {
+                    r.compact();
+                    black_box(r)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+
+        let mut g = group(c, "compact_skip_large");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter_batched(
+                || mixed(groups),
+                |mut r| {
+                    r.compact_with(&CompactionConfig::new().skip_above(1024));
+                    black_box(r)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+
+    // Single-chunk cases: a *shared* lone chunk (a small view pinning a large backing something else
+    // holds) is copied out to release the backing; a *uniquely-owned* lone chunk is left untouched.
+    // Contrasts the release copy against the near-free no-op.
+    let backing = Bytes::from(vec![0xABu8; 64 * 1024]);
+    let mut g = group(c, "compact_single_chunk");
+    g.bench_function(BenchmarkId::new("rope", "shared_released"), |b| {
+        b.iter_batched(
+            || {
+                // hold a second handle so the rope's chunk is shared (not unique)
+                let keep = backing.clone();
+                let r: ByteVec = [backing.clone()].into_iter().collect();
+                (r, keep)
+            },
+            |(mut r, _keep)| {
+                r.compact();
+                black_box(r)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.bench_function(BenchmarkId::new("rope", "unique_noop"), |b| {
+        b.iter_batched(
+            || {
+                [Bytes::from(vec![0xABu8; 64 * 1024])]
+                    .into_iter()
+                    .collect::<ByteVec>()
+            },
+            |mut r| {
+                r.compact();
+                black_box(r)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_push_back,
@@ -920,6 +1002,7 @@ criterion_group!(
     bench_socket_read,
     bench_utf8_mutate,
     bench_builder,
-    bench_reader
+    bench_reader,
+    bench_compact
 );
 criterion_main!(benches);

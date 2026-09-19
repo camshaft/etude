@@ -1213,6 +1213,156 @@ fn deep_rope_with_buffered_ends() -> (ByteVec, Vec<u8>) {
     (rope, flat)
 }
 
+/// `compact()` collapses a multi-chunk rope into a single contiguous chunk with byte-identical
+/// content, in both tiers, and is a correct no-op on an already-single-chunk or empty rope.
+#[test]
+fn compact_collapses_to_single_contiguous_chunk() {
+    // shallow, multiple chunks
+    let mut r: ByteVec = [chunk(b"foo"), chunk(b"bar"), chunk(b"baz")]
+        .into_iter()
+        .collect();
+    let want = r.copy_to_bytes();
+    assert!(r.chunks().count() > 1, "precondition: multiple chunks");
+    r.compact();
+    assert_eq!(r.chunks().count(), 1, "collapsed to one chunk");
+    assert_eq!(r.copy_to_bytes(), want, "content preserved");
+
+    // deep tier collapses to one chunk too
+    let (mut d, flat) = deep_rope(1000);
+    assert!(d.chunks().count() > 1);
+    d.compact();
+    assert_eq!(d.chunks().count(), 1);
+    assert_eq!(&d.copy_to_bytes()[..], &flat[..]);
+
+    // no-op on a single-chunk rope and on empty
+    let mut one: ByteVec = [chunk(b"solo")].into_iter().collect();
+    one.compact();
+    assert_eq!(&one.copy_to_bytes()[..], b"solo");
+    let mut empty = ByteVec::new();
+    empty.compact();
+    assert!(empty.is_empty());
+    assert_eq!(empty.chunks().count(), 0);
+}
+
+/// `compact_with(skip_above)` leaves a segment larger than the threshold in place (its own,
+/// un-copied chunk — pointer-identical) while coalescing the smaller neighbours; content and order
+/// preserved.
+#[test]
+fn compact_with_skip_above_leaves_large_segments_in_place() {
+    let big = chunk(&[7u8; 100]);
+    let big_ptr = big.as_ptr();
+    let mut r: ByteVec = [
+        chunk(b"aa"),
+        chunk(b"bb"),
+        big.clone(),
+        chunk(b"cc"),
+        chunk(b"dd"),
+    ]
+    .into_iter()
+    .collect();
+    let want = r.copy_to_bytes();
+    r.compact_with(&CompactionConfig::new().skip_above(50));
+    let out: Vec<Bytes> = r.chunks().cloned().collect();
+    assert_eq!(out.len(), 3, "two coalesced runs + the skipped large chunk");
+    assert_eq!(&out[0][..], b"aabb");
+    assert_eq!(
+        out[1].as_ptr(),
+        big_ptr,
+        "large segment kept in place, not copied"
+    );
+    assert_eq!(&out[2][..], b"ccdd");
+    assert_eq!(r.copy_to_bytes(), want, "content preserved");
+}
+
+/// `compact_with(keep_unique)` leaves a uniquely-owned segment in place (no copy) while coalescing
+/// segments that are shared (refcount > 1) with a handle outside the rope.
+#[test]
+fn compact_with_keep_unique_leaves_solely_owned_segments() {
+    let s1 = chunk(b"AAA");
+    let _k1 = s1.clone(); // force refcount > 1 -> not unique
+    let s2 = chunk(b"BBB");
+    let _k2 = s2.clone();
+    let uniq = chunk(b"UNIQUE");
+    let uniq_ptr = uniq.as_ptr();
+    assert!(uniq.is_unique(), "precondition: uniq solely owned");
+    assert!(
+        !s1.is_unique() && !s2.is_unique(),
+        "precondition: s1/s2 shared"
+    );
+    let mut r: ByteVec = [s1, s2, uniq].into_iter().collect();
+    let want = r.copy_to_bytes();
+    r.compact_with(&CompactionConfig::new().keep_unique(true));
+    let out: Vec<Bytes> = r.chunks().cloned().collect();
+    assert_eq!(
+        out.len(),
+        2,
+        "the two shared segments coalesce; unique kept"
+    );
+    assert_eq!(&out[0][..], b"AAABBB");
+    assert_eq!(
+        out[1].as_ptr(),
+        uniq_ptr,
+        "unique segment kept in place, not copied"
+    );
+    assert_eq!(r.copy_to_bytes(), want);
+}
+
+/// `compact()` preserves the UTF-8 invariant + content on a `Rope<Utf8>` (kind-agnostic: the bytes
+/// are identical, only regrouped), including a codepoint that spanned a chunk boundary before.
+#[test]
+fn compact_on_utf8_rope_preserves_content() {
+    let bytes: ByteVec = [chunk(b"a"), chunk(&[0xC3]), chunk(&[0xA9]), chunk(b"b")]
+        .into_iter()
+        .collect();
+    let mut s = Rope::<Utf8>::try_from_bytes(bytes).expect("aéb is valid UTF-8");
+    assert!(s.chunks().count() > 1);
+    s.compact();
+    assert_eq!(s.chunks().count(), 1, "collapsed");
+    assert_eq!(&s.into_bytes().copy_to_bytes()[..], "aéb".as_bytes());
+}
+
+/// A single-chunk rope whose chunk is *shared* (a view pinning a possibly-large backing that something
+/// else also holds) is copied out by `compact()` into a fresh, solely-owned allocation — releasing our
+/// hold on the shared backing. Content preserved.
+#[test]
+fn compact_copies_out_a_shared_single_chunk_to_release_backing() {
+    let backing = chunk(b"hello world payload");
+    let _other_holder = backing.clone(); // refcount 2 -> the chunk is not unique
+    let mut r: ByteVec = [backing].into_iter().collect();
+    assert_eq!(r.chunks().count(), 1);
+    assert!(
+        !r.get(0).unwrap().is_unique(),
+        "precondition: the single chunk is shared"
+    );
+    r.compact();
+    assert_eq!(r.chunks().count(), 1);
+    assert_eq!(
+        &r.get(0).unwrap()[..],
+        b"hello world payload",
+        "content preserved"
+    );
+    assert!(
+        r.get(0).unwrap().is_unique(),
+        "compact copied the shared chunk into a fresh solely-owned allocation"
+    );
+}
+
+/// A single-chunk rope whose chunk is already *uniquely* owned is left untouched by `compact()` — no
+/// pointless copy of an allocation we already solely hold (pointer-identical afterwards).
+#[test]
+fn compact_leaves_a_unique_single_chunk_untouched() {
+    let mut r: ByteVec = [chunk(b"solo")].into_iter().collect();
+    assert!(r.get(0).unwrap().is_unique(), "precondition: solely owned");
+    let ptr = r.get(0).unwrap().as_ptr();
+    r.compact();
+    assert_eq!(r.chunks().count(), 1);
+    assert_eq!(
+        r.get(0).unwrap().as_ptr(),
+        ptr,
+        "unique single chunk not copied"
+    );
+}
+
 /// `slice` must match the flat oracle for EVERY range, including ones that straddle the buffered
 /// head/tail seams — the region-walking reattach path in the deep tier.
 #[test]
@@ -1409,6 +1559,8 @@ fn differential_against_model() {
         IoReadWrite(usize, Vec<u8>),
         CopyToBytesMutCheck,
         ReaderDrain(usize),
+        Compact,
+        CompactWith(u8),
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1550,6 +1702,22 @@ fn differential_against_model() {
                     assert_eq!(rope.chunks().len(), rope.chunks().count());
                     let flat: Vec<u8> = rope.chunks().flat_map(|c| c.iter().copied()).collect();
                     assert_eq!(flat, model);
+                }
+                Op::Compact => {
+                    // full collapse: content preserved (the post-op assert checks it), at most one chunk
+                    rope.compact();
+                    assert!(
+                        rope.chunks().count() <= 1,
+                        "compact() leaves at most one chunk"
+                    );
+                }
+                Op::CompactWith(cfg) => {
+                    // derive a config from the fuzz byte: bit 0 = keep_unique, high bits = skip_above
+                    // threshold. Content is preserved regardless of which segments are skipped.
+                    let config = CompactionConfig::new()
+                        .keep_unique(cfg & 1 == 1)
+                        .skip_above((cfg >> 1) as usize);
+                    rope.compact_with(&config);
                 }
                 Op::Deepen => {
                     // reach the deep tier (tree + buffered head) in ONE op, so short sequences

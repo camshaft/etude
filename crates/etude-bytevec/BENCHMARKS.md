@@ -51,22 +51,30 @@ These functions scan bytes rather than move chunk handles, so the fair reference
 use a literal spanning ~2 chunks; `validate_utf8` benches `Rope<Utf8>::try_from_bytes` on valid ascii.
 Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4):
 
-| op | shape | rope | contiguous `&[u8]` | ratio |
-|----|-------|------|--------------------|-------|
-| starts_with | shallow | 87.2 ns | 67.9 ns | 1.28 |
-| starts_with | deep | 122 ns | 67.9 ns | 1.80 |
-| ends_with | shallow | 97.6 ns | 74.1 ns | 1.32 |
-| ends_with | deep | 151 ns | 74.5 ns | 2.03 |
-| validate_utf8 (try_from_bytes) | shallow | 308 ns | 236 ns | 1.30 |
-| validate_utf8 (try_from_bytes) | deep | 78.1 µs | 60.8 µs | 1.28 |
+These functions now scan via the direct early-exit traversals (`try_for_each_chunk` /
+`try_for_each_chunk_rev`, a recursive DFS with `ControlFlow` break) rather than the `Chunks` iterator, so
+a prefix/suffix scan that stops early never pays to build the iterator's resumable stacks. Latest run
+(aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4; the `was` column is the prior
+`chunks()`-iterator implementation on the same box):
 
-The scan functions trail a contiguous buffer by **1.28×–2.03×** — the cost of crossing chunk boundaries
-(iterator setup + per-chunk compares/validation), the same chunking overhead as the rest of the deep
-tier. Two points worth keeping: `ends_with/deep` is 151 ns, close to `ends_with/shallow` rather than
-scaling with length — confirming it is O(suffix) (it walks only the last chunks from the back via the
-double-ended chunk iterator, not the whole buffer); and `validate_utf8` streams the validation over the
-chunks with no full-content allocation, so it beats the former copy-then-validate path (which allocated
-an O(n) contiguous buffer) on the valid ingest path despite the 1.28× vs an already-contiguous slice.
+| op | shape | rope (traversal) | was (`chunks()`) | contiguous `&[u8]` |
+|----|-------|------------------|------------------|--------------------|
+| starts_with | shallow | 80.6 ns | 88.4 ns | 67.9 ns |
+| starts_with | deep | 89.8 ns | 122 ns | 67.9 ns |
+| ends_with | shallow | 85.7 ns | 97.4 ns | 74.1 ns |
+| ends_with | deep | 95.1 ns | 152 ns | 74.5 ns |
+| validate_utf8 (try_from_bytes) | shallow | 298 ns | 310 ns | 236 ns |
+| validate_utf8 (try_from_bytes) | deep | 76.9 µs | 78.4 µs | 60.8 µs |
+
+The early-exit traversal helps most where the scan stops before the end: `starts_with/deep` improved
+**122 → 90 ns (~26%)** and `ends_with/deep` **152 → 95 ns (~38%)**, since neither now builds the deep-tier
+iterator's tree-descent stacks just to look at the near end (`ends_with` uses the reverse
+`try_for_each_chunk_rev`). `validate_utf8` scans the whole content on the valid path (no early exit), so it
+gains only the small forward-traversal-vs-iterator margin (~2–4%). The residual gap to a contiguous
+`&[u8]` is the inherent cost of crossing chunk boundaries. Note `ends_with/deep` stays close to
+`ends_with/shallow` rather than scaling with length — it is O(suffix), touching only the last chunks — and
+`validate_utf8` streams validation with no full-content allocation, beating the former copy-then-validate
+path on ingest despite trailing an already-contiguous slice.
 
 ### `copy_to_bytes_mut` single-chunk reclaim (runnable: `cargo bench -p etude-bytevec -- copy_to_bytes_mut`)
 
@@ -168,6 +176,43 @@ O(1)-drain, and at these sizes the COW-drain edges it out. A consumer that does 
 afterward should drain the rope directly (`pop_front` / `advance`, ~15 µs deep, no COW) rather than take a
 reader; the reader earns its keep precisely when the source must stay intact, and there its O(1) setup is
 the win the table's single-read framing hides.
+
+### Compaction — `compact` / `compact_with` (runnable: `cargo bench -p etude-bytevec -- compact_`)
+
+`compact()` collapses a fragmented rope into one contiguous allocation; `compact_with(skip_above(n))`
+coalesces the small fragments but leaves segments over `n` bytes in place (no memcpy). The fragmentation
+bench input is a rope of groups — 8 small (64 B) fragments then one large (2 KiB) chunk — so full compact
+copies everything into one buffer, while the skip variant coalesces each small run and keeps the large
+chunks. The single-chunk bench compacts one 64 KiB chunk that is either shared (a second handle held) or
+uniquely owned. Latest run (aarch64, jemalloc, release; `deep` = 1000 groups ≈ 9000 chunks / 2.56 MB,
+`shallow` = 4 groups; the sub-µs shallow rows are small and noisy on a shared box — the deep rows are the
+stable signal):
+
+| op | shape | time |
+|----|-------|------|
+| compact_full | shallow | ~2 µs |
+| compact_full | deep | 293 µs |
+| compact_skip_large | shallow | 1.3 µs |
+| compact_skip_large | deep | 300 µs |
+| compact_single_chunk | shared_released (64 KiB) | 2.0 µs |
+| compact_single_chunk | unique_noop | 19 ns |
+
+Things the numbers pin down. The full `compact()` scans the chunks once to size the coalesce buffer to the
+exact total, then fills that one pre-sized buffer (it never reallocates mid-fill) and swaps it in as the
+sole chunk — no intermediate segment list and no per-chunk rebuild when the whole rope collapses to one
+chunk (the common case). Two levers got it there: pre-sizing the buffer (no grow-as-you-go realloc/recopy),
+and running the scan and the fill over the direct `for_each_chunk` traversal — a straight recursive DFS
+that skips the `Chunks` iterator's per-chunk save/restore bookkeeping — instead of the iterator. Together
+they took `compact()/deep` from 457 µs (naive buffer + iterator) to ~293 µs, roughly a third faster; the
+traversal switch alone accounted for about the last ~344 → ~293 µs of that (the same primitive backs
+`copy_to_bytes`, which is unchanged at ~62 µs). `skip_above` saves the large-chunk memcpy
+(here ~2 MB of the 2.56 MB is left in place) but only edges out full compact at `deep` (300 vs 344 µs),
+because leaving the large chunks in place means the result still has ~2000 segments to rebuild, and that
+rebuild offsets most of the copy saved — so `skip_above` is most worthwhile when it keeps a *few* genuinely
+large segments, not many. The single-chunk rows show the release behavior: a *shared* lone chunk (a small
+view pinning a large backing another handle holds) is copied out into a fresh right-sized allocation to
+release the backing (one 64 KiB copy, ~2 µs), while a *uniquely-owned* lone chunk — nothing to consolidate
+or release — is a ~19 ns no-op.
 
 ## Historical: the switch from a flat deque to the tiered rope
 

@@ -26,6 +26,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::marker::PhantomData;
+use core::ops::ControlFlow;
 // Re-exported (`pub`) at the crate root so callers get `Bytes`/`BytesMut` without a separate `bytes` dep.
 pub use bytes::{Bytes, BytesMut};
 
@@ -224,30 +225,31 @@ fn concatenation_is_valid_utf8<K>(rope: &Rope<K>) -> bool {
     // Bytes of an incomplete codepoint carried from the end of the previous chunk (0..=3 bytes).
     let mut carry = [0u8; 4];
     let mut carry_len = 0usize;
-    for chunk in rope.chunks() {
+    // Direct traversal with early exit on the first invalidity — `Break(())` means "invalid".
+    let hit_invalid = rope.try_for_each_chunk(|chunk| {
         let mut data: &[u8] = chunk;
         // 1. Complete a codepoint carried across the boundary, using the front of this chunk.
         if carry_len > 0 {
             let need = match utf8_lead_len(carry[0]) {
                 Some(n) => n,
-                None => return false, // carried lead is a continuation/invalid byte
+                None => return ControlFlow::Break(()), // carried lead is a continuation/invalid byte
             };
             while carry_len < need {
                 let Some((&b, rest)) = data.split_first() else {
                     break; // whole chunk consumed, codepoint still incomplete
                 };
                 if b & 0xC0 != 0x80 {
-                    return false; // expected a continuation byte
+                    return ControlFlow::Break(()); // expected a continuation byte
                 }
                 carry[carry_len] = b;
                 carry_len += 1;
                 data = rest;
             }
             if carry_len < need {
-                continue; // carried into the next chunk
+                return ControlFlow::Continue(()); // carried into the next chunk
             }
             if core::str::from_utf8(&carry[..need]).is_err() {
-                return false; // completed sequence is overlong / out of range / a surrogate
+                return ControlFlow::Break(()); // completed sequence overlong / out of range / surrogate
             }
             carry_len = 0;
         }
@@ -260,15 +262,19 @@ fn concatenation_is_valid_utf8<K>(rope: &Rope<K>) -> bool {
                 None => {
                     let tail = &data[e.valid_up_to()..];
                     if tail.len() > 3 {
-                        return false;
+                        return ControlFlow::Break(());
                     }
                     carry[..tail.len()].copy_from_slice(tail);
                     carry_len = tail.len();
                 }
                 // A genuine mid-content error.
-                Some(_) => return false,
+                Some(_) => return ControlFlow::Break(()),
             },
         }
+        ControlFlow::Continue(())
+    });
+    if hit_invalid.is_break() {
+        return false;
     }
     // A leftover partial codepoint at the end is truncated (invalid) content.
     carry_len == 0
@@ -462,6 +468,68 @@ impl ByteVec {
     #[inline]
     pub fn tag<O: tagged::Owner>(self, owner: &O) -> tagged::Tagged<O> {
         tagged::Tagged::new(self, owner)
+    }
+}
+
+/// Options for [`Rope::compact_with`]: which segments to leave in place rather than copy into the
+/// coalesced contiguous buffer.
+///
+/// The default (all options off — the shape [`Rope::compact`] uses) collapses the entire rope into a
+/// single contiguous allocation. Each option makes `compact_with` *skip* (keep as its own segment) the
+/// chunks it matches, so the compacted rope becomes a run of coalesced fragments interleaved with the
+/// skipped segments, in order. The two skips **compose**: a segment is left in place if it matches
+/// `keep_unique` *or* `skip_above` (a chunk that is either uniquely owned or larger than the threshold
+/// is not copied).
+///
+/// Built with the `const` builder methods:
+///
+/// ```
+/// use etude_bytevec::CompactionConfig;
+///
+/// // Coalesce small shared fragments, but leave any chunk over 64 KiB and any solely-owned chunk in place.
+/// let cfg = CompactionConfig::new().keep_unique(true).skip_above(64 * 1024);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompactionConfig {
+    keep_unique: bool,
+    skip_above: Option<usize>,
+}
+
+impl CompactionConfig {
+    /// A config that copies every segment into one contiguous buffer (no skips) — identical to
+    /// [`Rope::compact`].
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            keep_unique: false,
+            skip_above: None,
+        }
+    }
+
+    /// When `true`, a segment whose backing [`Bytes`] is *uniquely owned* (this rope is its sole
+    /// holder — nothing else shares the allocation) is left in place instead of copied. Copying a
+    /// buffer you already exclusively own only spends a memcpy without reducing sharing, so keeping it
+    /// avoids that cost; shared segments are still coalesced (compaction de-shares them into the new
+    /// contiguous buffer). Off by default.
+    #[inline]
+    pub const fn keep_unique(mut self, keep: bool) -> Self {
+        self.keep_unique = keep;
+        self
+    }
+
+    /// Leave any segment strictly larger than `threshold` bytes in place instead of copying it into
+    /// the coalesced buffer — avoids a large memcpy for a big already-standalone chunk. Off by default
+    /// (no size limit).
+    #[inline]
+    pub const fn skip_above(mut self, threshold: usize) -> Self {
+        self.skip_above = Some(threshold);
+        self
+    }
+
+    /// Whether this segment should be left in place rather than coalesced, per the composed options.
+    #[inline]
+    fn skips(&self, chunk: &Bytes) -> bool {
+        (self.keep_unique && chunk.is_unique()) || self.skip_above.is_some_and(|t| chunk.len() > t)
     }
 }
 
@@ -882,6 +950,110 @@ impl<K> Rope<K> {
         }
     }
 
+    /// Collapses the entire rope into a single contiguous allocation.
+    ///
+    /// Every chunk is copied, in order, into one fresh [`Bytes`] buffer, so the rope afterwards holds
+    /// exactly one segment (or zero, when empty). The logical byte content is unchanged — this only
+    /// re-lays-out the storage, trading the tiered/shared representation for a flat one. It is
+    /// available on any kind (a `Rope<Utf8>` stays valid: the bytes are identical, only regrouped).
+    ///
+    /// Use it when a rope that was built up from many small or shared fragments will now be read
+    /// repeatedly or handed off as one slice, and the O(log) navigation / per-chunk overhead is no
+    /// longer worth the structural-sharing it bought. For finer control (leaving large or
+    /// uniquely-owned segments in place) use [`compact_with`](Self::compact_with).
+    #[inline]
+    pub fn compact(&mut self) {
+        self.compact_with(&CompactionConfig::new());
+    }
+
+    /// Compacts the rope under `config`: coalesces the segments it does not skip into contiguous
+    /// buffers while leaving the skipped segments (large and/or uniquely-owned, per
+    /// [`CompactionConfig`]) in place, preserving order.
+    ///
+    /// With the default config this is exactly [`compact`](Self::compact) — one contiguous buffer.
+    /// With skips, the result is the skipped segments interleaved with coalesced runs of the segments
+    /// between them, so a run of small shared fragments becomes one buffer while a neighbouring large
+    /// or solely-owned chunk keeps its own allocation (no memcpy). The logical content is unchanged.
+    pub fn compact_with(&mut self, config: &CompactionConfig) {
+        // One scan over the chunks establishes everything the rebuild needs without touching a byte:
+        // the total length that will be coalesced (to pre-size the buffer exactly), whether any segment
+        // is skipped (a skip is what forces more than one output segment), and the chunk count.
+        let mut coalesced_len = 0usize;
+        let mut any_skipped = false;
+        let mut n_chunks = 0usize;
+        self.for_each_chunk(|chunk| {
+            n_chunks += 1;
+            if config.skips(chunk) {
+                any_skipped = true;
+            } else {
+                coalesced_len += chunk.len();
+            }
+        });
+
+        // Collapse fast path: nothing is skipped, so the whole rope becomes ONE contiguous chunk. No
+        // segment list is allocated and no chunk is pushed one-at-a-time — a single pre-sized buffer is
+        // filled (so it never reallocates mid-fill) and swapped in as the sole `Small` chunk.
+        if !any_skipped {
+            // A lone, uniquely-owned chunk is already a standalone allocation this rope solely holds:
+            // there is nothing to consolidate or release, so leave it untouched. A *shared* lone chunk,
+            // by contrast, still copies out below — that is how a small view pinning a large shared
+            // backing gets released into its own right-sized allocation.
+            if n_chunks <= 1
+                && matches!(
+                    &self.repr,
+                    Repr::Small { head, additional }
+                        if additional.is_empty() && (head.is_empty() || head.is_unique())
+                )
+            {
+                return;
+            }
+            let mut buf = bytes::BytesMut::with_capacity(coalesced_len);
+            self.extend_into(&mut buf);
+            debug_assert_eq!(buf.len(), self.len, "collapse preserves the byte length");
+            self.repr = Repr::Small {
+                head: buf.freeze(),
+                additional: VecDeque::new(),
+            };
+            self.check_invariants();
+            return;
+        }
+
+        // Mixed result: some segments are skipped, so the rope becomes coalesced runs interleaved with
+        // the kept (handle-cloned, un-copied) segments. Coalesce runs out of one pre-sized buffer via
+        // `BytesMut::split` (one allocation backs them all), then bulk-build the rope from the segment
+        // sequence in a single bottom-up pass rather than pushing chunk-by-chunk.
+        let mut segments: Vec<Bytes> = Vec::new();
+        let mut run = bytes::BytesMut::with_capacity(coalesced_len);
+        self.for_each_chunk(|chunk| {
+            if config.skips(chunk) {
+                if !run.is_empty() {
+                    segments.push(run.split().freeze());
+                }
+                segments.push(chunk.clone());
+            } else {
+                run.extend_from_slice(chunk);
+            }
+        });
+        if !run.is_empty() {
+            segments.push(run.freeze());
+        }
+
+        if segments.len() > PROMOTE_AT {
+            // Deep tier: fold whole `FANOUT` blocks straight into a fresh tree (the bulk path
+            // `FromIterator` uses), not `push_back` per chunk.
+            let mut tree = Tree::new();
+            extend_blocks(&mut tree, segments.into_iter());
+            *self = Self::from_tree(tree);
+        } else {
+            // Flat tier: the segments are the chunk list directly.
+            let mut additional: VecDeque<Bytes> =
+                segments.into_iter().filter(|c| !c.is_empty()).collect();
+            let head = additional.pop_front().unwrap_or_default();
+            self.repr = Repr::Small { head, additional };
+            self.check_invariants();
+        }
+    }
+
     /// Creates an empty rope, pre-reserving space for `cap` chunks.
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
@@ -955,16 +1127,17 @@ impl<K> Rope<K> {
             return false;
         }
         let mut rest = prefix;
-        for chunk in self.chunks() {
+        let _ = self.try_for_each_chunk(|chunk| {
             if rest.is_empty() {
-                break;
+                return ControlFlow::Break(()); // prefix fully matched
             }
             let n = chunk.len().min(rest.len());
             if chunk[..n] != rest[..n] {
-                return false;
+                return ControlFlow::Break(()); // mismatch; `rest` stays non-empty -> false
             }
             rest = &rest[n..];
-        }
+            ControlFlow::Continue(())
+        });
         rest.is_empty()
     }
 
@@ -992,18 +1165,19 @@ impl<K> Rope<K> {
             return false;
         }
         let mut rest = suffix;
-        for chunk in self.chunks().rev() {
+        let _ = self.try_for_each_chunk_rev(|chunk| {
             if rest.is_empty() {
-                break;
+                return ControlFlow::Break(()); // suffix fully matched
             }
             let chunk: &[u8] = chunk;
             // Compare the tail of this chunk against the still-unmatched tail of `suffix`.
             let n = chunk.len().min(rest.len());
             if chunk[chunk.len() - n..] != rest[rest.len() - n..] {
-                return false;
+                return ControlFlow::Break(()); // mismatch; `rest` stays non-empty -> false
             }
             rest = &rest[..rest.len() - n];
-        }
+            ControlFlow::Continue(())
+        });
         rest.is_empty()
     }
 
@@ -1557,29 +1731,118 @@ impl<K> Rope<K> {
 
     // --- internal helpers -------------------------------------------------
 
-    /// Appends every byte of the rope to `out`, in order, via a direct traversal of the underlying
-    /// storage — bypassing the [`Chunks`] iterator's per-chunk bookkeeping (and, in the deep tier, its
-    /// resumable tree walk). The hot path behind flatten (`copy_to_bytes`/`copy_to_bytes_mut`).
-    fn extend_into(&self, out: &mut bytes::BytesMut) {
+    /// Visits every chunk in order via a direct traversal of the underlying storage, bypassing the
+    /// [`Chunks`] iterator's per-chunk bookkeeping (and, in the deep tier, its resumable save/restore
+    /// tree walk in favour of a straight recursive DFS). Slightly cheaper than `chunks()` and the
+    /// preferred internal primitive for forward-only, whole-rope reads that need neither early exit
+    /// nor reverse/zip/adapter iteration (for those, `chunks()` — an `ExactSize` + `DoubleEnded`
+    /// iterator — is still the right tool).
+    #[inline]
+    fn for_each_chunk(&self, mut f: impl FnMut(&Bytes)) {
         match &self.repr {
             Repr::Small { head, additional } => {
                 if !head.is_empty() {
-                    out.extend_from_slice(head);
+                    f(head);
                 }
                 for c in additional {
-                    out.extend_from_slice(c);
+                    f(c);
                 }
             }
             Repr::Deep(d) => {
                 for c in &d.head {
-                    out.extend_from_slice(c);
+                    f(c);
                 }
-                d.tree.for_each_chunk(&mut |c| out.extend_from_slice(c));
+                d.tree.for_each_chunk(&mut f);
                 for c in &d.tail {
-                    out.extend_from_slice(c);
+                    f(c);
                 }
             }
         }
+    }
+
+    /// Early-exit twin of [`for_each_chunk`](Self::for_each_chunk): visits chunks in order until `f`
+    /// returns [`ControlFlow::Break`], propagating the break value. The direct-traversal counterpart to
+    /// a `chunks()` loop with a `break`/early `return`; preferred for prefix scans (e.g. `starts_with`,
+    /// streaming validation) that stop before the end, since it avoids building the resumable iterator.
+    #[inline]
+    fn try_for_each_chunk<B>(&self, mut f: impl FnMut(&Bytes) -> ControlFlow<B>) -> ControlFlow<B> {
+        match &self.repr {
+            Repr::Small { head, additional } => {
+                if !head.is_empty()
+                    && let ControlFlow::Break(v) = f(head)
+                {
+                    return ControlFlow::Break(v);
+                }
+                for c in additional {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+            Repr::Deep(d) => {
+                for c in &d.head {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+                if let ControlFlow::Break(v) = d.tree.try_for_each_chunk(&mut f) {
+                    return ControlFlow::Break(v);
+                }
+                for c in &d.tail {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Reverse (back-to-front) early-exit traversal — the suffix-scan twin of
+    /// [`try_for_each_chunk`](Self::try_for_each_chunk), visiting chunks last-to-first until `f` breaks.
+    /// Preferred over `chunks().rev()` for suffix scans (e.g. `ends_with`) that stop before the front.
+    #[inline]
+    fn try_for_each_chunk_rev<B>(
+        &self,
+        mut f: impl FnMut(&Bytes) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match &self.repr {
+            Repr::Small { head, additional } => {
+                for c in additional.iter().rev() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+                if !head.is_empty()
+                    && let ControlFlow::Break(v) = f(head)
+                {
+                    return ControlFlow::Break(v);
+                }
+            }
+            Repr::Deep(d) => {
+                for c in d.tail.iter().rev() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+                if let ControlFlow::Break(v) = d.tree.try_for_each_chunk_rev(&mut f) {
+                    return ControlFlow::Break(v);
+                }
+                for c in d.head.iter().rev() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Appends every byte of the rope to `out`, in order, via the direct [`for_each_chunk`] traversal
+    /// (no [`Chunks`] iterator bookkeeping). The hot path behind flatten
+    /// (`copy_to_bytes`/`copy_to_bytes_mut`).
+    fn extend_into(&self, out: &mut bytes::BytesMut) {
+        self.for_each_chunk(|c| out.extend_from_slice(c));
     }
 
     #[inline]
@@ -1687,8 +1950,9 @@ impl<K> Rope<K> {
         if !should {
             return;
         }
-        // flatten everything back into a head + additional deque
-        let mut additional: VecDeque<Bytes> = self.chunks().cloned().collect();
+        // flatten everything back into a head + additional deque (direct traversal, not the iterator)
+        let mut additional: VecDeque<Bytes> = VecDeque::new();
+        self.for_each_chunk(|c| additional.push_back(c.clone()));
         let head = additional.pop_front().unwrap_or_default();
         self.repr = Repr::Small { head, additional };
     }
