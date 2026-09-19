@@ -784,7 +784,11 @@ fn emit_decimal_linear<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt
     }
     // Emit most-significant chunk first at natural width, the rest zero-padded to 19.
     for idx in (0..n).rev() {
-        let pad = if idx + 1 == n { 0 } else { DECIMAL_CHUNK_DIGITS };
+        let pad = if idx + 1 == n {
+            0
+        } else {
+            DECIMAL_CHUNK_DIGITS
+        };
         write_decimal_chunk(w, chunks[idx], pad)?;
     }
     Ok(())
