@@ -1699,6 +1699,93 @@ fn get_index_matches_chunk_iterator_after_count_perturbing_mutations() {
 /// `with_inline_threshold`/`write_with_len_prefix`) and checks `len`/`is_empty` after every op and the
 /// final `finish()` bytes against the model. Extend `BuilderOp` here rather than adding a one-off
 /// harness when covering a new Builder method.
+/// Budget-conservation harness for the tagging machinery: at every step, the owner's running
+/// budget must equal the sum of the live `Tagged` values' lengths — across create, push_back,
+/// append, split_to (the split-off front leaves the budget), untag, untag_clone (a reader, budget
+/// unchanged), and drop. The stale-length Handle bug (etude#35) was exactly a violation of this
+/// invariant that the example tests stopped short of; this drives it under arbitrary op sequences.
+/// The tag is dedicated to this test, so the global budget it reads is not shared with other tests.
+#[test]
+fn tagged_budget_conservation_differential() {
+    use bolero::check;
+    use bolero_generator::TypeGenerator;
+
+    mod conservation_tag {
+        crate::static_bytevec_tag!(crate::tagged);
+    }
+    use conservation_tag::Tag;
+
+    #[derive(Debug, Clone, TypeGenerator)]
+    enum TagOp {
+        Create(Vec<u8>),
+        PushBack(usize, Vec<u8>),
+        Append(usize, Vec<u8>),
+        SplitTo(usize, usize),
+        UntagClone(usize),
+        Untag(usize),
+        DropOne(usize),
+    }
+
+    check!().with_type::<Vec<TagOp>>().cloned().for_each(|ops| {
+        assert_eq!(Tag::current(), 0, "budget leaked from a previous iteration");
+        let mut pool: Vec<(Tagged<Tag>, usize)> = Vec::new();
+        for op in &ops {
+            match op {
+                TagOp::Create(d) => {
+                    let rope: ByteVec = ByteVec::from(Bytes::copy_from_slice(d));
+                    pool.push((rope.tag(&Tag), d.len()));
+                }
+                TagOp::PushBack(i, d) => {
+                    let idx = i % pool.len().max(1);
+                    if let Some(slot) = pool.get_mut(idx) {
+                        slot.0.push_back(Bytes::copy_from_slice(d));
+                        slot.1 += d.len();
+                    }
+                }
+                TagOp::Append(i, d) => {
+                    let idx = i % pool.len().max(1);
+                    if let Some(slot) = pool.get_mut(idx) {
+                        let mut other: ByteVec = d.chunks(3).map(Bytes::copy_from_slice).collect();
+                        slot.0.append(&mut other);
+                        slot.1 += d.len();
+                    }
+                }
+                TagOp::SplitTo(i, k) => {
+                    let idx = i % pool.len().max(1);
+                    if let Some(slot) = pool.get_mut(idx) {
+                        let at = k % (slot.1 + 1);
+                        let front = slot.0.split_to(at).unwrap();
+                        assert_eq!(front.len(), at, "split_to front length");
+                        slot.1 -= at;
+                    }
+                }
+                TagOp::UntagClone(i) => {
+                    if let Some(slot) = pool.get(i % pool.len().max(1)) {
+                        let copy = slot.0.untag_clone();
+                        assert_eq!(copy.len(), slot.1, "untag_clone length");
+                    }
+                }
+                TagOp::Untag(i) => {
+                    if !pool.is_empty() {
+                        let (tagged, len) = pool.swap_remove(i % pool.len());
+                        let rope = tagged.untag();
+                        assert_eq!(rope.len(), len, "untag length");
+                    }
+                }
+                TagOp::DropOne(i) => {
+                    if !pool.is_empty() {
+                        drop(pool.swap_remove(i % pool.len()));
+                    }
+                }
+            }
+            let live: usize = pool.iter().map(|(_, l)| l).sum();
+            assert_eq!(Tag::current(), live as u64, "budget after {op:?}");
+        }
+        drop(pool);
+        assert_eq!(Tag::current(), 0, "budget must return to zero");
+    });
+}
+
 #[test]
 fn builder_differential_against_model() {
     use bolero::check;
