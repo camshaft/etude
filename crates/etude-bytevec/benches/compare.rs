@@ -871,15 +871,57 @@ fn bench_builder(c: &mut Criterion) {
 /// full read is an O(n) `clone()` of the deque followed by a `pop_front` drain, so the comparison
 /// isolates the reader's O(1)-clone setup against the deque's copy-the-whole-spine setup.
 fn bench_reader(c: &mut Criterion) {
-    // Forking a Reader currently clones the rope state. Measure that clone in isolation across the
-    // Small tier (where it copies the inline `VecDeque` + bumps each chunk handle) and the Deep tier
-    // (where the tree clone is O(1) structural sharing), to size the "don't clone the small deque" idea.
+    // Forking a Reader is O(1) in both tiers: a Small source is read through a borrowing cursor (no
+    // clone of the inline `VecDeque`), a Deep source through an O(1) structural-shared tree clone.
+    // Measure the fork in isolation across the Small tier (flat regardless of chunk count) and the Deep
+    // tier, so a regression in either fork path shows up here.
     {
         let mut g = group(c, "reader_fork");
         for &n in &[1usize, 4, 16, 32, DEEP] {
             let rope = rope_of(n);
             g.bench_function(BenchmarkId::new("clone", n.to_string()), |b| {
                 b.iter(|| black_box(rope.reader()))
+            });
+        }
+        g.finish();
+    }
+
+    // Fan-out / broadcast: one source buffer, many independent consumable cursors, each peeking a
+    // little (reads the first chunk). This is where the rope's cheap fork pays off against a plain
+    // chunk deque: forking a Reader borrows the source (Small) or takes an O(1) structural-shared
+    // clone (Deep), whereas giving a `VecDeque<Bytes>` an *independent, consumable* cursor per reader
+    // means cloning the whole deque each time (O(n) — you cannot advance N cursors over one deque
+    // without N copies). Sizes: 32 = Small-tier max, DEEP = 1000 = Deep tier.
+    {
+        const READERS: usize = 64;
+        let mut g = group(c, "reader_fanout");
+        for &n in &[32usize, DEEP] {
+            let label = if n == 32 { "small_max" } else { "deep" };
+            let rope = rope_of(n);
+            let naive = naive_of(n);
+            g.bench_function(BenchmarkId::new("rope", label), |b| {
+                b.iter(|| {
+                    let mut acc = 0usize;
+                    for _ in 0..READERS {
+                        let mut rd = rope.reader();
+                        if let Some(chunk) = rd.next() {
+                            acc += chunk.len();
+                        }
+                    }
+                    black_box(acc)
+                })
+            });
+            g.bench_function(BenchmarkId::new("naive_deque", label), |b| {
+                b.iter(|| {
+                    let mut acc = 0usize;
+                    for _ in 0..READERS {
+                        let mut c = naive.clone();
+                        if let Some(chunk) = c.pop_front() {
+                            acc += chunk.len();
+                        }
+                    }
+                    black_box(acc)
+                })
             });
         }
         g.finish();
