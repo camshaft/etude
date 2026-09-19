@@ -304,6 +304,32 @@ fn scientific_render_round_trips_large_exponents() {
 }
 
 #[test]
+fn fractional_render_split_and_fallback() {
+    // Renders that go through the u64-split fast path (point shift k ≤ 19) and the string fallback
+    // (k > 19), plus fractional zero-padding and the leading-zeros form. Each must round-trip.
+    for s in [
+        "1.05",                    // interior zero in the fraction (frac padded)
+        "123.456",                 // ddd.ddd
+        "-3.14",                   // negative ddd.ddd
+        "0.001",                   // leading-zeros form, |value| < 1
+        "0.000000000105",          // leading zeros then interior-zero fraction (k = 12)
+        "1.234567890123456789",    // 18 fractional digits (k = 18, fast path)
+        "1.2345678901234567891",   // 19 fractional digits (k = 19, fast-path boundary)
+        "1.23456789012345678901",  // 20 fractional digits (k = 20, string fallback)
+        "0.0000000000000000001",   // 1e-19 leading zeros (k = 19, fast-path boundary)
+        "-0.00000000000000000001", // 1e-20 (k = 20, fallback)
+    ] {
+        let d = Decimal::from_str(s).unwrap();
+        assert_eq!(d.to_string(), s, "render of {s}");
+        assert_eq!(
+            Decimal::from_str(&d.to_string()).unwrap(),
+            d,
+            "round-trip of {s}"
+        );
+    }
+}
+
+#[test]
 fn exact_arithmetic() {
     let d = |s: &str| Decimal::from_str(s).unwrap();
     // The Float pitfall done exactly: 0.1 + 0.2 = 0.3.

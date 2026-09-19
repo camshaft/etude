@@ -104,21 +104,26 @@ itself `O(magnitude)` — that residual is now inside the digit-count primitive,
 | 2048b | 1.985 µs  | 5.84 ns | 340 |
 | 4096b | 5.364 µs  | 5.85 ns | 917 |
 
-### `to_string` — render to a decimal literal
+### `to_string` — render to a decimal literal — we win at scale
+
+Digits stream into the sink via `Big::write_decimal` (no intermediate `String`). For a wide coefficient
+with a `u64`-sized point shift, a single-limb divide splits the value so the integer and fractional parts
+each write directly — this wins the large tiers (2048b/4096b now beat `bigdecimal`). Below ~512 bits the
+split's fixed cost does not pay, so small/mid values keep the single-render path (unchanged).
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 191.59 ns | 146.06 ns | 1.31 |
-| 256b  | 463.31 ns | 281.83 ns | 1.64 |
-| 1024b | 3.814 µs  | 2.324 µs  | 1.64 |
-| 2048b | 8.707 µs  | 8.976 µs  | 0.97 |
-| 4096b | 22.31 µs  | 21.09 µs  | 1.06 |
+| 64b   | 199 ns    | 154.54 ns | 1.29 |
+| 256b  | 496 ns    | 281.38 ns | 1.76 |
+| 1024b | 3.139 µs  | 2.333 µs  | 1.35 |
+| 2048b | 6.768 µs  | 8.970 µs  | **0.75** |
+| 4096b | 17.74 µs  | 21.04 µs  | **0.84** |
 
-Small value (`12345678.9012345`, 15 digits — the common decimal-literal case):
+Small value (`12345678.9012345`, 15 digits — single-render path):
 
 | case | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 15 digits | 167.06 ns | 145.54 ns | 1.15 |
+| 15 digits | 169.4 ns | 149.2 ns | 1.13 |
 
 ### `from_str` — parse a decimal literal — we win at scale
 
@@ -235,10 +240,10 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   render) and only scales on a tie; it wins at 64b but trails at large tiers because the digit-count of a
   multi-limb magnitude is itself `O(magnitude)` (that residual is inside the digit-count primitive, not a
   string allocation).
-- **`from_str` now wins from 1024b up** after adopting `etude-bigint`'s `from_base_10_pow_k_limbs`
-  (base-`10¹⁹` Horner absorb). **`to_string`** still trails on the reverse conversion; it improves once we
-  adopt `Big::write_decimal` for the coefficient digits (a requested follow-up already landed on the
-  bigint side).
+- **`from_str` and `to_string` now win at scale.** `from_str` groups digits into base-`10¹⁹` limbs
+  (`from_base_10_pow_k_limbs`); `to_string` streams digits via `Big::write_decimal` and splits a wide
+  coefficient with a single-limb divide. Both beat `bigdecimal` from ~2048b up; small/mid values sit
+  ~1.1–1.8× behind on the base-conversion cost.
 - **`to_f64` wins at scale and for small values** — from 1024b up the direct big-int-ratio method is
   3×–13× faster than `bigdecimal` (its conversion grows super-linearly), and small decimal literals take a
   single-IEEE-op fast path that is ~23× faster (5.9 ns vs 138 ns). The mid-range large tiers (64b/256b,
@@ -248,9 +253,9 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
 
 ## Next optimizations (ranked by scoreboard leverage)
 
-1. **`to_string`** — write the coefficient digits straight into the sink via `Big::write_decimal` for the
-   contiguous forms (integer, scientific), dropping the intermediate `to_decimal_string` allocation; the
-   point-insertion forms need a split-and-write to stay allocation-free.
+1. **`to_string` / `from_str` small-mid tiers** — the residual ~1.1–1.8× is the base-10 ↔ binary
+   conversion itself (`Big::write_decimal` / `from_base_10_pow_k_limbs`), which is `etude-bigint`'s to
+   sharpen at small limb counts.
 2. **`cmp_uneq` at large tiers** — a cheaper adjusted-exponent decision than a full multi-limb digit
    count (or a faster `decimal_digit_count` on the `etude-bigint` side).
 3. **`sub` / `mul` large tiers** — bottlenecked on the underlying `Big` subtract/multiply
