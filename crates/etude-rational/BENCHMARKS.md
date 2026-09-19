@@ -152,18 +152,20 @@ push the gcd-bound `normalize`/`add_eqden`@≥1024b parity cells below 1.0.
 
 | tier  | etude    | num-rational | ratio    |
 |-------|----------|--------------|----------|
-| 64b   | 199 ns   | 307 ns       | **0.65** |
-| 256b  | 667 ns   | 683 ns       | **0.98** |
-| 1024b | 7.14 µs  | 4.66 µs      | 1.53     |
-| 2048b | 16.8 µs  | 18.1 µs      | **0.93** |
-| 4096b | 44.0 µs  | 42.5 µs      | 1.04     |
+| 64b   | 104 ns   | 290 ns       | **0.36** |
+| 256b  | 489 ns   | 682 ns       | **0.72** |
+| 1024b | 6.67 µs  | 4.66 µs      | 1.43     |
+| 2048b | 16.2 µs  | 18.1 µs      | **0.90** |
+| 4096b | 43.3 µs  | 42.2 µs      | 1.02     |
 
-**64b/256b/2048b are WINS**; 1024b/4096b are the last render losses (1.53×, 1.04×). etude-bigint's
-reciprocal-`÷10^19` peel (#115) banked the 256b crossing, and the qhat-reciprocal Knuth divmod (#127) —
-which speeds the recursive `to_decimal`'s per-digit big-divide — moved 4096b 1.14× → 1.04× (near parity)
-and 2048b below 1.0. The residual 1024b/4096b gap is now the recursive `to_decimal`'s own constant factors
-(the power-stack `10^k` squarings), which etude-bigint is attacking next. Render is bignum-render-bound —
-not addressable locally; re-bench on each etude-bigint render land.
+**64b/256b/2048b are WINS**; 1024b/4096b are the last render losses (1.43×, 1.02×). Two ingredients:
+(a) `to_decimal_string` pre-sizes the result `String` from the O(1) `byte_len` (decimal digits ≈
+`bytes × 2.41`) and writes each component straight into it via `Big::write_decimal`, bypassing the
+`write!`/`format_args` machinery and any mid-render reallocation — this alone nearly halved 64b (0.65× →
+**0.36×**) and moved every tier; (b) etude-bigint's reciprocal-`÷10^19` peel (#115) + qhat-reciprocal Knuth
+divmod (#127) sped the recursive `to_decimal` (256b/2048b/4096b). The residual 1024b/4096b gap is the
+recursive `to_decimal`'s own constant factors (the power-stack `10^k` squarings) in etude-bigint, which
+they are attacking next — re-bench on each render land.
 
 ## History
 
@@ -237,3 +239,8 @@ not addressable locally; re-bench on each etude-bigint render land.
   clones per `mul`/`div`, allocating only the two products. Wall-clock is neutral at the gcd/mul-dominated
   large tiers and ~1% better at 64b (where the 1-limb clones are the largest fraction); the win is the
   reduced allocation count / allocator pressure. No regression on any tier.
+- **slice 21** — `to_decimal_string` pre-sizes the result `String` (from the O(1) `byte_len`) and writes
+  each component straight into it via `Big::write_decimal`, instead of `write!(s, "{self}")` into an empty
+  `String`. Removes the `format_args`/`Display` dispatch overhead and mid-render reallocations. `to_string`
+  improved at every tier — 64b 0.65× → **0.36×** (~halved), 256b 0.98× → **0.72×**, 1024b 1.53× → 1.43×,
+  4096b 1.04× → 1.02×. A local render lever that had been mis-attributed entirely to bignum `to_decimal`.
