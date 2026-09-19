@@ -122,6 +122,30 @@ inverts it — inserting into a `6 KB` buffer splits the chunk into two zero-cop
 inserted middle, no payload copy, so the rope is **2.9× faster** than `String`'s O(n) midpoint memmove,
 and (like `ends_with`) is near-flat in the buffer length rather than scaling with it.
 
+### Builder write path — `put_slice` / `put_bytes` vs a direct `VecDeque<Bytes>` (runnable: `cargo bench -p etude-bytevec -- builder_put`)
+
+`Builder` accumulates writes into a coalescing head buffer (128 KiB here, the crate default), flushing
+it to a chunk when full, then `finish()` seals the tail. `put_slice` copies each write into that buffer;
+`put_bytes` holds each `Bytes` by reference (default inline threshold 0). The naive reference builds a
+`VecDeque<Bytes>` directly — one `Bytes::copy_from_slice` per `put_slice` (no coalescing), a bare
+`push_back` per `put_bytes`. Latest run (aarch64, jemalloc, release; `deep` = 1000, `shallow` = 4):
+
+| op | shape | builder | naive deque | ratio |
+|----|-------|---------|-------------|-------|
+| put_slice | shallow | 573 ns | 176 ns | 3.25 |
+| put_slice | deep | 66.7 µs | 130 µs | **0.51 (2× faster)** |
+| put_bytes | shallow | 103 ns | 80.8 ns | 1.28 |
+| put_bytes | deep | 27.2 µs | 17.8 µs | 1.53 |
+
+`put_slice` is the builder's reason to exist and it shows at `deep`: coalescing 1000 slices into 128 KiB
+buffers makes ~11 chunk allocations where the naive path makes 1000 `copy_from_slice` allocations, so the
+builder is **2× faster**. The `shallow` sign-flip is the honest tradeoff — for only 4 small writes the
+builder allocates a whole 128 KiB head buffer that never amortizes, dwarfing 4 tiny `copy_from_slice`s; a
+caller that writes little should size the builder down with `ByteVec::builder(small_cap)`. `put_bytes`
+holds by reference, so it is `push_back` through the builder's flush machinery and sits with the deep-tier
+per-chunk build family (1.28–1.53×, the per-chunk `Arc` + flush-check overhead) — the builder adds
+coalescing value on copied writes, not on by-reference chunk handoff.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat

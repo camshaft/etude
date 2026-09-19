@@ -809,6 +809,62 @@ fn bench_utf8_mutate(c: &mut Criterion) {
     }
 }
 
+/// Building a `ByteVec` through the [`Builder`] write path. `put_slice` copies each write into the
+/// builder's coalescing head buffer (128 KiB here, flushed to a chunk when full); `put_bytes` holds
+/// each `Bytes` by reference (the default inline threshold of 0). The naive reference builds a
+/// `VecDeque<Bytes>` directly: `put_slice` against one `Bytes::copy_from_slice` per write (no
+/// coalescing — the loss the head buffer exists to avoid), `put_bytes` against a bare `push_back`.
+fn bench_builder(c: &mut Criterion) {
+    use etude_buffer::writer::Buffer;
+    const HEAD_CAP: usize = 128 * 1024;
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let chunks: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+
+        let mut g = group(c, "builder_put_slice");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter(|| {
+                let mut builder = ByteVec::builder(HEAD_CAP);
+                for c in &chunks {
+                    builder.put_slice(c);
+                }
+                black_box(builder.finish())
+            })
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", label), |b| {
+            b.iter(|| {
+                let mut v = NaiveVec::new();
+                for c in &chunks {
+                    v.push_back(Bytes::copy_from_slice(c));
+                }
+                black_box(v)
+            })
+        });
+        g.finish();
+
+        let mut g = group(c, "builder_put_bytes");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter(|| {
+                let mut builder = ByteVec::builder(HEAD_CAP);
+                for c in &chunks {
+                    builder.put_bytes(c.clone());
+                }
+                black_box(builder.finish())
+            })
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", label), |b| {
+            b.iter(|| {
+                let mut v = NaiveVec::new();
+                for c in &chunks {
+                    v.push_back(c.clone());
+                }
+                black_box(v)
+            })
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_push_back,
@@ -827,6 +883,7 @@ criterion_group!(
     bench_validate_utf8,
     bench_copy_to_bytes_mut,
     bench_socket_read,
-    bench_utf8_mutate
+    bench_utf8_mutate,
+    bench_builder
 );
 criterion_main!(benches);
