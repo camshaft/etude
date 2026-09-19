@@ -1806,6 +1806,7 @@ fn builder_differential_against_model() {
         SocketRead(Vec<u8>, u8),
         ReadChunk(usize),
         NestedLenPrefix(Vec<u8>),
+        PartialCopy(usize),
     }
 
     check!()
@@ -1891,6 +1892,28 @@ fn builder_differential_against_model() {
                         model.extend_from_slice(d);
                         model.extend_from_slice(&inner_len.to_be_bytes());
                         model.extend_from_slice(d);
+                    }
+                    BuilderOp::PartialCopy(cap) => {
+                        // partial_copy_into with a capacity-bounded dest: the written prefix plus
+                        // the returned trailing chunk must be exactly the model's front, in order.
+                        // This pins the chunks-then-head drain against reordering — the impl leans
+                        // on the inner reader returning a non-maximal trailing chunk only at
+                        // exhaustion, and this fence holds regardless of that invariant shifting.
+                        use etude_buffer::reader::Buffer as _;
+                        let cap = cap % 48;
+                        let mut buf = alloc::vec![0u8; cap];
+                        let mut dest = bytes::buf::UninitSlice::new(&mut buf);
+                        let chunk = builder.partial_copy_into(&mut dest).unwrap();
+                        let written = cap - dest.remaining_capacity();
+                        assert!(
+                            chunk.len() <= dest.remaining_capacity(),
+                            "trailing chunk fits"
+                        );
+                        let mut got = buf[..written].to_vec();
+                        got.extend_from_slice(&chunk);
+                        let taken = got.len();
+                        assert_eq!(&got[..], &model[..taken], "partial_copy_into order");
+                        model.drain(..taken);
                     }
                 }
                 assert_eq!(builder.len(), model.len(), "len after {op:?}");
