@@ -536,6 +536,54 @@ fn divmod_edge_cases_and_wide_operands() {
 /// Karatsuba threshold (32 limbs), so this pins the schoolbook↔Karatsuba boundary (31/32/33 limbs),
 /// the recursive Karatsuba path (100/200 limbs split repeatedly), and unbalanced sizes (where the
 /// dispatch drops back to schoolbook). Both signs.
+/// `to_decimal_string` on WIDE magnitudes vs num-bigint — the small random corpus never reaches the
+/// recursive divide-and-conquer threshold (10 limbs), so this pins the recursive base-conversion path:
+/// sizes straddling the threshold, the balanced power-of-ten split, the recursion, the "high half
+/// empty" narrowing (a value just under a split boundary), and both signs. Also exact powers of ten and
+/// `10^k - 1` (all-nines) — the values most likely to expose a padding/leading-zero fencepost.
+#[test]
+fn to_decimal_string_recursive_vs_num_bigint() {
+    let mut rng = Rng(0xdec1_3a17_c0de_5a5a);
+    let mk = |rng: &mut Rng, n: usize, neg: bool| -> Big {
+        let mut mag: Vec<u64> = (0..n).map(|_| rng.next()).collect();
+        if let Some(top) = mag.last_mut() {
+            *top |= 0x8000_0000_0000_0000; // force exact width n
+        }
+        let mut b = Big { neg, mag };
+        b.normalize();
+        b
+    };
+    // Widths straddling the recursive threshold and up through several split levels, both signs.
+    for &n in &[9usize, 10, 11, 16, 17, 31, 32, 64, 100, 200] {
+        for &neg in &[false, true] {
+            let b = mk(&mut rng, n, neg);
+            assert_eq!(b.to_decimal_string(), to_ref(&b).to_string(), "{n} limbs");
+        }
+    }
+    // Values just below / at / above a balanced split boundary exercise the "high half empty" and the
+    // zero-padding of a short low half: 10^k, 10^k - 1 (all nines), 10^k + 1, for a spread of k.
+    let ten = Big::from_i64(10);
+    let mut p = Big::from_i64(1);
+    for k in 1..=400usize {
+        p = p.mul(&ten); // p == 10^k
+        if [1, 18, 19, 20, 37, 38, 39, 76, 77, 152, 300, 400].contains(&k) {
+            for cand in [
+                p.clone(),
+                p.sub(&Big::from_i64(1)),
+                p.add(&Big::from_i64(1)),
+            ] {
+                assert_eq!(
+                    cand.to_decimal_string(),
+                    to_ref(&cand).to_string(),
+                    "10^{k} neighborhood"
+                );
+                let neg = cand.neg();
+                assert_eq!(neg.to_decimal_string(), to_ref(&neg).to_string(), "-10^{k}");
+            }
+        }
+    }
+}
+
 #[test]
 fn mul_wide_operands_vs_num_bigint() {
     let mut rng = Rng(0x51ee_7c0d_e1a5_9b3f);

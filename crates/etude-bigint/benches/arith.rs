@@ -156,7 +156,9 @@ fn bench_cmp(c: &mut Criterion) {
 fn bench_to_decimal(c: &mut Criterion) {
     let mut g = group(c, "to_decimal_string");
     let mut rng = Rng(0xcafe_f00d_0011_2233);
-    for &(label, nbytes) in HEAVY_TIERS {
+    // Full TIERS (through 4096b) — the recursive divide-and-conquer split's advantage over the linear
+    // chunk method widens with magnitude, so the largest tier is where it shows most.
+    for &(label, nbytes) in TIERS {
         let a = rng.big(nbytes);
         let na = to_num(&a);
         g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
