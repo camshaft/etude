@@ -1262,6 +1262,8 @@ fn differential_against_model() {
         DoubleEndedCheck,
         InterleavedChunksCheck(Vec<bool>),
         AsContiguousCheck,
+        IoReadWrite(usize, Vec<u8>),
+        CopyToBytesMutCheck,
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1541,6 +1543,32 @@ fn differential_against_model() {
                         front, want,
                         "fuzz-interleaved front/back must partition the chunks"
                     );
+                }
+                Op::IoReadWrite(k, d) => {
+                    // std::io adapters on a shared clone: Read consumes from the front into a
+                    // bounded buffer; write_vectored appends split slices. The original rope must
+                    // be untouched (the global asserts below see any disturbance).
+                    use std::io::{Read, Write};
+                    let mut r = rope.clone();
+                    let k = k % (model.len() + 2);
+                    let mut buf = alloc::vec![0u8; k];
+                    let n = r.read(&mut buf).unwrap();
+                    assert_eq!(n, k.min(model.len()), "io::Read fills what it can");
+                    assert_eq!(&buf[..n], &model[..n], "io::Read front bytes");
+                    let mid = d.len() / 2;
+                    let slices = [
+                        std::io::IoSlice::new(&d[..mid]),
+                        std::io::IoSlice::new(&d[mid..]),
+                    ];
+                    let wrote = r.write_vectored(&slices).unwrap();
+                    assert_eq!(wrote, d.len(), "write_vectored writes all");
+                    let mut want = model[n..].to_vec();
+                    want.extend_from_slice(&d);
+                    assert_eq!(r, want[..], "clone after read + vectored write");
+                }
+                Op::CopyToBytesMutCheck => {
+                    let flat = rope.clone().copy_to_bytes_mut();
+                    assert_eq!(&flat[..], &model[..], "copy_to_bytes_mut content");
                 }
                 Op::AsContiguousCheck => {
                     // The only soundness face of as_contiguous: a Some view must be the ENTIRE
