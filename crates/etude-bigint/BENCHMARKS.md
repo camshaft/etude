@@ -53,8 +53,8 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
 | to_decimal_string         | 64b    | 58.3 ns   | 72.2 ns    | **0.81**  |
 | to_decimal_string         | 256b   | 342 ns    | 248 ns     | 1.38      |
-| to_decimal_string         | 1024b  | 3.14 µs   | 2.22 µs    | 1.42      |
-| to_decimal_string         | 4096b  | 17.1 µs   | 21.0 µs    | **0.81**  |
+| to_decimal_string         | 1024b  | 1.63 µs   | 2.22 µs    | **0.74**  |
+| to_decimal_string         | 4096b  | 14.3 µs   | 21.0 µs    | **0.68**  |
 | sign_magnitude_roundtrip  | 64b    | 35.2 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 41.6 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 75.0 ns   | —          | —         |
@@ -72,7 +72,7 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | from_base_10_pow_k        | 4096b  | 2.32 µs   | 4.77 µs    | **0.49**  |
 
 We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), **cmp** (three of four
-tiers), and **to_decimal_string at 64b and 4096b** (0.81× / 0.81×), and reach parity-or-better on
+tiers), and **to_decimal_string at 64b/1024b/4096b** (0.81× / 0.74× / 0.68×), and reach parity-or-better on
 **mul at 256b/1024b** and **sub at 256b**.
 
 `clone` and `from_i64` are the small-value CONSTRUCTION paths: at 64b both trail num-bigint (2.20× /
@@ -284,17 +284,22 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   `From<i128>` / `ToPrimitive::to_i128`: `from_i128` 12.0 vs 23.1 ns (**0.52×**), `to_i128_checked` 2.38 vs
   4.72 ns (**0.50×**). The byte-serializer round-trip (`i128_*_sign_magnitude_bytes`) was measured slower
   than `Big::add` for this, so the direct limb pair is what makes the fast path a win.
+- **Re-tuned `to_decimal` recursive threshold (10 → 64 limbs)** — the threshold was set when a chunk peel
+  divided by `10^19` with a hardware `u128` divide; the reciprocal ÷`10^19` peel (a `wide_mul`, no divide)
+  since made the linear method so cheap that it beats the recursive divide-and-conquer's per-node
+  divmod + allocation overhead through at least 64 limbs. Measured linear vs recursive: 1024b (16 limbs)
+  1.63 vs 3.21 µs, 4096b (64 limbs) 14.3 vs 17.2 µs. Raising the threshold routes both through the linear
+  peel: 1024b 3.14 → 1.63 µs (1.42× → **0.74×**), 4096b 17.1 → 14.3 µs (0.81× → **0.68×**) — both cross to
+  wins. 64b/256b were already linear (unchanged). The recursive path (and its skip-top-squaring win) is
+  retained for magnitudes wider than 64 limbs, where the subquadratic split eventually pays off.
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string at 256b/1024b (1.38× / 1.44×).** (4096b now **wins** at 0.81× after skipping the
-   wasted top squaring — see landed.) The peel is alloc-free with a reciprocal ÷10¹⁹ and the recursive
-   divmods use the reciprocal `qhat`. Two dead-ends are recorded: making the squarings *faster* (a
-   symmetric schoolbook square) was neutral-to-worse and reverted; *eliminating* the wasted top square
-   landed the win above. The remaining 1024b residual is the recursive split's own overhead — the divmod
-   calls and per-node `(hi, lo)` allocations — so the next lever is a leaner node that reuses scratch
-   buffers, not a faster square. 256b is the linear peel (4 limbs, below the 10-limb recursive threshold),
-   a separate constant-factor path.
+1. **to_decimal_string at 256b (1.38×).** The only remaining `to_decimal` loss — 1024b (0.74×) and 4096b
+   (0.68×) now win after raising the recursive threshold to 64 (the linear peel beats the recursive split
+   through 64 limbs; see landed). 256b is the linear peel at 4 limbs: alloc-free, dividing by `10^19` with
+   a precomputed reciprocal, so the residual is per-chunk constant factors (~5 chunks), not an algorithm
+   choice — num-bigint's small-value radix conversion is simply tighter here. Low headroom.
 2. **clone / from_i64 / neg / abs at 64b (2.20× / 1.77× / 2.19× / 1.80×).** All four are the same
    small-value path heap-allocating a one-limb `Vec`. An inline small-value magnitude repr fixes them
    together (measured clone 2.20→~1.0×, from_i64 1.77→0.97×) but REGRESSES add/mul unless the arithmetic
