@@ -25,6 +25,11 @@
 //!   single lexeme slice + the Stream lookahead / dispatch per value.
 //! - `digest_strings`: serde ~29µs, raw_tokenize ~26µs, adapter ~106µs — the `from_utf8` re-validation
 //!   (the next lever, pending strrope's `from_utf8_unchecked`).
+//! - `digest_containers` (empty arrays, ZERO scalars → no handoff, no lexeme slice): serde ~20µs,
+//!   raw_tokenize ~19µs, adapter ~60µs. This isolates the pure **dispatch + `Stream` lookahead** cost —
+//!   ~3x over the bare scan (~40ns/structural token) with nothing else in play. So the residual latency
+//!   lever is the per-value dispatch/lookahead itself, not the lexeme slice; a real win here needs a
+//!   profiling-driven pass on the hot path (orthogonal to Decision 0).
 
 use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -185,6 +190,21 @@ fn number_doc(count: usize) -> String {
     s
 }
 
+/// Container-only: a flat array of empty arrays (`[[],[],…]`) — zero scalars, so ZERO string/number
+/// handoff and ZERO lexeme slicing. Isolates the pure structural cost: `SeqAccess` threading, the
+/// `Stream` one-token lookahead, and per-value dispatch — the residual "inherent SAX overhead" lever.
+fn container_doc(count: usize) -> String {
+    let mut s = String::from("[");
+    for i in 0..count {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str("[]");
+    }
+    s.push(']');
+    s
+}
+
 fn rope_of(raw: &[u8]) -> ByteVec {
     let mut r = ByteVec::new();
     r.push_back(Bytes::copy_from_slice(raw));
@@ -230,6 +250,7 @@ fn benches(c: &mut Criterion) {
     bench_workload(c, "digest_mixed", mixed_doc(200));
     bench_workload(c, "digest_strings", string_doc(500));
     bench_workload(c, "digest_numbers", number_doc(500));
+    bench_workload(c, "digest_containers", container_doc(500));
 }
 
 criterion_group!(scoreboard, benches);
