@@ -1025,6 +1025,237 @@ fn set_byte_bounded_cow_in_tree_rebalances_and_preserves_sharing() {
     assert_eq!(snapshot, orig_flat, "COW: the shared snapshot is untouched");
 }
 
+/// Full-surface deterministic differential stress that STARTS deep (buffered head + tree + tail),
+/// keeps persistent shared aliases (a full clone and a zero-copy slice) alive across every
+/// mutation, and drives the whole public surface — including the ops the bolero differential does
+/// not reach from a deep start (`split_to_copy`, `Buf::advance`/`Buf::copy_to_bytes`, a
+/// chunks-roundtrip, appending a slice of the rope to itself, and mutations THROUGH the slice
+/// alias) — asserting byte-for-byte agreement with a `Vec<u8>` model after every op, and that no
+/// write ever leaks across shared structure in either direction.
+#[test]
+fn full_surface_differential_with_persistent_aliases() {
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+    fn payload(s: &mut u64, max: usize) -> Vec<u8> {
+        let len = (rng(s) as usize) % (max + 1);
+        (0..len).map(|_| rng(s) as u8).collect()
+    }
+    /// Rebuilds `rope`/`model` into a deep shape with all three regions populated.
+    fn deepen(rope: &mut ByteRope, model: &mut Vec<u8>, s: &mut u64) {
+        for i in 0..(PROMOTE_AT * 2) {
+            let b: Vec<u8> = (0..(1 + (rng(s) as usize) % 7)).map(|k| (i + k) as u8).collect();
+            rope.push_back(Bytes::from(b.clone()));
+            model.extend_from_slice(&b);
+        }
+        for i in 0..(FANOUT / 2) {
+            let b = alloc::vec![0xB0u8 ^ (i as u8); 3];
+            rope.push_front(Bytes::from(b.clone()));
+            model.splice(0..0, b.iter().copied());
+        }
+    }
+
+    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut rope = ByteRope::new();
+    let mut model: Vec<u8> = Vec::new();
+    deepen(&mut rope, &mut model, &mut s);
+    deepen(&mut rope, &mut model, &mut s);
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+
+    // Persistent aliases, refreshed periodically. Every op below must leave these untouched.
+    let mut alias = rope.clone();
+    let mut alias_bytes = model.clone();
+    let mut sl = rope.slice(model.len() / 4..model.len() / 2);
+    let mut sl_bytes = model[model.len() / 4..model.len() / 2].to_vec();
+
+    // A large shared chunk we retain a handle to: no COW edit may ever write through it.
+    let big = Bytes::from(alloc::vec![0x77u8; COW_SPLIT_ABOVE * 2 + 9]);
+
+    for step in 0..3000usize {
+        match rng(&mut s) % 18 {
+            0 => {
+                let d = payload(&mut s, 33);
+                rope.push_back(Bytes::from(d.clone()));
+                model.extend_from_slice(&d);
+            }
+            1 => {
+                let d = payload(&mut s, 33);
+                rope.push_front(Bytes::from(d.clone()));
+                model.splice(0..0, d.iter().copied());
+            }
+            2 => match rope.pop_front() {
+                Some(c) => {
+                    assert_eq!(&c[..], &model[..c.len()], "pop_front step {step}");
+                    model.drain(..c.len());
+                }
+                None => assert!(model.is_empty()),
+            },
+            3 => match rope.pop_back() {
+                Some(c) => {
+                    let at = model.len() - c.len();
+                    assert_eq!(&c[..], &model[at..], "pop_back step {step}");
+                    model.truncate(at);
+                }
+                None => assert!(model.is_empty()),
+            },
+            4 => {
+                let k = (rng(&mut s) as usize) % (model.len() + 2);
+                if k > model.len() {
+                    assert_eq!(rope.advance(k), Err(ByteRopeError::OutOfBounds(k)));
+                } else {
+                    rope.advance(k).unwrap();
+                    model.drain(..k);
+                }
+            }
+            5 => {
+                let k = (rng(&mut s) as usize) % (model.len() + 2); // past-end = no-op
+                rope.truncate(k);
+                model.truncate(k);
+            }
+            6 => {
+                let k = (rng(&mut s) as usize) % (model.len() + 2);
+                if k > model.len() {
+                    assert!(rope.split_to(k).is_err());
+                } else {
+                    let front = rope.split_to(k).unwrap();
+                    assert_eq!(front, &model[..k], "split_to step {step}");
+                    model.drain(..k);
+                }
+            }
+            7 => {
+                let k = (rng(&mut s) as usize) % (model.len() + 2);
+                if k > model.len() {
+                    assert!(rope.split_to_copy(k).is_err());
+                } else {
+                    let front = rope.split_to_copy(k).unwrap();
+                    assert_eq!(&front[..], &model[..k], "split_to_copy step {step}");
+                    model.drain(..k);
+                }
+            }
+            8 => {
+                // Append: half the time a fresh rope, half a zero-copy slice of SELF (aliasing).
+                if rng(&mut s).is_multiple_of(2) {
+                    let mut other = ByteRope::new();
+                    for _ in 0..(rng(&mut s) % 70) {
+                        let d = payload(&mut s, 9);
+                        other.push_back(Bytes::from(d.clone()));
+                        model.extend_from_slice(&d);
+                    }
+                    rope.append(&mut other);
+                    assert!(other.is_empty());
+                } else if !model.is_empty() {
+                    let a = (rng(&mut s) as usize) % (model.len() + 1);
+                    let b = a + (rng(&mut s) as usize) % (model.len() - a + 1);
+                    let mut other = rope.slice(a..b);
+                    rope.append(&mut other);
+                    model.extend_from_within(a..b);
+                }
+            }
+            9 => {
+                let a = (rng(&mut s) as usize) % (model.len() + 1);
+                let b = a + (rng(&mut s) as usize) % (model.len() - a + 1);
+                assert_eq!(rope.slice(a..b), &model[a..b], "slice {a}..{b} step {step}");
+            }
+            10 => {
+                let idx = (rng(&mut s) as usize) % (model.len() + 1);
+                assert_eq!(rope.byte_at(idx), model.get(idx).copied(), "byte_at step {step}");
+            }
+            11 => {
+                let v = rng(&mut s) as u8;
+                if model.is_empty() {
+                    assert_eq!(rope.set_byte(0, v), Err(ByteRopeError::OutOfBounds(0)));
+                } else {
+                    let idx = (rng(&mut s) as usize) % model.len();
+                    rope.set_byte(idx, v).unwrap();
+                    model[idx] = v;
+                }
+            }
+            12 => {
+                let lo = (rng(&mut s) as usize) % (model.len() + 1);
+                let hi = lo + (rng(&mut s) as usize) % (model.len() - lo + 1);
+                let kind = rng(&mut s) % 4;
+                let repl: Vec<u8> = if kind == 3 {
+                    (lo..hi).map(|k| (k as u8) ^ 0x5a).collect() // equal-length overwrite
+                } else {
+                    payload(&mut s, 40)
+                };
+                match kind {
+                    1 => rope.replace(lo..hi, Bytes::from(repl.clone())).unwrap(),
+                    2 => {
+                        let vr: ByteRope = repl.chunks(3).map(Bytes::copy_from_slice).collect();
+                        rope.replace(lo..hi, vr).unwrap();
+                    }
+                    _ => rope.replace(lo..hi, &repl[..]).unwrap(),
+                }
+                model.splice(lo..hi, repl.iter().copied());
+            }
+            13 => {
+                // bytes::Buf on a shared clone: advance + copy_to_bytes must match the model
+                // and must not disturb the original (verified by the global asserts below).
+                let mut b = rope.clone();
+                let k = (rng(&mut s) as usize) % (model.len() + 1);
+                bytes::Buf::advance(&mut b, k);
+                let m = (rng(&mut s) as usize) % (model.len() - k + 1);
+                let got = bytes::Buf::copy_to_bytes(&mut b, m);
+                assert_eq!(&got[..], &model[k..k + m], "Buf ops step {step}");
+            }
+            14 => {
+                // chunks-roundtrip + flatten agree with the model exactly
+                let flat: Vec<u8> = rope.chunks().flat_map(|c| c.iter().copied()).collect();
+                assert_eq!(flat, model, "chunks roundtrip step {step}");
+                assert_eq!(rope.chunks().len(), rope.chunks().count());
+                assert_eq!(&rope.copy_to_bytes()[..], &model[..], "copy_to_bytes step {step}");
+            }
+            15 => {
+                // Mutate THROUGH the slice alias; the parent rope must be unaffected (checked by
+                // the global rope == model assert below).
+                if !sl_bytes.is_empty() {
+                    let idx = (rng(&mut s) as usize) % sl_bytes.len();
+                    let v = rng(&mut s) as u8;
+                    sl.set_byte(idx, v).unwrap();
+                    sl_bytes[idx] = v;
+                }
+            }
+            16 => {
+                rope.push_back(big.clone()); // retained shared handle: COW must never leak into it
+                model.extend_from_slice(&big);
+            }
+            _ => {
+                if rng(&mut s).is_multiple_of(7) {
+                    rope.clear();
+                    model.clear();
+                }
+            }
+        }
+
+        assert_eq!(rope.len(), model.len(), "len at step {step}");
+        assert_eq!(rope, model, "bytes at step {step}");
+        assert_eq!(alias, alias_bytes, "persistent clone disturbed at step {step}");
+        assert_eq!(sl, sl_bytes, "persistent slice disturbed at step {step}");
+
+        if model.len() > 60_000 {
+            rope.truncate(30_000);
+            model.truncate(30_000);
+        }
+        if model.len() < 64 {
+            deepen(&mut rope, &mut model, &mut s);
+        }
+        if step % 128 == 127 {
+            alias = rope.clone();
+            alias_bytes = model.clone();
+            let a = (rng(&mut s) as usize) % (model.len() + 1);
+            let b = a + (rng(&mut s) as usize) % (model.len() - a + 1);
+            sl = rope.slice(a..b);
+            sl_bytes = model[a..b].to_vec();
+        }
+    }
+    // The retained big-chunk handle was shared through many edits: every byte must be intact.
+    assert!(big.iter().all(|&b| b == 0x77), "shared Bytes handle was written through");
+}
+
 /// Stress the leaf→branch→root split propagation: a multi-level tree of exclusively large shared
 /// chunks, where every edit splits a leaf. Enough edits overflow leaves into branch splits and grow
 /// the root's height. `check_invariants` validates fanout, cached sizes/totals/counts, and height at
@@ -1133,3 +1364,91 @@ fn trait_impl_parity_with_bytevec() {
     let io_err: std::io::Error = ByteRopeError::OutOfBounds(7).into();
     assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
 }
+
+/// Deep-tier `get(index)` descends the tree by the per-subtree CACHED chunk counts, so any stale
+/// count fix-up (leaf splits from bounded-COW `set_byte`, concat seam repacks, pop-block refills,
+/// structural `replace`) would silently send it to the WRONG chunk while the byte content stays
+/// right. Oracle: `get(i)` must equal `chunks().nth(i)` (pointer + bytes) for EVERY index, swept
+/// after each count-perturbing mutation, with all three regions (head/tree/tail) populated.
+#[test]
+fn get_index_matches_chunk_iterator_after_count_perturbing_mutations() {
+    fn sweep(rope: &ByteRope, label: &str) {
+        let n = rope.chunks().len();
+        for i in 0..n {
+            let via_iter = rope.chunks().nth(i).expect("iterator chunk");
+            let via_get = rope.get(i).expect("get chunk");
+            assert_eq!(
+                via_get.as_ptr(),
+                via_iter.as_ptr(),
+                "{label}: get({i}) returned a different chunk than chunks().nth({i})"
+            );
+            assert_eq!(via_get.len(), via_iter.len(), "{label}: get({i}) length");
+        }
+        assert!(rope.get(n).is_none(), "{label}: get(count) must be None");
+        assert!(rope.get(n + 1000).is_none(), "{label}: get(far) must be None");
+    }
+
+    // All three regions populated: tree via push_back (incl. large shared chunks that will split
+    // on set_byte), buffered head via push_front, buffered tail via trailing push_backs.
+    let big = Bytes::from(alloc::vec![9u8; COW_SPLIT_ABOVE * 2 + 1]);
+    let mut rope = ByteRope::new();
+    for i in 0..(PROMOTE_AT * 2) {
+        if i % 11 == 0 {
+            rope.push_back(big.clone()); // shared: a later set_byte splits its leaf
+        } else {
+            rope.push_back(Bytes::from(alloc::vec![i as u8; 1 + i % 5]));
+        }
+    }
+    for i in 0..7 {
+        rope.push_front(Bytes::from(alloc::vec![0xA0u8 ^ i; 2]));
+        rope.push_back(Bytes::from(alloc::vec![0x50u8 ^ i; 3]));
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+    sweep(&rope, "initial");
+
+    // Leaf-splitting set_byte edits (shared big chunks -> bounded COW split -> count fix-ups up
+    // the spine, possibly leaf/branch/root splits).
+    let len = rope.len();
+    for k in 0..40usize {
+        let off = (k * 6151 + 13) % len;
+        rope.set_byte(off, 0xEE).unwrap();
+    }
+    sweep(&rope, "after set_byte splits");
+
+    // Structural replace (UC6 tree splice: split + concat seam repacks).
+    let l = rope.len();
+    rope.replace(l / 3..l / 2, Bytes::from(alloc::vec![0x33u8; 97])).unwrap();
+    sweep(&rope, "after structural replace");
+
+    // End churn: pop refills from tree blocks at both ends, then re-push.
+    for _ in 0..12 {
+        rope.pop_front();
+        rope.pop_back();
+    }
+    sweep(&rope, "after end pops");
+    for i in 0..12u8 {
+        rope.push_front(Bytes::from(alloc::vec![i | 0x80; 2]));
+        rope.push_back(Bytes::from(alloc::vec![i | 0x40; 2]));
+    }
+    sweep(&rope, "after re-push");
+
+    // Concat of two deep ropes (seam repack merges leaf blocks -> counts recomputed).
+    let mut other = ByteRope::new();
+    for i in 0..(PROMOTE_AT * 2) {
+        other.push_back(Bytes::from(alloc::vec![i as u8 ^ 0xFF; 1 + i % 3]));
+    }
+    rope.append(&mut other);
+    sweep(&rope, "after deep concat");
+
+    // Self-sharing append (slice + append shares subtrees with re-counted spines).
+    let quarter = rope.len() / 4;
+    let mut part = rope.slice(quarter..quarter * 3);
+    rope.append(&mut part);
+    sweep(&rope, "after self-slice append");
+
+    // split_to leaves both halves with fresh spines.
+    let front = rope.split_to(rope.len() / 2).unwrap();
+    sweep(&front, "split front");
+    sweep(&rope, "split back");
+}
+
