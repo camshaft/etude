@@ -969,60 +969,85 @@ impl<K> Rope<K> {
     /// between them, so a run of small shared fragments becomes one buffer while a neighbouring large
     /// or solely-owned chunk keeps its own allocation (no memcpy). The logical content is unchanged.
     pub fn compact_with(&mut self, config: &CompactionConfig) {
-        // Zero or one chunk is already a single contiguous allocation (or empty) — maximally compact
-        // under every config, so there is nothing to coalesce. Skips the pointless copy-and-rebuild
-        // on an already-flat rope (the common re-compact / single-chunk case).
-        if self.chunk_count() <= 1 {
+        // One scan over the chunks establishes everything the rebuild needs without touching a byte:
+        // the total length that will be coalesced (to pre-size the buffer exactly), whether any segment
+        // is skipped (a skip is what forces more than one output segment), and the chunk count.
+        let mut coalesced_len = 0usize;
+        let mut any_skipped = false;
+        let mut n_chunks = 0usize;
+        for chunk in self.chunks() {
+            n_chunks += 1;
+            if config.skips(chunk) {
+                any_skipped = true;
+            } else {
+                coalesced_len += chunk.len();
+            }
+        }
+
+        // Collapse fast path: nothing is skipped, so the whole rope becomes ONE contiguous chunk. No
+        // segment list is allocated and no chunk is pushed one-at-a-time — a single pre-sized buffer is
+        // filled (so it never reallocates mid-fill) and swapped in as the sole `Small` chunk.
+        if !any_skipped {
+            // A lone, uniquely-owned chunk is already a standalone allocation this rope solely holds:
+            // there is nothing to consolidate or release, so leave it untouched. A *shared* lone chunk,
+            // by contrast, still copies out below — that is how a small view pinning a large shared
+            // backing gets released into its own right-sized allocation.
+            if n_chunks <= 1
+                && matches!(
+                    &self.repr,
+                    Repr::Small { head, additional }
+                        if additional.is_empty() && (head.is_empty() || head.is_unique())
+                )
+            {
+                return;
+            }
+            let mut buf = bytes::BytesMut::with_capacity(coalesced_len);
+            for chunk in self.chunks() {
+                buf.extend_from_slice(chunk);
+            }
+            debug_assert_eq!(buf.len(), self.len, "collapse preserves the byte length");
+            self.repr = Repr::Small {
+                head: buf.freeze(),
+                additional: VecDeque::new(),
+            };
+            self.check_invariants();
             return;
         }
 
-        // Pre-size the coalesce buffer to the exact total of the segments that will be copied, so it
-        // never reallocates mid-fill. `BytesMut::split` hands each finished run its bytes O(1) out of
-        // this one allocation and keeps the tail capacity for the next run, so a single allocation
-        // backs every coalesced run (no per-run alloc, no growth-recopy) — a large win for the common
-        // full `compact()` over a many-chunk rope, where the naive grow-as-you-go buffer would realloc
-        // and recopy repeatedly as it doubled toward the full length.
-        let coalesced_len: usize = self
-            .chunks()
-            .filter(|c| !config.skips(c))
-            .map(|c| c.len())
-            .sum();
-
-        // Build the new chunk sequence: coalesce non-skipped segments into a running contiguous
-        // buffer, emit skipped segments as their own (handle-cloned, not copied) chunks, in order.
-        let mut out: Vec<Bytes> = Vec::new();
+        // Mixed result: some segments are skipped, so the rope becomes coalesced runs interleaved with
+        // the kept (handle-cloned, un-copied) segments. Coalesce runs out of one pre-sized buffer via
+        // `BytesMut::split` (one allocation backs them all), then bulk-build the rope from the segment
+        // sequence in a single bottom-up pass rather than pushing chunk-by-chunk.
+        let mut segments: Vec<Bytes> = Vec::new();
         let mut run = bytes::BytesMut::with_capacity(coalesced_len);
         for chunk in self.chunks() {
             if config.skips(chunk) {
                 if !run.is_empty() {
-                    out.push(run.split().freeze());
+                    segments.push(run.split().freeze());
                 }
-                out.push(chunk.clone());
+                segments.push(chunk.clone());
             } else {
                 run.extend_from_slice(chunk);
             }
         }
         if !run.is_empty() {
-            out.push(run.freeze());
+            segments.push(run.freeze());
         }
 
-        // Nothing to do if the layout is already exactly this sequence (avoids a pointless rebuild of
-        // an already-single-chunk rope — the common re-compact case).
-        if out.len() == self.chunk_count()
-            && self
-                .chunks()
-                .zip(out.iter())
-                .all(|(a, b)| a.as_ptr() == b.as_ptr())
-        {
-            return;
+        if segments.len() > PROMOTE_AT {
+            // Deep tier: fold whole `FANOUT` blocks straight into a fresh tree (the bulk path
+            // `FromIterator` uses), not `push_back` per chunk.
+            let mut tree = Tree::new();
+            extend_blocks(&mut tree, segments.into_iter());
+            *self = Self::from_tree(tree);
+        } else {
+            // Flat tier: the segments are the chunk list directly.
+            let mut additional: VecDeque<Bytes> =
+                segments.into_iter().filter(|c| !c.is_empty()).collect();
+            let head = additional.pop_front().unwrap_or_default();
+            self.repr = Repr::Small { head, additional };
+            self.check_invariants();
         }
-
-        // The borrow from `chunks()` above has ended; rebuild in place, preserving the content kind.
-        let mut rebuilt = Self::default();
-        for chunk in out {
-            rebuilt.push_chunk_back(chunk);
-        }
-        *self = rebuilt;
     }
 
     /// Creates an empty rope, pre-reserving space for `cap` chunks.

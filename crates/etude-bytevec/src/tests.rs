@@ -1321,6 +1321,48 @@ fn compact_on_utf8_rope_preserves_content() {
     assert_eq!(&s.into_bytes().copy_to_bytes()[..], "aéb".as_bytes());
 }
 
+/// A single-chunk rope whose chunk is *shared* (a view pinning a possibly-large backing that something
+/// else also holds) is copied out by `compact()` into a fresh, solely-owned allocation — releasing our
+/// hold on the shared backing. Content preserved.
+#[test]
+fn compact_copies_out_a_shared_single_chunk_to_release_backing() {
+    let backing = chunk(b"hello world payload");
+    let _other_holder = backing.clone(); // refcount 2 -> the chunk is not unique
+    let mut r: ByteVec = [backing].into_iter().collect();
+    assert_eq!(r.chunks().count(), 1);
+    assert!(
+        !r.get(0).unwrap().is_unique(),
+        "precondition: the single chunk is shared"
+    );
+    r.compact();
+    assert_eq!(r.chunks().count(), 1);
+    assert_eq!(
+        &r.get(0).unwrap()[..],
+        b"hello world payload",
+        "content preserved"
+    );
+    assert!(
+        r.get(0).unwrap().is_unique(),
+        "compact copied the shared chunk into a fresh solely-owned allocation"
+    );
+}
+
+/// A single-chunk rope whose chunk is already *uniquely* owned is left untouched by `compact()` — no
+/// pointless copy of an allocation we already solely hold (pointer-identical afterwards).
+#[test]
+fn compact_leaves_a_unique_single_chunk_untouched() {
+    let mut r: ByteVec = [chunk(b"solo")].into_iter().collect();
+    assert!(r.get(0).unwrap().is_unique(), "precondition: solely owned");
+    let ptr = r.get(0).unwrap().as_ptr();
+    r.compact();
+    assert_eq!(r.chunks().count(), 1);
+    assert_eq!(
+        r.get(0).unwrap().as_ptr(),
+        ptr,
+        "unique single chunk not copied"
+    );
+}
+
 /// `slice` must match the flat oracle for EVERY range, including ones that straddle the buffered
 /// head/tail seams — the region-walking reattach path in the deep tier.
 #[test]

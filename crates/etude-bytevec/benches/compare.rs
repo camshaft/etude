@@ -944,6 +944,42 @@ fn bench_compact(c: &mut Criterion) {
         });
         g.finish();
     }
+
+    // Single-chunk cases: a *shared* lone chunk (a small view pinning a large backing something else
+    // holds) is copied out to release the backing; a *uniquely-owned* lone chunk is left untouched.
+    // Contrasts the release copy against the near-free no-op.
+    let backing = Bytes::from(vec![0xABu8; 64 * 1024]);
+    let mut g = group(c, "compact_single_chunk");
+    g.bench_function(BenchmarkId::new("rope", "shared_released"), |b| {
+        b.iter_batched(
+            || {
+                // hold a second handle so the rope's chunk is shared (not unique)
+                let keep = backing.clone();
+                let r: ByteVec = [backing.clone()].into_iter().collect();
+                (r, keep)
+            },
+            |(mut r, _keep)| {
+                r.compact();
+                black_box(r)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.bench_function(BenchmarkId::new("rope", "unique_noop"), |b| {
+        b.iter_batched(
+            || {
+                [Bytes::from(vec![0xABu8; 64 * 1024])]
+                    .into_iter()
+                    .collect::<ByteVec>()
+            },
+            |mut r| {
+                r.compact();
+                black_box(r)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.finish();
 }
 
 criterion_group!(

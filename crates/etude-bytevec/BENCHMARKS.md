@@ -169,31 +169,38 @@ afterward should drain the rope directly (`pop_front` / `advance`, ~15 µs deep,
 reader; the reader earns its keep precisely when the source must stay intact, and there its O(1) setup is
 the win the table's single-read framing hides.
 
-### Compaction — `compact` / `compact_with` (runnable: `cargo bench -p etude-bytevec -- 'compact_full|compact_skip_large'`)
+### Compaction — `compact` / `compact_with` (runnable: `cargo bench -p etude-bytevec -- compact_`)
 
 `compact()` collapses a fragmented rope into one contiguous allocation; `compact_with(skip_above(n))`
-coalesces the small fragments but leaves segments over `n` bytes in place (no memcpy). The bench input is
-a fragmented rope of groups — 8 small (64 B) fragments then one large (2 KiB) chunk — so full compact
+coalesces the small fragments but leaves segments over `n` bytes in place (no memcpy). The fragmentation
+bench input is a rope of groups — 8 small (64 B) fragments then one large (2 KiB) chunk — so full compact
 copies everything into one buffer, while the skip variant coalesces each small run and keeps the large
-chunks. Latest run (aarch64, jemalloc, release; `deep` = 1000 groups ≈ 9000 chunks / 2.56 MB, `shallow` =
-4 groups):
+chunks. The single-chunk bench compacts one 64 KiB chunk that is either shared (a second handle held) or
+uniquely owned. Latest run (aarch64, jemalloc, release; `deep` = 1000 groups ≈ 9000 chunks / 2.56 MB,
+`shallow` = 4 groups; the sub-µs shallow rows are small and noisy on a shared box — the deep rows are the
+stable signal):
 
 | op | shape | time |
 |----|-------|------|
-| compact_full | shallow | 1.82 µs |
-| compact_full | deep | 314 µs |
-| compact_skip_large | shallow | 1.41 µs |
-| compact_skip_large | deep | 306 µs |
+| compact_full | shallow | ~2 µs |
+| compact_full | deep | 344 µs |
+| compact_skip_large | shallow | 1.3 µs |
+| compact_skip_large | deep | 300 µs |
+| compact_single_chunk | shared_released (64 KiB) | 2.0 µs |
+| compact_single_chunk | unique_noop | 19 ns |
 
-Two things the numbers pin down. First, the coalesce buffer is pre-sized to the exact total it will copy,
-so it never reallocates mid-fill and `BytesMut::split` hands each finished run its bytes O(1) out of that
-one allocation — this alone took full `compact()/deep` from 457 µs to 314 µs (about 31% faster) versus a
-naive grow-as-you-go buffer that doubles and recopies. Second, `skip_above` saves the large-chunk memcpy
-(here ~2 MB of the 2.56 MB is left in place) but only edges out full compact at `deep` (306 vs 314 µs),
-because leaving the large chunks in place means the result still has ~2000 segments to rebuild into the
-tree, and that rebuild cost offsets most of the copy saved. `skip_above` is therefore most worthwhile when
-it keeps a *few* genuinely large segments (little rebuild, large memcpy avoided) rather than many; `compact()`
-is the right default when the goal is one contiguous buffer for repeated reads or handoff.
+Things the numbers pin down. The full `compact()` scans the chunks once to size the coalesce buffer to the
+exact total, then fills that one pre-sized buffer (it never reallocates mid-fill) and swaps it in as the
+sole chunk — no intermediate segment list and no per-chunk rebuild when the whole rope collapses to one
+chunk (the common case); pre-sizing alone took `compact()/deep` from 457 µs to the ~340 µs copy-bound floor
+(about 25–30% faster) versus a naive grow-as-you-go buffer. `skip_above` saves the large-chunk memcpy
+(here ~2 MB of the 2.56 MB is left in place) but only edges out full compact at `deep` (300 vs 344 µs),
+because leaving the large chunks in place means the result still has ~2000 segments to rebuild, and that
+rebuild offsets most of the copy saved — so `skip_above` is most worthwhile when it keeps a *few* genuinely
+large segments, not many. The single-chunk rows show the release behavior: a *shared* lone chunk (a small
+view pinning a large backing another handle holds) is copied out into a fresh right-sized allocation to
+release the backing (one 64 KiB copy, ~2 µs), while a *uniquely-owned* lone chunk — nothing to consolidate
+or release — is a ~19 ns no-op.
 
 ## Historical: the switch from a flat deque to the tiered rope
 
