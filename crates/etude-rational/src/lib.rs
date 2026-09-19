@@ -7,17 +7,17 @@
 //! safety net.
 //!
 //! # Representation and the canonical-form invariant
-//! [`Rational`] is a `{ num: Big, den: Big }` pair kept in a SINGLE canonical form:
-//! - the denominator is STRICTLY POSITIVE (`den >= 1`), so the sign lives entirely on the numerator;
-//! - the pair is in LOWEST TERMS (`gcd(|num|, den) == 1`);
+//! [`Rational`] is a `{ num: Big, den: Big }` pair kept in a single canonical form:
+//! - the denominator is strictly positive (`den >= 1`), so the sign lives entirely on the numerator;
+//! - the pair is in lowest terms (`gcd(|num|, den) == 1`);
 //! - zero is exactly `0/1`; an integer `n` is exactly `n/1`.
 //!
-//! Every constructor and operation renormalizes, so a value has exactly ONE in-memory form. This is
-//! required for `Eq`/`Ord`/hashing to mean mathematical equality: `1/2` and `2/4` are the SAME value and
-//! MUST have identical fields. There is no representation of a zero-denominator rational — the fallible
+//! Every constructor and operation renormalizes, so a value has exactly one in-memory form. This is
+//! required for `Eq`/`Ord`/hashing to mean mathematical equality: `1/2` and `2/4` are the same value and
+//! must have identical fields. There is no representation of a zero-denominator rational — the fallible
 //! constructors return `None` and the total operations cannot produce one.
 //!
-//! The fields are PRIVATE and not part of the stable API. Construct through [`Rational::zero`],
+//! The fields are private and not part of the stable API. Construct through [`Rational::zero`],
 //! [`Rational::from_i64`], [`Rational::from_bigint`], [`Rational::new`]; inspect through [`Rational::numer`],
 //! [`Rational::denom`], [`Rational::is_zero`], [`Rational::is_negative`], [`Rational::is_integer`],
 //! [`Rational::cmp`].
@@ -33,13 +33,13 @@ use etude_bigint::Big;
 
 /// An exact rational number in canonical form. See the module doc for the invariant.
 ///
-/// The internal `{ num, den }` representation is PRIVATE and not part of the stable API. Construct values
+/// The internal `{ num, den }` representation is private and not part of the stable API. Construct values
 /// through the constructors and inspect them through the accessors.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Rational {
     /// Numerator; carries the sign of the whole value. Canonical: `gcd(|num|, den) == 1`.
     num: Big,
-    /// Denominator; always STRICTLY POSITIVE and coprime to `num`. Never zero.
+    /// Denominator; always strictly positive and coprime to `num`. Never zero.
     den: Big,
 }
 
@@ -133,7 +133,7 @@ impl Rational {
     /// The reciprocal `1/self` (`den/num`). Returns `None` when `self` is zero.
     ///
     /// No gcd is needed: `self` is already canonical (`den > 0`, `gcd(|num|, den) == 1`), and coprimality
-    /// is symmetric, so `den/num` is ALREADY in lowest terms — only the sign is moved onto the numerator
+    /// is symmetric, so `den/num` is already in lowest terms — only the sign is moved onto the numerator
     /// to keep the denominator positive. This is an O(limbs) swap, not the O(gcd) full normalize.
     pub fn recip(&self) -> Option<Rational> {
         if self.num.is_zero() {
@@ -220,9 +220,9 @@ impl Rational {
 
     /// Exact product `self * other` = `(a/b) * (c/d)`.
     ///
-    /// Cross-reduces BEFORE multiplying: since both operands are canonical (`gcd(a,b) = gcd(c,d) = 1`),
+    /// Cross-reduces before multiplying: since both operands are canonical (`gcd(a,b) = gcd(c,d) = 1`),
     /// the only common factors in `(a*c)/(b*d)` are between `a`&`d` and `c`&`b`. Cancelling `gcd(a,d)` and
-    /// `gcd(c,b)` first leaves the result ALREADY in lowest terms — no final gcd-normalize — and both
+    /// `gcd(c,b)` first leaves the result already in lowest terms — no final gcd-normalize — and both
     /// multiplies run on smaller operands. This trades one gcd over the `~2n`-bit product for two gcds
     /// over `~n`-bit operands (roughly half the work), and shrinks the products when factors do cancel.
     pub fn mul(&self, other: &Rational) -> Rational {
@@ -306,7 +306,7 @@ impl Rational {
 
     /// The decimal string `"num/den"` (e.g. `"-3/10"`), or just `"num"` when the value is an integer.
     ///
-    /// Writes the components directly into ONE `String` via `Big::write_decimal` (a sink writer), so it
+    /// Writes the components directly into one `String` via `Big::write_decimal` (a sink writer), so it
     /// allocates only the result — no intermediate per-component `String`s. Equivalent to `self.to_string()`.
     pub fn to_decimal_string(&self) -> String {
         use core::fmt::Write;
@@ -408,7 +408,7 @@ impl Rational {
     }
 }
 
-/// Compare `a/b` vs `c/d` for NON-NEGATIVE `a`, `c` and STRICTLY POSITIVE `b`, `d`, by the
+/// Compare `a/b` vs `c/d` for non-negative `a`, `c` and strictly positive `b`, `d`, by the
 /// continued-fraction method. Iterative: compare integer parts `⌊a/b⌋` vs `⌊c/d⌋`; on a tie compare the
 /// fractional remainders `r1/b` vs `r2/d`, which — being in `[0, 1)` — reverse order under reciprocation,
 /// so the next step compares `b/r1` vs `d/r2` with the running result negated. Terminates because the
@@ -507,9 +507,9 @@ fn reduce_by(n: &Big, g: &Big) -> Big {
     }
 }
 
-/// Cross-reduced multiply of two CANONICAL fractions `a/b` and `c/d` (`gcd(a,b) = gcd(c,d) = 1`, and both
+/// Cross-reduced multiply of two canonical fractions `a/b` and `c/d` (`gcd(a,b) = gcd(c,d) = 1`, and both
 /// nonzero). Cancels `g1 = gcd(a,d)` and `g2 = gcd(c,b)` before multiplying, returning `((a/g1)*(c/g2),
-/// (b/g2)*(d/g1))` — which is ALREADY in lowest terms (the four cross-pairs are pairwise coprime), so no
+/// (b/g2)*(d/g1))` — which is already in lowest terms (the four cross-pairs are pairwise coprime), so no
 /// further gcd-normalize is needed. `gcd` is sign-agnostic, so the quotients keep their operands' signs;
 /// the caller owns any final sign placement.
 fn cross_reduce_mul(a: &Big, b: &Big, c: &Big, d: &Big) -> (Big, Big) {
