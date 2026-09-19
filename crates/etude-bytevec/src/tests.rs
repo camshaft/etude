@@ -400,6 +400,39 @@ fn tier_transitions_hit_exact_boundaries_with_hysteresis() {
     }
 }
 
+/// Negative control for the structural invariant checker itself. `check_invariants` is the safety
+/// net every property harness in this crate — and, since #189, in etude-strrope and etude-json —
+/// leans on: it must actually PANIC on a corrupt rope, not pass vacuously. If someone weakens it
+/// (drops the len-vs-content assertion, turns a check into a no-op), the fuzz harnesses would keep
+/// passing while validating nothing. This plants a one-byte accounting error in the cached `len`
+/// of both a shallow and a deep rope and confirms the checker trips on it, with the failure naming
+/// the `len` guard so an unrelated panic can't masquerade as coverage.
+#[test]
+fn check_invariants_panics_on_corrupt_len() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    for n in [1usize, PROMOTE_AT * 3 + 5] {
+        let mut rope = ByteVec::new();
+        for i in 0..n {
+            rope.push_back(chunk(&[i as u8]));
+        }
+        rope.check_invariants(); // clean baseline must not panic
+
+        rope.len += 1; // a single-byte cached-length lie
+        let err = catch_unwind(AssertUnwindSafe(|| rope.check_invariants()))
+            .expect_err("check_invariants must panic on a corrupt cached len");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            msg.contains("len"),
+            "the len guard must be what trips (n={n}), got: {msg:?}"
+        );
+        rope.len -= 1; // restore before drop so no other assertion fires
+    }
+}
+
 #[test]
 fn promotes_and_demotes_preserving_contents() {
     let n = PROMOTE_AT * 4 + 5;
