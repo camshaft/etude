@@ -93,15 +93,20 @@ macro_rules! static_bytevec_tag {
 
 /// Mints [`Handle`]s that track a byte budget owned by `Self`.
 pub trait Owner: 'static + fmt::Debug {
+    /// The per-rope handle this owner hands out; its lifetime tracks the rope's bytes.
     type Handle: Handle;
 
+    /// Records `len` bytes as tagged and returns a handle that keeps the owner's budget in step
+    /// as the rope changes and until the handle is dropped.
     fn tag(&self, len: usize) -> Self::Handle;
 }
 
 /// A live claim on some number of an [`Owner`]'s bytes; adjusts the budget as the tagged rope grows,
 /// shrinks, clones, and drops.
 pub trait Handle: 'static + fmt::Debug + Clone + Sized {
+    /// Charges an additional `len` bytes to the owner.
     fn increment(&mut self, len: usize);
+    /// Releases `len` bytes back to the owner.
     fn decrement(&mut self, len: usize);
 }
 
@@ -115,6 +120,7 @@ pub struct Tagged<O: Owner> {
 }
 
 impl<O: Owner> Tagged<O> {
+    /// Wraps `bytes`, charging its current length to `owner`.
     #[inline]
     #[track_caller]
     pub fn new(bytes: ByteRope, owner: &O) -> Self {
@@ -123,27 +129,38 @@ impl<O: Owner> Tagged<O> {
         Self { bytes, tag }
     }
 
+    /// Appends a chunk, charging its length to the owner.
     pub fn push_back(&mut self, bytes: Bytes) {
         self.tag.increment(bytes.len());
         self.bytes.push_back(bytes);
     }
 
+    /// Moves all of `other` onto the end of this rope, charging its length to the owner and
+    /// leaving `other` empty.
     pub fn append(&mut self, other: &mut ByteRope) {
         self.tag.increment(other.len());
         self.bytes.append(other);
     }
 
+    /// Splits off the first `at` bytes, releasing them from the owner's budget and returning them
+    /// as a plain (untagged) [`ByteRope`].
+    ///
+    /// # Errors
+    /// Returns [`ByteRopeError::OutOfBounds`] if `at` exceeds the rope's length.
     pub fn split_to(&mut self, at: usize) -> Result<ByteRope, ByteRopeError> {
         let chunk = self.bytes.split_to(at)?;
         self.tag.decrement(chunk.len());
         Ok(chunk)
     }
 
+    /// Consumes the wrapper, returning the inner [`ByteRope`] and releasing its bytes from the
+    /// owner's budget.
     #[inline]
     pub fn untag(self) -> ByteRope {
         self.bytes
     }
 
+    /// Clones the inner [`ByteRope`] out without charging the copy to the owner.
     #[inline]
     pub fn untag_clone(&self) -> ByteRope {
         self.bytes.clone()
