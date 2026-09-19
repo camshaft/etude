@@ -2,20 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Head-to-head scoreboard: `etude_json`'s copy-avoiding tokenizer vs `serde_json`, across document
-//! shapes. Two axes are measured, ALLOCATIONS first-class (the whole point of the copy-avoiding
+//! shapes. Two axes are measured, allocations first-class (the whole point of the copy-avoiding
 //! design) and time second:
 //!
-//! - ALLOCATIONS: tokenizing allocates nothing — a [`etude_json::Token`] is a value carrying a rope
+//! - Allocations: tokenizing allocates nothing — a [`etude_json::Token`] is a value carrying a rope
 //!   span, so draining the whole stream touches zero heap. `serde_json` builds a full `Value` tree
 //!   (every array a `Vec`, every string a `String`, every object a `Map`). The alloc table below is
 //!   the headline: bytes/allocations per parse.
-//! - TIME: draining the token stream (find + validate every token) vs parsing to a `Value`. This is
+//! - Time: draining the token stream (find + validate every token) vs parsing to a `Value`. This is
 //!   not the same work — the tokenizer produces spans, `serde_json` produces an owned tree — so read
 //!   the time as "cost to walk the document", with the allocation column carrying the real story.
 //!
 //! Input is fed through a chunked [`ByteVec`] rope (8 KiB leaves) so the tokenizer's chunk-streaming
 //! cursor is exercised as it would be on a rope assembled from network reads; `serde_json` gets the
-//! same bytes as one contiguous slice (its only input shape). Rope construction happens OUTSIDE the
+//! same bytes as one contiguous slice (its only input shape). Rope construction happens outside the
 //! measured region, so neither the timing nor the allocation counts include building the input.
 //!
 //! Run with `cargo bench -p etude-json`. The allocation table prints first, then criterion timings.
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 // ─── allocation-counting global allocator ────────────────────────────────────────────────────────
 //
 // Wraps jemalloc (the host allocator, matching the other etude benches) and, only while `COUNTING`
-// is set, tallies allocation calls + requested bytes. Timing runs with counting OFF, so the steady
+// is set, tallies allocation calls + requested bytes. Timing runs with counting off, so the steady
 // overhead is a single relaxed load per allocation.
 
 static INNER: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -257,7 +257,7 @@ fn tokenize(input: &ByteVec) {
     }
 }
 
-/// Tokenize AND resolve every token's span back to a rope slice — the O(log n)-per-span re-access a
+/// Tokenize and resolve every token's span back to a rope slice — the O(log n)-per-span re-access a
 /// consumer pays to read a token's bytes from an `(offset, len)` span (a tree descent to locate the
 /// span's leaf). The delta over [`tokenize`] isolates that span-resolution cost, which is what a
 /// chunk-ref-carrying token would drive toward O(1).

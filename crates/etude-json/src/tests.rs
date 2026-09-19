@@ -3,13 +3,13 @@
 
 //! Correctness tests for the [`Tokenizer`].
 //!
-//! The safety net is a DIFFERENTIAL ORACLE against `serde_json` (the reference implementation).
+//! The safety net is a differential oracle against `serde_json` (the reference implementation).
 //! `serde_json` supplies the ground-truth value for a document and is the arbiter of whether bytes
 //! are valid JSON; the tokenizer must produce exactly the token stream that value implies, and must
 //! never reject input `serde_json` accepts. A single growing harness generates documents (valid via a
 //! `Doc` model, and arbitrary strings as malformed candidates), feeds them through ropes built with
 //! several chunk layouts (so a token straddling a rope-leaf boundary is exercised), and asserts
-//! agreement. When a case can't be expressed here, GROW this harness rather than adding a one-off.
+//! agreement. When a case can't be expressed here, grow this harness rather than adding a one-off.
 
 use super::*;
 use bytes::Bytes;
@@ -97,7 +97,7 @@ fn actual(tokens: &[Token], input: &ByteVec) -> Vec<Expect> {
             TokenKind::String => Expect::Str(t.decode_string(input).unwrap()),
             // The Number token spans the exact bytes serde_json serialized (check_valid tokenizes
             // serde_json's own canonical output), which equals the expected `Number::to_string()`.
-            // Compare the lexeme directly: a reparse-then-reserialize is NOT the identity for some
+            // Compare the lexeme directly: a reparse-then-reserialize is not the identity for some
             // subnormal doubles (a serde_json f64 round-trip artifact, off by 1 ULP in the string),
             // which would spuriously fail even though the tokenizer spanned the correct bytes.
             TokenKind::Number => {
