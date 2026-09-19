@@ -596,6 +596,61 @@ mod tests {
         );
     }
 
+    /// Debug must match `str`'s Debug byte-for-byte under every formatter configuration — width,
+    /// fill/alignment, precision, and the alternate flag — including content that Debug escapes
+    /// (quotes, backslashes, control bytes, multi-byte characters). Parity-based like the Display
+    /// pin from #155, so it locks whatever std does rather than encoding assumptions; requested by
+    /// etude-str-migration to guard their alloc-free formatting fast paths.
+    #[test]
+    fn debug_matches_str_under_format_flags() {
+        for content in [
+            "",
+            "ab",
+            "a\"b\\c\nd\te",
+            "héllo wörld",
+            "q\u{1F600}x",
+            "\u{0}ctl",
+        ] {
+            let rope = StrRope::from(content);
+            let s: &str = content;
+            assert_eq!(
+                format!("{rope:?}"),
+                format!("{s:?}"),
+                "plain for {content:?}"
+            );
+            assert_eq!(
+                format!("{rope:#?}"),
+                format!("{s:#?}"),
+                "alternate for {content:?}"
+            );
+            assert_eq!(
+                format!("{rope:>20?}"),
+                format!("{s:>20?}"),
+                "right width for {content:?}"
+            );
+            assert_eq!(
+                format!("{rope:<20?}"),
+                format!("{s:<20?}"),
+                "left width for {content:?}"
+            );
+            assert_eq!(
+                format!("{rope:-^25?}"),
+                format!("{s:-^25?}"),
+                "center fill for {content:?}"
+            );
+            assert_eq!(
+                format!("{rope:.4?}"),
+                format!("{s:.4?}"),
+                "precision for {content:?}"
+            );
+            assert_eq!(
+                format!("{rope:>14.3?}"),
+                format!("{s:>14.3?}"),
+                "width+precision for {content:?}"
+            );
+        }
+    }
+
     #[test]
     fn from_str_and_basic_queries() {
         let s = StrRope::from("héllo");
