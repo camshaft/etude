@@ -354,6 +354,7 @@ mod tests {
     // Property: for any string, `Str::from` preserves the text exactly through every view, a clone is
     // content-equal, and ordering/equality against the source `str` agree with the primitive.
     #[test]
+    #[cfg_attr(miri, ignore)] // miri: skip the bolero fuzz loop (pathologically slow under miri); deterministic tests cover the surface. Operator directive 2026-09-19.
     fn prop_from_str_preserves_content() {
         check!().with_type::<String>().for_each(|s| {
             let str = Str::from(s.as_str());
@@ -369,6 +370,7 @@ mod tests {
     // Property: `from_utf8` accepts exactly the byte sequences `std::str::from_utf8` accepts, and on
     // success round-trips to the same text.
     #[test]
+    #[cfg_attr(miri, ignore)] // miri: skip the bolero fuzz loop (pathologically slow under miri); deterministic tests cover the surface. Operator directive 2026-09-19.
     fn prop_from_utf8_matches_std() {
         check!().with_type::<Vec<u8>>().for_each(|bytes| {
             let expected = std::str::from_utf8(bytes);
@@ -383,6 +385,7 @@ mod tests {
     // The `TypeGenerator` impl yields only valid `Str` values: every generated `Str` is valid UTF-8
     // (as_str/as_bytes agree with std), a clone is content-equal, and byte-length matches as_str.
     #[test]
+    #[cfg_attr(miri, ignore)] // miri: skip the bolero fuzz loop (pathologically slow under miri); deterministic tests cover the surface. Operator directive 2026-09-19.
     fn prop_generated_str_is_valid() {
         check!().with_type::<Str>().for_each(|s: &Str| {
             assert_eq!(std::str::from_utf8(s.as_bytes()), Ok(s.as_str()));

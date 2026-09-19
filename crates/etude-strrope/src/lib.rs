@@ -395,6 +395,7 @@ mod tests {
     /// str-facing query must match the flat `&str`. This is the fence for any future optimization of
     /// the linearize-then-validate path (e.g. per-chunk validation with boundary stitching).
     #[test]
+    #[cfg_attr(miri, ignore)] // miri: skip the bolero fuzz loop (pathologically slow under miri); deterministic tests cover the surface. Operator directive 2026-09-19.
     fn differential_against_str_oracle() {
         use core::hash::{Hash, Hasher};
         fn hash_of(s: &StrRope) -> u64 {
@@ -498,6 +499,7 @@ mod tests {
     /// The `Rechunk` op rebuilds the rope from the model under a fuzz-chosen chunk layout
     /// mid-sequence, so later ops run against shifted leaf boundaries.
     #[test]
+    #[cfg_attr(miri, ignore)] // miri: skip the bolero fuzz loop (pathologically slow under miri); deterministic tests cover the surface. Operator directive 2026-09-19.
     fn mutation_differential_against_string_model() {
         use bolero_generator::TypeGenerator;
 
@@ -708,6 +710,7 @@ mod tests {
     /// compare can misstep — were unfuzzed. Also pins Eq and the `PartialEq<str>` view against the
     /// same oracle, and both operand orders for antisymmetry.
     #[test]
+    #[cfg_attr(miri, ignore)] // miri: skip the bolero fuzz loop (pathologically slow under miri); deterministic tests cover the surface. Operator directive 2026-09-19.
     fn ord_between_ropes_matches_str_for_content_pairs() {
         use bolero_generator::TypeGenerator;
 
@@ -931,6 +934,7 @@ mod tests {
     // Property: StrRope built from any String reproduces its bytes, chars, char_indices, and length —
     // std String is the oracle.
     #[test]
+    #[cfg_attr(miri, ignore)] // miri: skip the bolero fuzz loop (pathologically slow under miri); deterministic tests cover the surface. Operator directive 2026-09-19.
     fn prop_matches_str_oracle() {
         bolero::check!().with_type::<String>().for_each(|text| {
             let s = StrRope::from(text.as_str());
