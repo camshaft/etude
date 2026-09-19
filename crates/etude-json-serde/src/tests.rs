@@ -174,6 +174,83 @@ fn grammar_violations_the_lexer_accepts_are_rejected() {
     }
 }
 
+#[test]
+fn number_grammar_matches_serde_json() {
+    // The classic JSON number-grammar edge cases — where a hand-written lexer tends to diverge from
+    // the spec. `check` asserts the adapter agrees with serde_json on accept/reject (and value).
+    let cases: &[&[u8]] = &[
+        // valid
+        b"0",
+        b"-0",
+        b"0.5",
+        b"-0.5",
+        b"1e10",
+        b"1E-10",
+        b"1.5e+3",
+        b"123456789012345678901234567890", // huge int -> f64 on both sides
+        b"0.0",
+        // invalid: leading zeros
+        b"01",
+        b"-01",
+        b"00",
+        // invalid: dangling dot / leading dot
+        b"1.",
+        b".5",
+        b"-.5",
+        // invalid: empty / dangling exponent
+        b"1e",
+        b"1e+",
+        b"1E",
+        // invalid: leading plus, bare/doubled sign
+        b"+1",
+        b"-",
+        b"--1",
+        // invalid: not JSON numbers
+        b"0x1",
+        b"1.2.3",
+        b"Infinity",
+        b"NaN",
+    ];
+    for d in cases {
+        check(d);
+    }
+}
+
+#[test]
+fn string_escape_grammar_matches_serde_json() {
+    let cases: &[&[u8]] = &[
+        // valid escapes + a surrogate pair (-> a single astral codepoint)
+        b"\"\\u0041\"",        // -> "A"
+        b"\"\\uD83D\\uDE00\"", // surrogate pair -> emoji (both decode to the same astral char)
+        b"\"tab\\tnl\\n\"",    // simple escapes
+        b"\"\\\"\\\\\\/\"",    // escaped quote, backslash, solidus
+        b"{\"esc\\tkey\":1}",  // an escaped OBJECT KEY
+        // invalid — the adapter agrees with serde on rejecting all of these
+        b"\"\\x41\"",      // not a JSON escape
+        b"\"raw\ttab\"",   // unescaped control char (0x09) in a string
+        b"\"unterminated", // no closing quote
+    ];
+    for d in cases {
+        check(d);
+    }
+}
+
+#[test]
+fn lone_surrogates_decode_lossily_a_deliberate_divergence_from_serde() {
+    // KNOWN, INTENTIONAL divergence from serde_json: etude-json's string decoder is *infallible* — a
+    // lone surrogate (a `\u` escape in D800..=DFFF with no valid pair) is replaced with U+FFFD rather
+    // than rejected (see etude-json's decode_string docs). serde_json instead rejects. This is a
+    // spec-policy choice (lossy-infallible vs strict-reject), flagged to the operator; pinned here so
+    // the behavior is explicit and a future policy flip is a conscious test change, not a silent one.
+    for lone in [&b"\"\\uD83D\""[..], b"\"\\uDE00\""] {
+        // adapter accepts and yields the replacement character...
+        let got = from_rope(&rope(lone, 1), BuildValue).unwrap();
+        assert_eq!(got, Value::String("\u{FFFD}".to_string()));
+        // ...whereas serde_json rejects it. (The divergence, made explicit.)
+        assert!(serde_json::from_slice::<Value>(lone).is_err());
+    }
+}
+
 /// A [`Visitor`] that reports, for a string value, whether it arrived zero-copy ([`RopeStr::Borrowed`])
 /// plus the decoded content — so a test can pin the has-escapes split.
 struct StrArm;
