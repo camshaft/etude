@@ -213,6 +213,8 @@ fn predicates_and_sign() {
 
 #[test]
 fn to_f64_matches_float_parse() {
+    // Correctly-rounded direct conversion must agree bit-for-bit with the std float parser (itself
+    // correctly rounded) across normals, rounding boundaries, subnormals, overflow, and underflow.
     for s in [
         "0",
         "1",
@@ -224,13 +226,35 @@ fn to_f64_matches_float_parse() {
         "1e10",
         "1.5e-3",
         "123456.789",
+        // Rounding boundaries around the 53-bit mantissa.
+        "9007199254740992",   // 2^53
+        "9007199254740993",   // 2^53 + 1 (not representable → rounds to even)
+        "9007199254740995",   // 2^53 + 3
+        "0.3",                // classic non-terminating binary fraction
+        "1.0000000000000002", // 1 + 2^-52 (the next double after 1.0)
+        // Near the top of the normal range and just over it.
+        "1.7976931348623157e308", // f64::MAX
+        "1e308",
+        "1e309", // overflow → inf
+        "-1e309",
+        // Subnormals and underflow.
+        "5e-324",                  // smallest positive subnormal
+        "2.5e-324",                // rounds to the smallest subnormal
+        "1e-320",                  // a subnormal
+        "2.2250738585072014e-308", // smallest positive normal
+        "1e-400",                  // underflow → 0
+        "-1e-400",
     ] {
         let expected: f64 = s.parse().unwrap();
         let got = Decimal::from_str(s).unwrap().to_f64();
-        assert_eq!(got, expected, "to_f64 mismatch for {s}");
+        // `==` treats +0.0 and -0.0 as equal (our canonical zero is unsigned) and compares inf exactly.
+        assert!(
+            got == expected,
+            "to_f64 mismatch for {s}: got {got:?} ({:#x}) expected {expected:?} ({:#x})",
+            got.to_bits(),
+            expected.to_bits()
+        );
     }
-    // Overflow to infinity like f64 decimal parsing.
-    assert!(Decimal::from_str("1e400").unwrap().to_f64().is_infinite());
 }
 
 #[test]
@@ -353,6 +377,17 @@ fn check_parse(s: &str) -> Option<(Decimal, BigDecimal)> {
             let ref_reparsed = BigDecimal::from_str(&rendered)
                 .unwrap_or_else(|_| panic!("bigdecimal must parse our output {rendered:?}"));
             assert_same(&d, &ref_reparsed);
+            // Direct decimal→f64 must match the (correctly-rounded) std float parse of the same literal.
+            // Every literal we accept is a valid f64 literal, so the parse succeeds; `==` treats ±0.0 as
+            // equal (our zero is unsigned) and compares infinities exactly.
+            let our_f = d.to_f64();
+            let ref_f = s
+                .parse::<f64>()
+                .expect("our accepted literal is a valid f64 literal");
+            assert!(
+                our_f == ref_f,
+                "to_f64 mismatch for {s:?}: {our_f:?} vs {ref_f:?}"
+            );
             Some((d, b))
         }
         (Some(d), None) => {
