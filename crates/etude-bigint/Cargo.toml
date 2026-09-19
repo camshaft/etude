@@ -1,0 +1,21 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-bigint"
+version = "0.1.0"
+description = "Arbitrary-precision signed integers: a small no_std base-2^32 limb library with a canonical sign-magnitude form"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# Differential oracle: every operation is checked against num-bigint (the safety net analogous to a
+# reference implementation). Kept out of the shipped crate so nothing but alloc is a build dependency.
+num-bigint = "0.4"
+num-traits = "0.2"
+# Coverage-guided property + shrinking engine for the differential harness.
+bolero = "0.13"
