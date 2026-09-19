@@ -807,6 +807,96 @@ fn differential_against_model() {
     });
 }
 
+/// Differential oracle for the [`Builder`] construction surface (bytevec-compat), reusing the same
+/// `Vec<u8>`-model discipline as [`differential_against_model`]. Drives a `Builder` through a random
+/// op sequence (the `writer::Buffer` write path, `append`/`extend`/`split`/`split_to`/
+/// `with_inline_threshold`/`write_with_len_prefix`) and checks `len`/`is_empty` after every op and the
+/// final `finish()` bytes against the model. Extend `BuilderOp` here rather than adding a one-off
+/// harness when covering a new Builder method.
+#[test]
+fn builder_differential_against_model() {
+    use bolero::check;
+    use bolero_generator::TypeGenerator;
+    use etude_buffer::writer::Buffer as _;
+
+    #[derive(Debug, Clone, TypeGenerator)]
+    enum BuilderOp {
+        PutSlice(Vec<u8>),
+        PutBytes(Vec<u8>),
+        PutBytesMut(Vec<u8>),
+        Append(Vec<u8>),
+        Extend(Vec<u8>),
+        SplitTo(usize),
+        Split,
+        WriteWithLenPrefix(Vec<u8>),
+        SetInlineThreshold(usize),
+    }
+
+    check!()
+        .with_type::<(usize, Vec<BuilderOp>)>()
+        .cloned()
+        .for_each(|(cap, ops)| {
+            // vary the head-buffer capacity so both the buffered and flush-to-chunk paths are hit
+            let capacity = 1 + cap % 64;
+            let mut builder = ByteRope::builder(capacity);
+            let mut model: Vec<u8> = Vec::new();
+            for op in &ops {
+                match op {
+                    BuilderOp::PutSlice(d) => {
+                        builder.put_slice(d);
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::PutBytes(d) => {
+                        builder.put_bytes(Bytes::from(d.clone()));
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::PutBytesMut(d) => {
+                        builder.put_bytes_mut(BytesMut::from(&d[..]));
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::Append(d) => {
+                        let mut other: ByteRope = d.chunks(3).map(Bytes::copy_from_slice).collect();
+                        builder.append(&mut other);
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::Extend(d) => {
+                        let other: ByteRope = d.chunks(3).map(Bytes::copy_from_slice).collect();
+                        builder.extend(&other);
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::SplitTo(n) => {
+                        let k = n % (model.len() + 1);
+                        let front = builder.split_to(k).unwrap();
+                        assert_eq!(front, &model[..k], "split_to({k}) front");
+                        model.drain(..k);
+                    }
+                    BuilderOp::Split => {
+                        let taken = builder.split();
+                        assert_eq!(taken, &model[..], "split takes all");
+                        model.clear();
+                        assert!(builder.is_empty());
+                    }
+                    BuilderOp::WriteWithLenPrefix(d) => {
+                        builder.write_with_len_prefix(|w| w.put_slice(d));
+                        model.extend_from_slice(&(d.len() as u64).to_be_bytes());
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::SetInlineThreshold(t) => {
+                        builder = builder.with_inline_threshold(t % 32);
+                    }
+                }
+                assert_eq!(builder.len(), model.len(), "len after {op:?}");
+                assert_eq!(
+                    builder.is_empty(),
+                    model.is_empty(),
+                    "is_empty after {op:?}"
+                );
+            }
+            let built = builder.finish();
+            assert_eq!(built, model, "finish bytes");
+        });
+}
+
 #[test]
 fn advance_across_deep_tree() {
     let n = PROMOTE_AT * 3;
