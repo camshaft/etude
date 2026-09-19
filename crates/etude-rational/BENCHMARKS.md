@@ -62,6 +62,25 @@ no remaining hard losses; the non-wins are at parity or minor:
 3. **`normalize`/`add_eqden` @1024b — ~1.00 (parity).** Both bottom out on a single large gcd; parity
    with num-rational's Stein gcd. Further headroom is a Lehmer-gcd item in etude-bigint (raised).
 
+## Large-tier scaling (2048b/4096b tiers — now part of the default board)
+
+Sample ratios at the large tiers (`ratio = etude / num-rational`; full numbers via `cargo bench`):
+
+| op  | 1024b   | 4096b   |
+|-----|---------|---------|
+| mul | **0.43**| **0.47**|
+| div | **0.42**| **0.46**|
+| add | **0.77**| 0.98    |
+
+`mul`/`div` **hold** their ~2× lead at 4096b because cross-reduction halves the gcd work, but `add` (and
+`sub`) **narrow to ~parity** as size grows. Both etude and num-rational compute random-operand add as
+`(a*d + c*b)/(b*d)` + a reduce — there is no algorithmic shortcut for coprime denominators — so at 4096b
+both are bound by the underlying `O(n²)` schoolbook multiply and converge. The lever to restore the
+large-tier `add`/`sub` lead (and push `mul`/`div` further) is a **sub-quadratic (Karatsuba) multiply in
+`etude-bigint`**; likewise a **Lehmer gcd** pushes the gcd-bound `normalize`/`add_eqden`@1024b below
+parity. Both are coordination items raised to etude-bigint — they are the biggest remaining perf levers
+and are multiply/gcd-bound in the bignum layer, not addressable locally.
+
 ## History
 
 - **slice 1** — faithful port + num-rational differential oracle (the safety net) wired first.
@@ -76,3 +95,8 @@ no remaining hard losses; the non-wins are at parity or minor:
 - **slice 7** — size-thresholded continued-fraction `cmp` hybrid, unblocked by etude-bigint's O(1)
   `bit_len`/`byte_len` accessors (#56): small components cross-multiply, large route to the
   continued-fraction comparison. `cmp@1024b` 4.33× → 1.06× (near parity).
+- **slice 8** — 2048b/4096b bench tiers added (large-tier scaling: mul/div hold, add/sub converge —
+  see the scaling note) + hot-path allocation elision: the `== 1` checks in `normalize`/`div_exact`
+  (cross-reduce)/`is_integer` used to allocate a fresh `Big::from_i64(1)` each call; replaced with the
+  O(1) allocation-free `bit_len() == 1`, removing 1–2 heap allocations per add/sub/mul/div (~1% at 64b,
+  in the noise at large tiers where the bignum ops dominate).

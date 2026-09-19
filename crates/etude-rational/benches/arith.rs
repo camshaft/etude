@@ -28,7 +28,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// (label, per-component magnitude byte count). Rational ops cost ~2-3x the underlying bignum op, so the
 /// tiers are capped a notch below the bigint bench to keep a single sample sub-millisecond at baseline.
-const TIERS: &[(&str, usize)] = &[("64b", 8), ("256b", 32), ("1024b", 128)];
+const TIERS: &[(&str, usize)] = &[
+    ("64b", 8),
+    ("256b", 32),
+    ("1024b", 128),
+    ("2048b", 256),
+    ("4096b", 512),
+];
 
 struct Rng(u64);
 impl Rng {
