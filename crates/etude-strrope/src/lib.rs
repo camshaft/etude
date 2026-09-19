@@ -458,11 +458,33 @@ impl Ord for StrRope {
 }
 impl core::hash::Hash for StrRope {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        // Feed whole chunks (a streaming hasher sees the same byte stream regardless of chunking, so
-        // equal content hashes equal), not one `write_u8` per byte. The `0xff` terminator matches
-        // `str`'s `Hash` (prevents prefix collisions in composite keys).
+        // The `Eq`->`Hash` contract requires equal ropes to hash equally, and two ropes are equal by
+        // content regardless of internal chunk layout — so the sequence of `Hasher::write` calls must be
+        // a pure function of the *content*, not the chunk boundaries. `write` is NOT concatenation-
+        // equivalent for boundary-sensitive hashers (aHash/fxhash mix per call), so feeding raw chunks
+        // would hash equal ropes differently under those hashers (SipHash happens to be concatenation-
+        // equivalent, which masks it). Re-block into fixed-size buffers: the write sequence then depends
+        // only on the bytes — full block writes plus a final partial — with no allocation and still bulk
+        // (not per-byte). The `0xff` terminator guards composite-key prefix collisions. NB this is not
+        // equal to `str`'s hash (str writes all bytes in one call), so `Borrow<str>` stays off the table.
+        const BLOCK: usize = 64;
+        let mut buf = [0u8; BLOCK];
+        let mut len = 0usize;
         for chunk in self.0.chunks() {
-            state.write(&chunk[..]);
+            let mut bytes: &[u8] = chunk;
+            while !bytes.is_empty() {
+                let take = (BLOCK - len).min(bytes.len());
+                buf[len..len + take].copy_from_slice(&bytes[..take]);
+                len += take;
+                bytes = &bytes[take..];
+                if len == BLOCK {
+                    state.write(&buf);
+                    len = 0;
+                }
+            }
+        }
+        if len > 0 {
+            state.write(&buf[..len]);
         }
         state.write_u8(0xff);
     }
