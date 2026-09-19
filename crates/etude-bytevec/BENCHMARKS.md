@@ -51,22 +51,30 @@ These functions scan bytes rather than move chunk handles, so the fair reference
 use a literal spanning ~2 chunks; `validate_utf8` benches `Rope<Utf8>::try_from_bytes` on valid ascii.
 Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4):
 
-| op | shape | rope | contiguous `&[u8]` | ratio |
-|----|-------|------|--------------------|-------|
-| starts_with | shallow | 87.2 ns | 67.9 ns | 1.28 |
-| starts_with | deep | 122 ns | 67.9 ns | 1.80 |
-| ends_with | shallow | 97.6 ns | 74.1 ns | 1.32 |
-| ends_with | deep | 151 ns | 74.5 ns | 2.03 |
-| validate_utf8 (try_from_bytes) | shallow | 308 ns | 236 ns | 1.30 |
-| validate_utf8 (try_from_bytes) | deep | 78.1 µs | 60.8 µs | 1.28 |
+These functions now scan via the direct early-exit traversals (`try_for_each_chunk` /
+`try_for_each_chunk_rev`, a recursive DFS with `ControlFlow` break) rather than the `Chunks` iterator, so
+a prefix/suffix scan that stops early never pays to build the iterator's resumable stacks. Latest run
+(aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4; the `was` column is the prior
+`chunks()`-iterator implementation on the same box):
 
-The scan functions trail a contiguous buffer by **1.28×–2.03×** — the cost of crossing chunk boundaries
-(iterator setup + per-chunk compares/validation), the same chunking overhead as the rest of the deep
-tier. Two points worth keeping: `ends_with/deep` is 151 ns, close to `ends_with/shallow` rather than
-scaling with length — confirming it is O(suffix) (it walks only the last chunks from the back via the
-double-ended chunk iterator, not the whole buffer); and `validate_utf8` streams the validation over the
-chunks with no full-content allocation, so it beats the former copy-then-validate path (which allocated
-an O(n) contiguous buffer) on the valid ingest path despite the 1.28× vs an already-contiguous slice.
+| op | shape | rope (traversal) | was (`chunks()`) | contiguous `&[u8]` |
+|----|-------|------------------|------------------|--------------------|
+| starts_with | shallow | 80.6 ns | 88.4 ns | 67.9 ns |
+| starts_with | deep | 89.8 ns | 122 ns | 67.9 ns |
+| ends_with | shallow | 85.7 ns | 97.4 ns | 74.1 ns |
+| ends_with | deep | 95.1 ns | 152 ns | 74.5 ns |
+| validate_utf8 (try_from_bytes) | shallow | 298 ns | 310 ns | 236 ns |
+| validate_utf8 (try_from_bytes) | deep | 76.9 µs | 78.4 µs | 60.8 µs |
+
+The early-exit traversal helps most where the scan stops before the end: `starts_with/deep` improved
+**122 → 90 ns (~26%)** and `ends_with/deep` **152 → 95 ns (~38%)**, since neither now builds the deep-tier
+iterator's tree-descent stacks just to look at the near end (`ends_with` uses the reverse
+`try_for_each_chunk_rev`). `validate_utf8` scans the whole content on the valid path (no early exit), so it
+gains only the small forward-traversal-vs-iterator margin (~2–4%). The residual gap to a contiguous
+`&[u8]` is the inherent cost of crossing chunk boundaries. Note `ends_with/deep` stays close to
+`ends_with/shallow` rather than scaling with length — it is O(suffix), touching only the last chunks — and
+`validate_utf8` streams validation with no full-content allocation, beating the former copy-then-validate
+path on ingest despite trailing an already-contiguous slice.
 
 ### `copy_to_bytes_mut` single-chunk reclaim (runnable: `cargo bench -p etude-bytevec -- copy_to_bytes_mut`)
 

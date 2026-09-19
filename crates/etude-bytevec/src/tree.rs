@@ -22,6 +22,7 @@
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use bytes::Bytes;
+use core::ops::ControlFlow;
 
 use crate::FANOUT;
 
@@ -268,6 +269,56 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// Recursively visits chunks in order until `f` returns [`ControlFlow::Break`], propagating it.
+    /// (`?` on `ControlFlow` is still unstable, so the short-circuit is matched by hand.)
+    fn try_for_each_chunk<B>(
+        &self,
+        f: &mut impl FnMut(&Bytes) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match self {
+            Node::Leaf(b) => {
+                for c in b.chunks.iter() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+            Node::Branch(b) => {
+                for child in &b.children {
+                    if let ControlFlow::Break(v) = child.try_for_each_chunk(f) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Recursively visits chunks in REVERSE order until `f` breaks — the back-to-front twin of
+    /// [`try_for_each_chunk`](Self::try_for_each_chunk), for suffix scans.
+    fn try_for_each_chunk_rev<B>(
+        &self,
+        f: &mut impl FnMut(&Bytes) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match self {
+            Node::Leaf(b) => {
+                for c in b.chunks.iter().rev() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+            Node::Branch(b) => {
+                for child in b.children.iter().rev() {
+                    if let ControlFlow::Break(v) = child.try_for_each_chunk_rev(f) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
     }
 
     /// The byte at `offset` (`offset < self.byte_len()`). O(log₃₂) via the per-child size scan.
@@ -528,6 +579,31 @@ impl Tree {
     pub(crate) fn for_each_chunk(&self, f: &mut impl FnMut(&Bytes)) {
         if let Some(root) = &self.root {
             root.for_each_chunk(f);
+        }
+    }
+
+    /// Visits chunks in order via a recursive DFS until `f` breaks — the early-exit twin of
+    /// [`for_each_chunk`](Self::for_each_chunk), cheaper than the resumable [`Chunks`] iterator for a
+    /// prefix scan that stops before the end.
+    pub(crate) fn try_for_each_chunk<B>(
+        &self,
+        f: &mut impl FnMut(&Bytes) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match &self.root {
+            Some(root) => root.try_for_each_chunk(f),
+            None => ControlFlow::Continue(()),
+        }
+    }
+
+    /// Reverse (back-to-front) early-exit DFS — the suffix-scan twin of
+    /// [`try_for_each_chunk`](Self::try_for_each_chunk).
+    pub(crate) fn try_for_each_chunk_rev<B>(
+        &self,
+        f: &mut impl FnMut(&Bytes) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match &self.root {
+            Some(root) => root.try_for_each_chunk_rev(f),
+            None => ControlFlow::Continue(()),
         }
     }
 

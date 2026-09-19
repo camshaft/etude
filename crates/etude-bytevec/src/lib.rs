@@ -26,6 +26,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::marker::PhantomData;
+use core::ops::ControlFlow;
 // Re-exported (`pub`) at the crate root so callers get `Bytes`/`BytesMut` without a separate `bytes` dep.
 pub use bytes::{Bytes, BytesMut};
 
@@ -224,30 +225,31 @@ fn concatenation_is_valid_utf8<K>(rope: &Rope<K>) -> bool {
     // Bytes of an incomplete codepoint carried from the end of the previous chunk (0..=3 bytes).
     let mut carry = [0u8; 4];
     let mut carry_len = 0usize;
-    for chunk in rope.chunks() {
+    // Direct traversal with early exit on the first invalidity — `Break(())` means "invalid".
+    let hit_invalid = rope.try_for_each_chunk(|chunk| {
         let mut data: &[u8] = chunk;
         // 1. Complete a codepoint carried across the boundary, using the front of this chunk.
         if carry_len > 0 {
             let need = match utf8_lead_len(carry[0]) {
                 Some(n) => n,
-                None => return false, // carried lead is a continuation/invalid byte
+                None => return ControlFlow::Break(()), // carried lead is a continuation/invalid byte
             };
             while carry_len < need {
                 let Some((&b, rest)) = data.split_first() else {
                     break; // whole chunk consumed, codepoint still incomplete
                 };
                 if b & 0xC0 != 0x80 {
-                    return false; // expected a continuation byte
+                    return ControlFlow::Break(()); // expected a continuation byte
                 }
                 carry[carry_len] = b;
                 carry_len += 1;
                 data = rest;
             }
             if carry_len < need {
-                continue; // carried into the next chunk
+                return ControlFlow::Continue(()); // carried into the next chunk
             }
             if core::str::from_utf8(&carry[..need]).is_err() {
-                return false; // completed sequence is overlong / out of range / a surrogate
+                return ControlFlow::Break(()); // completed sequence overlong / out of range / surrogate
             }
             carry_len = 0;
         }
@@ -260,15 +262,19 @@ fn concatenation_is_valid_utf8<K>(rope: &Rope<K>) -> bool {
                 None => {
                     let tail = &data[e.valid_up_to()..];
                     if tail.len() > 3 {
-                        return false;
+                        return ControlFlow::Break(());
                     }
                     carry[..tail.len()].copy_from_slice(tail);
                     carry_len = tail.len();
                 }
                 // A genuine mid-content error.
-                Some(_) => return false,
+                Some(_) => return ControlFlow::Break(()),
             },
         }
+        ControlFlow::Continue(())
+    });
+    if hit_invalid.is_break() {
+        return false;
     }
     // A leftover partial codepoint at the end is truncated (invalid) content.
     carry_len == 0
@@ -1121,16 +1127,17 @@ impl<K> Rope<K> {
             return false;
         }
         let mut rest = prefix;
-        for chunk in self.chunks() {
+        let _ = self.try_for_each_chunk(|chunk| {
             if rest.is_empty() {
-                break;
+                return ControlFlow::Break(()); // prefix fully matched
             }
             let n = chunk.len().min(rest.len());
             if chunk[..n] != rest[..n] {
-                return false;
+                return ControlFlow::Break(()); // mismatch; `rest` stays non-empty -> false
             }
             rest = &rest[n..];
-        }
+            ControlFlow::Continue(())
+        });
         rest.is_empty()
     }
 
@@ -1158,18 +1165,19 @@ impl<K> Rope<K> {
             return false;
         }
         let mut rest = suffix;
-        for chunk in self.chunks().rev() {
+        let _ = self.try_for_each_chunk_rev(|chunk| {
             if rest.is_empty() {
-                break;
+                return ControlFlow::Break(()); // suffix fully matched
             }
             let chunk: &[u8] = chunk;
             // Compare the tail of this chunk against the still-unmatched tail of `suffix`.
             let n = chunk.len().min(rest.len());
             if chunk[chunk.len() - n..] != rest[rest.len() - n..] {
-                return false;
+                return ControlFlow::Break(()); // mismatch; `rest` stays non-empty -> false
             }
             rest = &rest[..rest.len() - n];
-        }
+            ControlFlow::Continue(())
+        });
         rest.is_empty()
     }
 
@@ -1750,6 +1758,84 @@ impl<K> Rope<K> {
                 }
             }
         }
+    }
+
+    /// Early-exit twin of [`for_each_chunk`](Self::for_each_chunk): visits chunks in order until `f`
+    /// returns [`ControlFlow::Break`], propagating the break value. The direct-traversal counterpart to
+    /// a `chunks()` loop with a `break`/early `return`; preferred for prefix scans (e.g. `starts_with`,
+    /// streaming validation) that stop before the end, since it avoids building the resumable iterator.
+    #[inline]
+    fn try_for_each_chunk<B>(&self, mut f: impl FnMut(&Bytes) -> ControlFlow<B>) -> ControlFlow<B> {
+        match &self.repr {
+            Repr::Small { head, additional } => {
+                if !head.is_empty()
+                    && let ControlFlow::Break(v) = f(head)
+                {
+                    return ControlFlow::Break(v);
+                }
+                for c in additional {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+            Repr::Deep(d) => {
+                for c in &d.head {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+                if let ControlFlow::Break(v) = d.tree.try_for_each_chunk(&mut f) {
+                    return ControlFlow::Break(v);
+                }
+                for c in &d.tail {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Reverse (back-to-front) early-exit traversal — the suffix-scan twin of
+    /// [`try_for_each_chunk`](Self::try_for_each_chunk), visiting chunks last-to-first until `f` breaks.
+    /// Preferred over `chunks().rev()` for suffix scans (e.g. `ends_with`) that stop before the front.
+    #[inline]
+    fn try_for_each_chunk_rev<B>(
+        &self,
+        mut f: impl FnMut(&Bytes) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        match &self.repr {
+            Repr::Small { head, additional } => {
+                for c in additional.iter().rev() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+                if !head.is_empty()
+                    && let ControlFlow::Break(v) = f(head)
+                {
+                    return ControlFlow::Break(v);
+                }
+            }
+            Repr::Deep(d) => {
+                for c in d.tail.iter().rev() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+                if let ControlFlow::Break(v) = d.tree.try_for_each_chunk_rev(&mut f) {
+                    return ControlFlow::Break(v);
+                }
+                for c in d.head.iter().rev() {
+                    if let ControlFlow::Break(v) = f(c) {
+                        return ControlFlow::Break(v);
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
     }
 
     /// Appends every byte of the rope to `out`, in order, via the direct [`for_each_chunk`] traversal
