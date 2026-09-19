@@ -871,6 +871,20 @@ fn bench_builder(c: &mut Criterion) {
 /// full read is an O(n) `clone()` of the deque followed by a `pop_front` drain, so the comparison
 /// isolates the reader's O(1)-clone setup against the deque's copy-the-whole-spine setup.
 fn bench_reader(c: &mut Criterion) {
+    // Forking a Reader currently clones the rope state. Measure that clone in isolation across the
+    // Small tier (where it copies the inline `VecDeque` + bumps each chunk handle) and the Deep tier
+    // (where the tree clone is O(1) structural sharing), to size the "don't clone the small deque" idea.
+    {
+        let mut g = group(c, "reader_fork");
+        for &n in &[1usize, 4, 16, 32, DEEP] {
+            let rope = rope_of(n);
+            g.bench_function(BenchmarkId::new("clone", n.to_string()), |b| {
+                b.iter(|| black_box(rope.reader()))
+            });
+        }
+        g.finish();
+    }
+
     for &n in &[SHALLOW, DEEP] {
         let label = if n == SHALLOW { "shallow" } else { "deep" };
         let rope = rope_of(n);

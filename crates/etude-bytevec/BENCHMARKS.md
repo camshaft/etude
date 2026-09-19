@@ -160,26 +160,43 @@ coalescing value on copied writes, not on by-reference chunk handoff.
 
 ### Reader — non-destructive full read via `ByteVec::reader` (runnable: `cargo bench -p etude-bytevec -- reader_iterate`)
 
-`reader()` takes an O(1) structural-shared clone and the `Iterator` yields each chunk (a cheap `Bytes`
-handle) without disturbing the source. The naive equivalent of a non-destructive full read is an O(n)
-`clone()` of the deque followed by a `pop_front` drain. Latest run (aarch64, jemalloc, release; `deep` =
-1000, `shallow` = 4):
+`reader()` reads without disturbing the source, and the `Iterator` yields each chunk (a cheap `Bytes`
+handle). How it holds the source depends on the tier: a *Small* source is read through a cursor that
+borrows the source chunks directly (no clone), a *Deep* source through an O(1) structural-shared clone
+drained in place. The naive equivalent of a non-destructive full read is an O(n) `clone()` of the deque
+followed by a `pop_front` drain. Latest run (aarch64, jemalloc, release; `deep` = 1000, `shallow` = 4):
 
 | op | shape | rope reader | naive clone + drain | ratio |
 |----|-------|-------------|---------------------|-------|
-| reader_iterate | shallow | 93.2 ns | 75.2 ns | 1.24 |
-| reader_iterate | deep | 22.4 µs | 16.1 µs | 1.39 |
+| reader_iterate | shallow | 78.1 ns | 78.0 ns | 1.00 |
+| reader_iterate | deep | 23.4 µs | 16.8 µs | 1.39 |
 
-The reader trails 1.24–1.39×, for the same persistent-structure reason as the rest of the deep tier but
-located differently. The reader's *setup* is genuinely O(1): the structural-shared clone is ~37 ns
-regardless of length, where the deque copies its whole spine O(n). The cost is on *iteration* — because
-the source rope is still alive (the whole point of a non-destructive reader), the shared clone's spine
-`Arc`s have a refcount above 1, so each `pop_front` must copy-on-write the node it mutates instead of
-mutating in place. So the reader pays cheap-setup + COW-drain where the deque pays copy-everything-once +
-O(1)-drain, and at these sizes the COW-drain edges it out. A consumer that does *not* need the source
-afterward should drain the rope directly (`pop_front` / `advance`, ~15 µs deep, no COW) rather than take a
-reader; the reader earns its keep precisely when the source must stay intact, and there its O(1) setup is
-the win the table's single-read framing hides.
+Shallow now matches the naive deque drain (1.00): the borrowed cursor does the same per-chunk work with
+no upfront clone, so there is nothing to trail. Deep still trails 1.39×, for the persistent-structure
+reason: the reader's *setup* is O(1) (the structural-shared tree clone is ~37 ns regardless of length),
+but the cost is on *iteration* — because the source rope is still alive (the whole point of a
+non-destructive reader), the shared clone's spine `Arc`s have a refcount above 1, so each `pop_front`
+must copy-on-write the node it mutates instead of mutating in place. So the deep reader pays cheap-setup +
+COW-drain where the deque pays copy-everything-once + O(1)-drain, and at these sizes the COW-drain edges
+it out. A consumer that does *not* need the source afterward should drain the rope directly (`pop_front` /
+`advance`, ~15 µs deep, no COW) rather than take a reader; the reader earns its keep precisely when the
+source must stay intact.
+
+**Fork cost** (runnable: `cargo bench -p etude-bytevec -- reader_fork`). Creating the reader is O(1) in
+both tiers. The Small cursor borrows the source chunk list rather than cloning it, so the fork is a flat
+handful of nanoseconds regardless of chunk count; the Deep fork is the O(1) structural-shared tree clone:
+
+| fork (`reader()`) | 1 chunk | 4 | 16 | 32 (Small max) | 1000 (Deep) |
+|-------------------|---------|-----|------|----------------|-------------|
+| borrowed cursor / shared clone | 4.7 ns | 4.7 ns | 4.7 ns | **4.7 ns** | **37.5 ns** |
+
+Earlier this crate forked the Small tier by cloning the inline `VecDeque` and bumping every chunk handle,
+which was O(n) — a full 32-chunk Small fork cost ~495 ns, ~13× a 1000-chunk Deep fork. Because
+`reader(&self) -> Reader<'_>` already borrows the rope for the reader's lifetime, the Small path now reads
+through a borrowing cursor with no public-API change, dropping that 495 ns to ~4.7 ns (~105×). It
+reproduces the owning drain's read sequence exactly — including `partial_copy_into`'s maximal-run ordering
+contract that `Builder` relies on — pinned by a deterministic tier-spanning parity test and a fuzzed
+borrowed-vs-owning trace-equality check.
 
 ### Compaction — `compact` / `compact_with` (runnable: `cargo bench -p etude-bytevec -- compact_`)
 

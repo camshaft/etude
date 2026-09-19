@@ -3133,11 +3133,11 @@ impl ByteVec {
         out
     }
 
-    /// A non-consuming reader over the rope's bytes. Cheap: it holds an O(1)-shared clone, so reading
-    /// through it leaves `self` untouched.
+    /// A non-consuming reader over the rope's bytes. Reading through it leaves `self` untouched.
     ///
     /// The returned [`Reader`] borrows `self` for its lifetime (`reader(&self) -> Reader<'_>`), so
-    /// `Reader<'a>` type annotations track the source buffer's lifetime.
+    /// `Reader<'a>` type annotations track the source buffer's lifetime. Creating one is cheap; how
+    /// cheap depends on the tier the source is in — see [`Reader`]'s performance notes.
     ///
     /// # Examples
     ///
@@ -3150,42 +3150,145 @@ impl ByteVec {
     /// ```
     #[inline]
     pub fn reader(&self) -> Reader<'_> {
-        Reader {
-            inner: self.clone(),
-            _borrow: core::marker::PhantomData,
-        }
+        let inner = match &self.repr {
+            // Shallow tier: read straight out of the borrowed chunks with a cursor — no upfront
+            // clone. Each `Bytes` handed back is a slice of a source chunk (one refcount bump),
+            // materialized only as it is read.
+            Repr::Small { head, additional } => ReaderInner::Borrowed(SmallCursor {
+                head,
+                additional,
+                idx: 0,
+                off: 0,
+                remaining: self.len,
+            }),
+            // Deep tier: the source clone is O(1) (structural-shared spine), so own a drainable
+            // copy and read it in place. Borrowing the tree's chunk-by-chunk cursor here would
+            // save nothing over the shared clone and would duplicate the tree-walk logic.
+            Repr::Deep(_) => ReaderInner::Owned(self.clone()),
+        };
+        Reader { inner }
     }
 }
 
 /// A non-consuming [`reader::Buffer`] over a [`ByteVec`]. See [`ByteVec::reader`].
 ///
-/// Carries a lifetime tied to the source rope; the bytes are held via an O(1)-shared clone, so
-/// iterating/reading does not disturb the source.
+/// Carries a lifetime tied to the source rope; reading through it does not disturb the source.
 ///
 /// # Performance
 ///
-/// Creating a reader is O(1): the source is captured by a structural-shared clone, not copied. The
-/// tradeoff falls on iteration — because the source stays live, draining the reader copies-on-write the
-/// shared spine as it advances, so a full read costs about as much as copying the spine once (the
-/// "Reader" row in `BENCHMARKS.md` measures this). When you do not need the source afterward, draining
-/// it directly (`pop_front` / `advance`, or handing it to a consumer) skips the copy-on-write; reach for
-/// a reader when the source must stay intact.
+/// Creating a reader is cheap, and how cheap depends on the source's tier:
+///
+/// - Shallow (`Small`) sources are read through a cursor that borrows the source chunks directly,
+///   so creating the reader allocates nothing and is O(1) regardless of chunk count. Each chunk is
+///   materialized as a slice (one refcount bump) only as it is read.
+/// - Deep sources are captured by a structural-shared clone (also O(1)) and drained in place. The
+///   tradeoff falls on iteration — because the source stays live, draining copies-on-write the
+///   shared spine as it advances, so a full read costs about as much as copying the spine once (the
+///   "Reader" row in `BENCHMARKS.md` measures this).
+///
+/// When you do not need the source afterward, draining it directly (`pop_front` / `advance`, or
+/// handing it to a consumer) skips the copy-on-write; reach for a reader when the source must stay
+/// intact.
 pub struct Reader<'a> {
-    inner: ByteVec,
-    _borrow: core::marker::PhantomData<&'a ByteVec>,
+    inner: ReaderInner<'a>,
+}
+
+/// The two ways a [`Reader`] reads its source (see [`ByteVec::reader`]): a zero-clone cursor over a
+/// borrowed shallow rope, or an owned structural-shared clone of a deep rope drained in place.
+enum ReaderInner<'a> {
+    /// Deep tier: an O(1) structural-shared clone, drained through the rope's own reader primitives.
+    Owned(ByteVec),
+    /// Shallow tier: a cursor over the borrowed `Small` chunks — no clone of the chunk list.
+    Borrowed(SmallCursor<'a>),
+}
+
+/// A read cursor over a borrowed `Small` rope's chunks (`head` then each of `additional`, all
+/// non-empty by the rope invariant). It reproduces the byte-for-byte, chunk-for-chunk read sequence
+/// of draining an owned clone via [`ByteVec`]'s reader primitives — including the maximal-run
+/// ordering contract of [`partial_copy_into`](reader::Buffer::partial_copy_into) — without cloning
+/// the chunk list. `off` is the count of bytes already read out of the chunk at `idx`; the cursor
+/// keeps `off` strictly below that chunk's length (advancing `idx` and resetting `off` to 0 when a
+/// chunk is fully consumed), so the "front" is always `chunk_at(idx)[off..]`.
+struct SmallCursor<'a> {
+    head: &'a Bytes,
+    additional: &'a VecDeque<Bytes>,
+    idx: usize,
+    off: usize,
+    remaining: usize,
+}
+
+impl<'a> SmallCursor<'a> {
+    /// The `idx`-th logical chunk (`0` = `head`), or `None` past the end. An empty `head` means an
+    /// empty rope (invariant: empty head ⇒ empty `additional`), so it yields no chunk.
+    #[inline]
+    fn chunk_at(&self, idx: usize) -> Option<&'a Bytes> {
+        match idx {
+            0 => (!self.head.is_empty()).then_some(self.head),
+            k => self.additional.get(k - 1),
+        }
+    }
+
+    /// The length of the unread portion of the front chunk, or `0` when exhausted. Mirrors
+    /// [`ByteVec::front_chunk_len`] over the cursor position.
+    #[inline]
+    fn front_len(&self) -> usize {
+        self.chunk_at(self.idx).map_or(0, |c| c.len() - self.off)
+    }
+
+    /// Reads up to `watermark` bytes off the front as one `Bytes` (a zero-copy slice of the boundary
+    /// chunk), advancing past them. Mirrors [`ByteVec::read_chunk_bytes`].
+    #[inline]
+    fn read_chunk_bytes(&mut self, watermark: usize) -> Bytes {
+        if watermark == 0 {
+            return Bytes::new();
+        }
+        let Some(chunk) = self.chunk_at(self.idx) else {
+            return Bytes::new();
+        };
+        let avail = chunk.len() - self.off;
+        if avail <= watermark {
+            // The whole remaining front chunk fits: hand it back and step to the next chunk.
+            let out = chunk.slice(self.off..);
+            self.remaining -= out.len();
+            self.idx += 1;
+            self.off = 0;
+            out
+        } else {
+            // Split at the watermark, leaving the remainder in place by advancing `off`.
+            let out = chunk.slice(self.off..self.off + watermark);
+            self.remaining -= watermark;
+            self.off += watermark;
+            out
+        }
+    }
+
+    /// Pops the whole unread portion of the front chunk, advancing to the next. Mirrors draining the
+    /// front chunk via [`ByteVec::pop_front`].
+    #[inline]
+    fn pop_front(&mut self) -> Option<Bytes> {
+        let chunk = self.chunk_at(self.idx)?;
+        let out = chunk.slice(self.off..);
+        self.remaining -= out.len();
+        self.idx += 1;
+        self.off = 0;
+        Some(out)
+    }
 }
 
 impl Reader<'_> {
     /// Returns the number of bytes remaining to be read.
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        match &self.inner {
+            ReaderInner::Owned(rope) => rope.len(),
+            ReaderInner::Borrowed(cursor) => cursor.remaining,
+        }
     }
 
     /// Returns `true` when no bytes remain to be read.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.len() == 0
     }
 }
 
@@ -3194,20 +3297,55 @@ impl reader::Buffer for Reader<'_> {
 
     #[inline]
     fn buffered_len(&self) -> usize {
-        self.inner.buffered_len()
+        match &self.inner {
+            ReaderInner::Owned(rope) => rope.buffered_len(),
+            ReaderInner::Borrowed(cursor) => cursor.remaining,
+        }
     }
 
     #[inline]
     fn read_chunk(&mut self, watermark: usize) -> Result<reader::Chunk<'_>, Self::Error> {
-        self.inner.read_chunk(watermark)
+        match &mut self.inner {
+            ReaderInner::Owned(rope) => rope.read_chunk(watermark),
+            ReaderInner::Borrowed(cursor) => Ok(cursor.read_chunk_bytes(watermark).into()),
+        }
     }
 
+    /// Drains the front of the source into `dest`, returning at most one boundary chunk for the
+    /// caller. Both tiers uphold the maximal-run ordering contract documented on
+    /// [`ByteVec`]'s [`partial_copy_into`](reader::Buffer::partial_copy_into): every front chunk
+    /// strictly smaller than `dest`'s remaining capacity is copied into `dest` in order, and the
+    /// returned chunk is non-empty only for a capacity-filling run.
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<reader::Chunk<'_>, Self::Error>
     where
         Dest: writer::Buffer + ?Sized,
     {
-        self.inner.partial_copy_into(dest)
+        match &mut self.inner {
+            ReaderInner::Owned(rope) => rope.partial_copy_into(dest),
+            ReaderInner::Borrowed(cursor) => loop {
+                let front_len = match cursor.front_len() {
+                    l if l > 0 => l,
+                    _ => return Ok(reader::Chunk::empty()),
+                };
+                let cap = dest.remaining_capacity();
+                if front_len >= cap {
+                    let run = cursor.read_chunk_bytes(cap);
+                    debug_assert_eq!(
+                        run.len(),
+                        cap,
+                        "partial_copy_into must return a capacity-filling run, never a short one"
+                    );
+                    return Ok(run.into());
+                }
+                // The whole front chunk fits under capacity: copy it in and advance.
+                dest.put_bytes(
+                    cursor
+                        .pop_front()
+                        .expect("front chunk present (front_len > 0)"),
+                );
+            },
+        }
     }
 }
 
@@ -3216,7 +3354,10 @@ impl Iterator for Reader<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.pop_front()
+        match &mut self.inner {
+            ReaderInner::Owned(rope) => rope.pop_front(),
+            ReaderInner::Borrowed(cursor) => cursor.pop_front(),
+        }
     }
 }
 
