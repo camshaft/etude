@@ -561,7 +561,7 @@ impl ByteRope {
     /// Moves all chunks out of `other` into the back of `self`, leaving `other` empty.
     ///
     /// Fast paths: O(1) when `self` is empty (swap); a cheap flat move when the combined size stays
-    /// shallow; otherwise the two ropes' trees are merged with an O(log₃₂) [`Tree::concat`] that
+    /// shallow; otherwise the two ropes' trees are merged with an O(log₃₂) `Tree::concat` that
     /// shares all subtrees away from the seam — no per-chunk copying.
     pub fn append(&mut self, other: &mut Self) {
         if other.is_empty() {
