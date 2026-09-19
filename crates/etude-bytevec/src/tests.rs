@@ -922,6 +922,7 @@ fn differential_against_model() {
         MutateAlias(usize, u8),
         PushShared,
         StartsEndsWith(usize, Vec<u8>),
+        RevChunksCheck,
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1121,6 +1122,20 @@ fn differential_against_model() {
                     }
                     assert_eq!(rope.starts_with(d), model.starts_with(&d[..]));
                     assert_eq!(rope.ends_with(d), model.ends_with(&d[..]));
+                }
+                Op::RevChunksCheck => {
+                    // chunks_rev (#70) must be exactly the forward chunk sequence reversed —
+                    // pointer identity per chunk, exact ExactSizeIterator len — on EVERY shape
+                    // the harness reaches (deep starts, bulk builds, post-split, aliased).
+                    let fwd: Vec<&Bytes> = rope.chunks().collect();
+                    assert_eq!(rope.chunks_rev().len(), fwd.len());
+                    let mut rev: Vec<&Bytes> = rope.chunks_rev().collect();
+                    rev.reverse();
+                    assert_eq!(rev.len(), fwd.len(), "chunks_rev count mismatch");
+                    for (i, (a, b)) in rev.iter().zip(fwd.iter()).enumerate() {
+                        assert_eq!(a.as_ptr(), b.as_ptr(), "chunks_rev[{i}] wrong chunk");
+                        assert_eq!(a.len(), b.len());
+                    }
                 }
             }
             assert_eq!(rope.len(), model.len(), "len after {op:?}");
