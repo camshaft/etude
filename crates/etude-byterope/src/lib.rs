@@ -108,10 +108,26 @@ impl Default for Repr {
 }
 
 impl ByteRope {
-    /// Creates an empty rope. Allocation-free.
+    /// Creates an empty rope. Allocation-free. `const` to match the flat buffer's `const fn new`, so
+    /// a rope can initialize a `const`/`static`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use etude_byterope::ByteRope;
+    ///
+    /// const EMPTY: ByteRope = ByteRope::new();
+    /// assert!(EMPTY.is_empty());
+    /// ```
     #[inline]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        ByteRope {
+            len: 0,
+            repr: Repr::Small {
+                head: Bytes::new(),
+                additional: VecDeque::new(),
+            },
+        }
     }
 
     /// Creates a [`Builder`] for efficiently constructing a rope by buffering writes into a head
