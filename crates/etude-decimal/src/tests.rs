@@ -721,6 +721,55 @@ fn differential_parse_and_cmp() {
         });
 }
 
+#[test]
+fn parse_raw_arbitrary_bytes_never_panics() {
+    // `parse`/`parse_prefix` consume a raw `Iterator<Item = u8>` (not `&str`), so a consumer — e.g. the
+    // JSON tokenizer, which hands us the byte region it scanned as a number — can feed arbitrary bytes,
+    // including non-UTF-8, high, and control bytes. `differential_parse_and_cmp` maps every candidate onto
+    // the number CHARSET first, so raw-byte robustness was an all-valid-alphabet blind spot (mirrors
+    // etude-json #237 one layer up, whose tokenizer feeds this parser). Pin it: parsing arbitrary bytes
+    // must always terminate in `Some`/`None` and never unwind; a chunk-backed source must parse identically
+    // to a contiguous one; and any value we accept is — by grammar — an all-ASCII literal that the oracle
+    // also accepts and that round-trips.
+    bolero::check!()
+        .with_type::<alloc::vec::Vec<u8>>()
+        .for_each(|raw| {
+            // Bound the length (as the charset harness does) so a pathological all-digit run can't build a
+            // giant coefficient; the bytes stay arbitrary.
+            let raw = &raw[..raw.len().min(64)];
+
+            let contiguous = Decimal::parse(raw.iter().copied());
+
+            // A non-contiguous (chunk-backed, rope-leaf) source must parse identically.
+            let mid = raw.len() / 2;
+            let chunked =
+                Decimal::parse(raw[..mid].iter().copied().chain(raw[mid..].iter().copied()));
+            assert_eq!(
+                contiguous, chunked,
+                "chunked vs contiguous parse of {raw:?}"
+            );
+
+            // Whatever `parse` accepts is entirely ASCII (digits / `.` / `e` / `E` / `+` / `-`), hence valid
+            // UTF-8 — so hand it to the differential oracle for value + round-trip + f64 + accept-superset.
+            if contiguous.is_some() {
+                let s = core::str::from_utf8(raw)
+                    .expect("an accepted literal is all-ASCII, hence valid UTF-8");
+                check_parse(s);
+            }
+
+            // `parse_prefix` over the same raw bytes must also never unwind; an accepted prefix round-trips.
+            let mut it = raw.iter().copied().peekable();
+            if let Some(d) = Decimal::parse_prefix(&mut it) {
+                let rendered = d.to_string();
+                assert_eq!(
+                    Decimal::parse(rendered.bytes()).as_ref(),
+                    Some(&d),
+                    "parse_prefix-accepted value {d} did not round-trip via {rendered:?}"
+                );
+            }
+        });
+}
+
 /// Build a guaranteed-valid decimal literal string from typed components. `int` (a `u64`) has no leading
 /// zero by construction; `frac`/`exp` are appended only when present.
 fn make_num(neg: bool, int: u64, frac: Option<u32>, exp: Option<i64>) -> String {
