@@ -236,6 +236,25 @@ fn string_escape_grammar_matches_serde_json() {
 }
 
 #[test]
+fn whitespace_and_bom_match_serde_json() {
+    // JSON insignificant whitespace is EXACTLY space/tab/LF/CR; a leading BOM is not allowed. These are
+    // classic divergence points (many parsers wrongly accept form-feed/vertical-tab/NBSP or eat a BOM).
+    // All of these match serde_json.
+    let cases: &[&[u8]] = &[
+        b" \t\n\r[1]",      // valid: the four allowed whitespace bytes, leading
+        b" 42 ",            // valid: whitespace around a bare value
+        b"[1,\x0C2]",       // invalid: form feed (0x0C) is not JSON whitespace
+        b"[1,\x0B2]",       // invalid: vertical tab (0x0B)
+        b"[1,\xc2\xa02]",   // invalid: NBSP (U+00A0)
+        b"\x0C[1]",         // invalid: leading form feed
+        b"\xef\xbb\xbf[1]", // invalid: leading UTF-8 BOM
+    ];
+    for d in cases {
+        check(d);
+    }
+}
+
+#[test]
 fn lone_surrogates_decode_lossily_a_deliberate_divergence_from_serde() {
     // KNOWN, INTENTIONAL divergence from serde_json: etude-json's string decoder is *infallible* — a
     // lone surrogate (a `\u` escape in D800..=DFFF with no valid pair) is replaced with U+FFFD rather
