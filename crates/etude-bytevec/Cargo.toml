@@ -26,6 +26,12 @@ bolero-generator = { version = "0.13", default-features = false, optional = true
 [dev-dependencies]
 bolero = "0.13"
 bolero-generator = "0.13"
-# Used by the `profile` example (perf sampling driver); matches the host allocator so profiling
-# reflects production allocation behavior.
+# `compare` bench harness (head-to-head vs a naive chunk deque).
+criterion = "0.5"
+# Used by the `profile` example (perf sampling driver) and the `compare` bench; matches the host
+# allocator so profiling/benchmarks reflect production allocation behavior.
 tikv-jemallocator = "0.6"
+
+[[bench]]
+name = "compare"
+harness = false
