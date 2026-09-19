@@ -66,17 +66,33 @@ const DEMOTE_AT: usize = FANOUT;
 const COALESCE_MAX: usize = 256;
 
 /// Error returned by the byte-granular operations ([`ByteRope::advance`], [`ByteRope::split_to`]).
-/// Mirrors the flat buffer's error so callers can swap the two.
+/// Mirrors `etude_bytevec::ByteVecError` (same variants) so callers can swap the two.
+///
+/// # Examples
+///
+/// ```
+/// use etude_byterope::ByteRopeError;
+///
+/// assert_eq!(ByteRopeError::OutOfBounds(3).to_string(), "index out of bounds: 3");
+/// assert_eq!(ByteRopeError::OutOfBoundsRange(2, 5).to_string(), "range out of bounds: 2..5");
+/// // Both convert to an UnexpectedEof io::Error, like ByteVecError.
+/// let e: std::io::Error = ByteRopeError::OutOfBoundsRange(2, 5).into();
+/// assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+/// ```
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ByteRopeError {
     /// An index was past the end of the rope.
     OutOfBounds(usize),
+    /// A `start..end` range was past the end of the rope. Present for `etude_bytevec` parity (the
+    /// byte-granular ops currently report [`ByteRopeError::OutOfBounds`]).
+    OutOfBoundsRange(usize, usize),
 }
 
 impl core::fmt::Display for ByteRopeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::OutOfBounds(at) => write!(f, "index out of bounds: {at}"),
+            Self::OutOfBoundsRange(start, end) => write!(f, "range out of bounds: {start}..{end}"),
         }
     }
 }
@@ -88,7 +104,9 @@ impl From<ByteRopeError> for std::io::Error {
     #[inline]
     fn from(error: ByteRopeError) -> Self {
         match error {
-            ByteRopeError::OutOfBounds(_) => Self::new(std::io::ErrorKind::UnexpectedEof, error),
+            ByteRopeError::OutOfBounds(_) | ByteRopeError::OutOfBoundsRange(_, _) => {
+                Self::new(std::io::ErrorKind::UnexpectedEof, error)
+            }
         }
     }
 }
