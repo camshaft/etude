@@ -1663,6 +1663,7 @@ fn differential_against_model() {
         ReaderOwningParity(Vec<u8>),
         Compact,
         CompactWith(u8),
+        EqRelayoutCheck(Vec<u8>),
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -2020,6 +2021,55 @@ fn differential_against_model() {
                     let subject = trace_reader(rope.reader(), script);
                     let oracle = trace_owning_clone(rope.clone(), script);
                     assert_eq!(subject, oracle, "borrowed reader vs owning-clone trace");
+                }
+                Op::EqRelayoutCheck(sizes) => {
+                    // Rope-vs-rope `PartialEq` (chunks_content_eq: two rope chunk iterators walked
+                    // over MISALIGNED boundaries, plus the pointer-identity fast path) is its own
+                    // hand-written comparator — distinct from the `bytes_eq` (rope-vs-flat-slice)
+                    // path that every other equality assert here goes through. Build a SECOND rope
+                    // with content identical to `model` but a DIFFERENT chunk layout, from FRESH
+                    // copies (distinct allocations, so the `memcmp` arm runs — the same-`Arc` fast
+                    // path is already covered by the clone/alias asserts), and check both the accept
+                    // and reject directions.
+                    let relayout = |bytes: &[u8], base: usize| {
+                        // Small (1-7 byte) chunks maximize boundary misalignment, but re-chunking a
+                        // LARGE model that finely would explode the chunk count and bog the shared
+                        // harness. Floor the step by len/96 so the layout stays bounded (~96+ chunks —
+                        // still well past PROMOTE_AT, so Small-vs-Deep and Deep-vs-Deep misalignment is
+                        // exercised) while a small model still gets fine 1-7 byte pieces.
+                        let floor = 1 + bytes.len() / 96;
+                        let mut r = ByteVec::new();
+                        let (mut i, mut si) = (0usize, 0usize);
+                        while i < bytes.len() {
+                            let step =
+                                ((*sizes.get(si).unwrap_or(&1) as usize % 7) + base).max(floor);
+                            let j = (i + step).min(bytes.len());
+                            r.push_back(chunk(&bytes[i..j]));
+                            i = j;
+                            si += 1;
+                        }
+                        r
+                    };
+                    // Equal content, different layout => equal, and symmetric across layouts (the
+                    // two-iterator walk advances by min-of-both, so symmetry is a real assertion).
+                    let other = relayout(&model, 1);
+                    assert!(rope == other, "layout-independent eq must hold");
+                    assert!(other == rope, "rope eq must be symmetric across layouts");
+                    if !model.is_empty() {
+                        // A single-byte perturbation (relayed out yet again) must be seen as unequal.
+                        let mut bad_bytes = model.clone();
+                        let idx = sizes.first().map_or(0, |b| *b as usize) % bad_bytes.len();
+                        bad_bytes[idx] = bad_bytes[idx].wrapping_add(1);
+                        let bad = relayout(&bad_bytes, 3);
+                        assert!(
+                            rope != bad,
+                            "one-byte perturbation must break eq across layouts"
+                        );
+                        // A length mismatch must be unequal (len guard / exhaustion arm).
+                        let mut shorter = other.clone();
+                        shorter.pop_back();
+                        assert!(rope != shorter, "shorter rope must be unequal");
+                    }
                 }
                 Op::AsContiguousCheck => {
                     // The only soundness face of as_contiguous: a Some view must be the ENTIRE
