@@ -26,3 +26,7 @@ bolero-generator = "0.13"
 criterion = "0.5"
 # Match the host allocator so benchmarks reflect production allocation behavior.
 tikv-jemallocator = "0.6"
+
+[[bench]]
+name = "arith"
+harness = false
