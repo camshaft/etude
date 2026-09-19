@@ -36,11 +36,11 @@ cargo bench -p etude-decimal --bench arith
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 58.94 ns  | 71.39 ns  | **0.83** |
-| 256b  | 88.71 ns  | 109.08 ns | 0.81 |
-| 1024b | 122.12 ns | 133.57 ns | 0.91 |
-| 2048b | 174.49 ns | 169.83 ns | 1.03 |
-| 4096b | 351.50 ns | 222.75 ns | 1.58 |
+| 64b   | 40.89 ns  | 73.93 ns  | **0.55** |
+| 256b  | 80.02 ns  | 113.02 ns | **0.71** |
+| 1024b | 92.49 ns  | 135.64 ns | **0.68** |
+| 2048b | 174.57 ns | 172.37 ns | 1.01 |
+| 4096b | 352.57 ns | 225.42 ns | 1.56 |
 
 ### `sub` — exact aligned difference
 
@@ -49,11 +49,11 @@ of the operand — no intermediate negated value is allocated.
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 54.60 ns  | 55.27 ns  | **0.99** |
-| 256b  | 88.64 ns  | 69.95 ns  | 1.27 |
-| 1024b | 114.02 ns | 95.16 ns  | 1.20 |
-| 2048b | 160.77 ns | 122.81 ns | 1.31 |
-| 4096b | 225.53 ns | 153.46 ns | 1.47 |
+| 64b   | 45.29 ns  | 53.98 ns  | **0.84** |
+| 256b  | 82.06 ns  | 68.99 ns  | 1.19 |
+| 1024b | 86.00 ns  | 94.70 ns  | **0.91** |
+| 2048b | 161.32 ns | 122.75 ns | 1.31 |
+| 4096b | 225.92 ns | 149.46 ns | 1.51 |
 
 ### `mul` — exact product
 
@@ -81,7 +81,8 @@ For `add`/`sub` there is also a second native tier in `i128`, between the `i64` 
 a full 64-bit coefficient exceeds `i64` but fits `i128`, so the `64b` add/sub tier above now reads both
 coefficients straight into an `i128` (`etude_bigint::Big::to_i128_checked`, direct limb read) and boxes the
 result (`Big::from_i128`) — the limb-level conversions, not a sign-magnitude byte round-trip (which cost
-more than `Big::add` itself). That flipped `add` 64b `1.11 → 0.83` and `sub` 64b `1.28 → 0.99`.
+more than `Big::add` itself). That flipped `add` 64b `1.11 → 0.83` and `sub` 64b `1.28 → 0.99`; the
+native `i128` `normalize` strip (#226) later deepened both — `add` 64b to `0.55`, `sub` 64b to `0.84`.
 
 | op | etude (before) | etude (now) | bigdecimal | ratio |
 |----|---------------:|------------:|-----------:|------:|
@@ -302,7 +303,9 @@ rejecting it, so there is no same-semantics comparison to run.
   negated clone is allocated. For **i64-fitting values** — the common real decimal — `add`/`sub`/`mul` take
   a native fast path (`add_small`/`sub_small`/`mul_small` above): `add` and `sub` beat `bigdecimal` ~2×,
   `mul` is near parity. A full 64-bit coefficient (above `i64`) takes a second native `i128` tier for
-  `add`/`sub`, so the `64b` add/sub tier now beats `bigdecimal` too.
+  `add`/`sub`, so the `64b` add/sub tier now beats `bigdecimal` too. The mid tiers fell in step as the
+  native `i128` `normalize` strip (#226) flowed through — `add` 256b/1024b to `0.71`/`0.68`, `sub` to
+  `1.19`/`0.91` (`sub` 1024b crossing to a win).
 - **`cmp`** (equal exponents) is a flat ~6 ns at every width — near parity with `bigdecimal` — now that
   the magnitude compare is a signed `Big` compare with no `abs()` clone. The **`cmp_uneq`** (unequal
   exponent) path scales both coefficients to a common exponent in `i128` and compares natively when they
