@@ -63,6 +63,7 @@ fn check_pair(a: &Big, b: &Big) {
     assert_eq!(to_ref(&a.sub(b)), &ra - &rb, "sub {a:?} {b:?}");
     assert_eq!(to_ref(&a.mul(b)), &ra * &rb, "mul {a:?} {b:?}");
     assert_eq!(to_ref(&a.neg()), -&ra, "neg {a:?}");
+    assert_eq!(to_ref(&a.abs()), ra.abs(), "abs {a:?}");
     assert_eq!(
         a.to_decimal_string(),
         ra.to_string(),
