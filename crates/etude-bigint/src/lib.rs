@@ -292,17 +292,40 @@ impl Big {
     }
 
     /// The greatest common divisor of `|self|` and `|other|` — always NON-NEGATIVE (gcd is sign-agnostic:
-    /// `gcd(a, b) = gcd(|a|, |b|)`). `gcd(0, 0) = 0`; `gcd(a, 0) = |a|`. Euclid over magnitudes via
-    /// `divmod_mag` (the remainder shrinks each step).
+    /// `gcd(a, b) = gcd(|a|, |b|)`). `gcd(0, 0) = 0`; `gcd(a, 0) = |a|`.
+    ///
+    /// Binary GCD (Stein's algorithm): factor out the common power of two, then repeatedly make the
+    /// operands odd (shifting out twos) and replace the larger with their difference. Each step is a
+    /// shift and a subtraction — no division — which beats Euclid-over-divmod at these magnitudes.
     pub fn gcd(&self, other: &Big) -> Big {
         let mut a = self.mag.clone(); // |self|
         let mut b = other.mag.clone(); // |other|
-        while !b.is_empty() {
-            let (_q, r) = divmod_mag(&a, &b); // r = a mod b, normalized (no trailing zeros)
-            a = b;
-            b = r;
+        // gcd(x, 0) = |x| (covers gcd(0, 0) = 0).
+        if a.is_empty() || b.is_empty() {
+            let mut g = Big {
+                neg: false,
+                mag: if a.is_empty() { b } else { a },
+            };
+            g.normalize();
+            return g;
         }
-        // `a` is the gcd magnitude (empty iff both inputs were zero). Non-negative by construction.
+        // Pull out the common factor of two; then keep `a` odd for the loop.
+        let tz_a = trailing_zeros_mag(&a);
+        let shift = tz_a.min(trailing_zeros_mag(&b));
+        shr_bits(&mut a, tz_a);
+        loop {
+            let tz_b = trailing_zeros_mag(&b);
+            shr_bits(&mut b, tz_b); // b is now odd
+            // Both odd → order them so the subtraction stays non-negative.
+            if Big::cmp_mag(&a, &b) == Ordering::Greater {
+                core::mem::swap(&mut a, &mut b);
+            }
+            b = Big::sub_mag(&b, &a); // odd − odd = even, ≥ 0
+            if b.is_empty() {
+                break; // gcd of the odd parts is `a`
+            }
+        }
+        shl_bits(&mut a, shift); // restore the common power of two
         let mut g = Big { neg: false, mag: a };
         g.normalize();
         g
@@ -689,6 +712,64 @@ fn strip(v: &mut Vec<u64>) {
     while v.last() == Some(&0) {
         v.pop();
     }
+}
+
+/// Count of trailing zero BITS in a nonzero little-endian magnitude (its 2-adic valuation).
+fn trailing_zeros_mag(m: &[u64]) -> usize {
+    for (i, &limb) in m.iter().enumerate() {
+        if limb != 0 {
+            return i * 64 + limb.trailing_zeros() as usize;
+        }
+    }
+    0 // all-zero magnitude — callers guard against this
+}
+
+/// `m >>= k` bits (little-endian; normalized out).
+fn shr_bits(m: &mut Vec<u64>, k: usize) {
+    if k == 0 {
+        return;
+    }
+    let limb_shift = k / 64;
+    if limb_shift >= m.len() {
+        m.clear();
+        return;
+    }
+    m.drain(0..limb_shift); // drop whole limbs off the low end
+    let bit_shift = (k % 64) as u32;
+    if bit_shift > 0 {
+        // Each limb takes its high bits down and the next-higher limb's low bits into its top.
+        let mut carry = 0u64;
+        for limb in m.iter_mut().rev() {
+            let next_carry = *limb << (64 - bit_shift);
+            *limb = (*limb >> bit_shift) | carry;
+            carry = next_carry;
+        }
+    }
+    strip(m);
+}
+
+/// `m <<= k` bits (little-endian; normalized out). No-op on an empty (zero) magnitude.
+fn shl_bits(m: &mut Vec<u64>, k: usize) {
+    if k == 0 || m.is_empty() {
+        return;
+    }
+    let bit_shift = (k % 64) as u32;
+    if bit_shift > 0 {
+        let mut carry = 0u64;
+        for limb in m.iter_mut() {
+            let next_carry = *limb >> (64 - bit_shift);
+            *limb = (*limb << bit_shift) | carry;
+            carry = next_carry;
+        }
+        if carry != 0 {
+            m.push(carry);
+        }
+    }
+    let limb_shift = k / 64;
+    if limb_shift > 0 {
+        m.splice(0..0, core::iter::repeat_n(0u64, limb_shift)); // insert whole zero limbs at the low end
+    }
+    strip(m);
 }
 
 /// Unsigned division of magnitudes: `(quotient, remainder)` with `a = quotient * b + remainder`,
