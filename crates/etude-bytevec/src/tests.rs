@@ -1563,7 +1563,7 @@ fn differential_against_model() {
                     let wrote = r.write_vectored(&slices).unwrap();
                     assert_eq!(wrote, d.len(), "write_vectored writes all");
                     let mut want = model[n..].to_vec();
-                    want.extend_from_slice(&d);
+                    want.extend_from_slice(d);
                     assert_eq!(r, want[..], "clone after read + vectored write");
                 }
                 Op::CopyToBytesMutCheck => {
