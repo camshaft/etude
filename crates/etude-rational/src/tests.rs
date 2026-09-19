@@ -250,6 +250,47 @@ fn mul_div_cross_reduction() {
 }
 
 #[test]
+fn mul_div_native_u64_magnitude() {
+    // Exercise the native u128 mul/div paths: components whose MAGNITUDE fits u64 but exceeds i64 (the `64b`
+    // band), so `mul_small`/`div_small` (i64) miss them and `mul_small_u128`/`div_small_u128` take over. The
+    // cross-reduced products can reach ~2^128 (exceeding i128), so this also exercises `big_from_u128`.
+    // Cross-check the canonical (numer, denom) pair against num-rational across sign combinations.
+    fn sm_bytes(mag: u64, neg: bool) -> alloc::vec::Vec<u8> {
+        let mut sm = alloc::vec![if neg { 1u8 } else { 0u8 }];
+        sm.extend_from_slice(&mag.to_le_bytes());
+        *sm.last_mut().unwrap() |= 0x80; // pin exact width so the value stays in the u64>i64 band
+        sm
+    }
+    let mk = |nmag: u64, dmag: u64, neg: bool| {
+        let nb = Big::from_sign_magnitude_bytes(&sm_bytes(nmag, neg));
+        let db = Big::from_sign_magnitude_bytes(&sm_bytes(dmag, false));
+        let bn = BigInt::from_signed_bytes_le(&nb.to_le_twos_complement_bytes());
+        let bd = BigInt::from_signed_bytes_le(&db.to_le_twos_complement_bytes());
+        (Rational::new(nb, db).unwrap(), BigRational::new(bn, bd))
+    };
+    let vals: [u64; 4] = [
+        u64::MAX,              // 2^64 - 1 (max magnitude ⇒ products near 2^128)
+        (i64::MAX as u64) + 1, // 2^63
+        0xFFFF_FFFF_0000_0001,
+        0x9E37_79B9_7F4A_7C15,
+    ];
+    for &nm in &vals {
+        for &dm in &vals {
+            for &nm2 in &vals {
+                for &dm2 in &vals {
+                    for (s1, s2) in [(false, false), (true, false), (false, true), (true, true)] {
+                        let (a, ra) = mk(nm, dm, s1);
+                        let (b, rb) = mk(nm2, dm2, s2);
+                        assert_same(&a.mul(&b), &(&ra * &rb));
+                        assert_same(&a.div(&b).unwrap(), &(&ra / &rb));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn cmp_native_u64_magnitude() {
     // Exercise the native u128 cmp path: components whose MAGNITUDE fits u64 but exceeds i64 (the `64b`
     // bench tier), so `cmp_small` (i64) misses them and `cmp_small_u128` takes over. Cross-check the
