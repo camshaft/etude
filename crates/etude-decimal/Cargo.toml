@@ -1,0 +1,26 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-decimal"
+version = "0.1.0"
+description = "Exact base-10 arbitrary-precision decimal numbers (coeff * 10^exp) over etude-bigint, with a lossless JSON-number parser"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+etude-bigint = { version = "0.1", path = "../etude-bigint" }
+
+[dev-dependencies]
+# Differential oracle: parse/compare/round-trip is checked against bigdecimal's BigDecimal (the
+# arbitrary-precision reference implementation, matching our scope). Kept out of the shipped crate so
+# nothing but etude-bigint + alloc is a build dependency.
+bigdecimal = "0.4"
+# bigdecimal re-exports num-bigint, but we depend on it explicitly for the canonical (sign, magnitude,
+# exponent) decomposition used by the oracle.
+num-bigint = "0.4"
+# Coverage-guided property + shrinking engine for the differential harness.
+bolero = "0.13"
+bolero-generator = "0.13"
