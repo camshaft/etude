@@ -580,10 +580,23 @@ impl ByteRope {
         }
         let taken = core::mem::take(other);
 
-        // Shallow combined: keep it flat, just move the few chunks (updates len via push_back).
+        // Shallow combined: keep it flat, just move the few chunks.
         if matches!(self.repr, Repr::Small { .. })
             && self.chunk_count() + taken.chunk_count() < PROMOTE_AT
         {
+            // Both flat: bulk-move other's chunks onto self's deque in one `VecDeque::append`
+            // (matching ByteVec), instead of a per-chunk `push_back` walk. self is non-empty, so its
+            // head is populated and other's chunks append after it; total stays below PROMOTE_AT.
+            if let Repr::Small { head: ohead, additional: mut oadd } = taken.repr {
+                let added = ohead.len() + oadd.iter().map(|c| c.len()).sum::<usize>();
+                if let Repr::Small { additional, .. } = &mut self.repr {
+                    additional.push_back(ohead);
+                    additional.append(&mut oadd);
+                }
+                self.len += added;
+                self.check_invariants();
+                return;
+            }
             self.push_all(taken);
             return;
         }
