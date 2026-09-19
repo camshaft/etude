@@ -78,7 +78,7 @@ impl StrRope {
         if byte_idx == 0 || byte_idx == len {
             return true;
         }
-        // A boundary is any byte that is NOT a UTF-8 continuation byte (0b10xx_xxxx, i.e. 0x80..=0xBF).
+        // A boundary is any byte that is not a UTF-8 continuation byte (0b10xx_xxxx, i.e. 0x80..=0xBF).
         // Matches the stdlib check `(b as i8) >= -0x40`.
         match self.0.byte_at(byte_idx) {
             Some(b) => (b as i8) >= -0x40,
@@ -394,7 +394,7 @@ impl PartialEq<&str> for StrRope {
 impl core::fmt::Display for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         use core::fmt::Write as _;
-        // Stream chars (reassembling any codepoint that spans a chunk boundary) — NO whole-content
+        // Stream chars (reassembling any codepoint that spans a chunk boundary) — no whole-content
         // allocation, unlike a linearize-then-write.
         for c in self.chars() {
             f.write_char(c)?;
@@ -447,7 +447,7 @@ mod tests {
 
     /// Differential oracle vs `str`/`String`: arbitrary raw bytes, built into ropes under several
     /// chunk layouts (so multi-byte codepoints and invalid sequences STRADDLE leaf boundaries), must
-    /// agree with `core::str::from_utf8` on accept/reject AND `valid_up_to`; on accept, every
+    /// agree with `core::str::from_utf8` on accept/reject and `valid_up_to`; on accept, every
     /// str-facing query must match the flat `&str`. This is the fence for any future optimization of
     /// the linearize-then-validate path (e.g. per-chunk validation with boundary stitching).
     #[test]
