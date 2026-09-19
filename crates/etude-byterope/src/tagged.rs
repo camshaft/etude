@@ -253,6 +253,47 @@ mod tests {
         assert_eq!(tag_b::Tag::current(), 0);
     }
 
+    /// RED reproducer (breaker-byterope): the static-tag macro's `Handle` adjusts the global
+    /// `COUNT` in `increment`/`decrement` but never updates its own remembered length (`self.0`),
+    /// while `Clone`/`Drop` charge/release that STALE initial length. Any `Tagged` that grows or
+    /// shrinks after creation corrupts the owner budget on clone/drop/untag: grow-then-drop leaks
+    /// the growth FOREVER (observed: budget 2 after dropping a 3-byte rope grown by 2; expected 0).
+    /// `etude-bytevec`'s `static_bytevec_tag!` has the IDENTICAL bug — fix both macros together
+    /// (`increment`/`decrement` must also do `self.0 += len` / `self.0 -= len`).
+    #[test]
+    fn handle_drop_releases_current_len_not_initial() {
+        mod tag_d {
+            static_byterope_tag!(crate::tagged);
+        }
+        let mut t: Tagged<tag_d::Tag> = ByteRope::from(b"abc").tag(&tag_d::Tag);
+        t.push_back(Bytes::from_static(b"de"));
+        assert_eq!(tag_d::Tag::current(), 5);
+        drop(t);
+        assert_eq!(tag_d::Tag::current(), 0, "grow-then-drop leaked owner budget");
+    }
+
+    /// Companion reproducer: a clone of a GROWN rope charges only the stale initial length, so the
+    /// owner budget undercounts live bytes (two 5-byte ropes charged 8, not 10), and shrink-then-
+    /// drop over-releases (a split_to below the initial length drives the budget NEGATIVE/wraps).
+    #[test]
+    fn handle_clone_charges_current_len_and_shrink_does_not_over_release() {
+        mod tag_e {
+            static_byterope_tag!(crate::tagged);
+        }
+        let mut t: Tagged<tag_e::Tag> = ByteRope::from(b"abc").tag(&tag_e::Tag);
+        t.push_back(Bytes::from_static(b"de")); // 5 bytes live
+        let c = t.clone(); // must charge the CURRENT 5, not the initial 3
+        assert_eq!(tag_e::Tag::current(), 10, "clone undercharged the owner");
+        drop(c);
+        assert_eq!(tag_e::Tag::current(), 5);
+
+        // shrink below the initial length, then drop: must release exactly the remaining 1 byte
+        let _front = t.split_to(4).expect("in bounds"); // 1 byte remains tagged
+        assert_eq!(tag_e::Tag::current(), 1);
+        drop(t); // releasing the stale initial 3 would wrap the budget below zero
+        assert_eq!(tag_e::Tag::current(), 0, "shrink-then-drop over-released (budget wrapped)");
+    }
+
     /// Exercises the `Tagged` op surface (push_back/append/split_to/untag) and its budget tracking.
     #[test]
     fn tagged_ops_track_budget() {
