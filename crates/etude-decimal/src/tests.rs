@@ -239,6 +239,66 @@ fn predicates_and_sign() {
 }
 
 #[test]
+fn checked_integer_extraction() {
+    // Exact integers in range extract; fractional values do not (across all three widths).
+    let some = |s: &str| Decimal::from_str(s).unwrap();
+    assert_eq!(some("42").to_i64(), Some(42));
+    assert_eq!(some("100").to_i64(), Some(100)); // canonical coeff=1 exp=2
+    assert_eq!(some("4.2e1").to_i64(), Some(42)); // = 42, exp lands at 0
+    assert_eq!(some("1e18").to_i64(), Some(1_000_000_000_000_000_000));
+    assert_eq!(some("0").to_i64(), Some(0));
+    assert_eq!(some("-7").to_i64(), Some(-7));
+    assert_eq!(some("0").to_u64(), Some(0));
+    assert_eq!(some("-7").to_u64(), None); // negative → not a u64
+    for s in ["1.5", "0.1", "-2.5", "1e-1", "12345.6789"] {
+        assert_eq!(some(s).to_i64(), None, "{s}");
+        assert_eq!(some(s).to_u64(), None, "{s}");
+        assert_eq!(some(s).to_i128(), None, "{s}");
+    }
+
+    // Width boundaries: a value one past a target's max spills to None but may still fit a wider target.
+    assert_eq!(some("9223372036854775807").to_i64(), Some(i64::MAX));
+    assert_eq!(some("-9223372036854775808").to_i64(), Some(i64::MIN));
+    assert_eq!(some("9223372036854775808").to_i64(), None); // i64::MAX + 1
+    assert_eq!(
+        some("9223372036854775808").to_i128(),
+        Some(9_223_372_036_854_775_808)
+    );
+    assert_eq!(some("18446744073709551615").to_u64(), Some(u64::MAX));
+    assert_eq!(some("18446744073709551615").to_i64(), None); // > i64::MAX
+    assert_eq!(some("18446744073709551616").to_u64(), None); // u64::MAX + 1
+    assert_eq!(
+        some("170141183460469231731687303715884105727").to_i128(),
+        Some(i128::MAX)
+    );
+    assert_eq!(
+        some("170141183460469231731687303715884105728").to_i128(),
+        None // i128::MAX + 1
+    );
+
+    // The digit-count guard rejects an oversized exponent without materializing a giant power of ten.
+    assert_eq!(some("1e40").to_i128(), None); // 41 digits > i128's 39
+    assert_eq!(some("1e1000000").to_i128(), None);
+
+    // Value-preserving: whatever integer we hand back, rebuilt as a Decimal, equals the original.
+    for s in [
+        "0",
+        "1",
+        "-1",
+        "42",
+        "100",
+        "-7",
+        "9223372036854775807",
+        "1000000000000000000",
+    ] {
+        let d = some(s);
+        if let Some(n) = d.to_i64() {
+            assert_eq!(Decimal::from_i64(n), d, "{s}");
+        }
+    }
+}
+
+#[test]
 fn to_f64_matches_float_parse() {
     // Correctly-rounded direct conversion must agree bit-for-bit with the std float parser (itself
     // correctly rounded) across normals, rounding boundaries, subnormals, overflow, and underflow.
