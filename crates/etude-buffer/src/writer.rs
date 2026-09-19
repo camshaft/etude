@@ -51,12 +51,16 @@ pub trait Buffer {
     /// `bytes.len()` must not exceed [`remaining_capacity`](Buffer::remaining_capacity).
     fn put_slice(&mut self, bytes: &[u8]);
 
-    /// Writes `payload_len` bytes directly into the destination's uninitialized memory via `f`,
-    /// avoiding a staging copy.
+    /// Writes `payload_len` bytes directly into the destination's memory via `f`, avoiding a staging
+    /// copy.
     ///
-    /// Returns `true` if the write happened. `false` means the destination cannot serve an
-    /// uninitialized slice of that length (e.g. its next chunk is too small); fall back to a
-    /// regular `put_*` call.
+    /// The `payload_len`-byte slice handed to `f` is zero-initialized first, and all `payload_len`
+    /// bytes are committed on success — so a closure that fills fewer bytes (or none) yields zeros for
+    /// the remainder, never uninitialized/stale memory. `f` is expected to fill the whole slice; the
+    /// zero-init is a soundness floor, not a substitute for filling it.
+    ///
+    /// Returns `true` if the write happened. `false` means the destination cannot serve a slice of
+    /// that length (e.g. its next chunk is too small); fall back to a regular `put_*` call.
     ///
     /// # Errors
     /// Returns any error `f` produces while filling the slice.
