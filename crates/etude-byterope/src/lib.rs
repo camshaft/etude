@@ -29,6 +29,9 @@ use bytes::{Bytes, BytesMut};
 mod tree;
 use tree::Tree;
 
+pub mod tagged;
+pub use tagged::Tagged;
+
 /// Radix width: children per interior node / chunks per leaf block.
 const BITS: u32 = 5;
 const FANOUT: usize = 1 << BITS;
@@ -918,6 +921,13 @@ impl ByteRope {
         let mut out = bytes::BytesMut::with_capacity(self.len);
         self.extend_into(&mut out);
         out.freeze()
+    }
+
+    /// Wraps this rope in a [`Tagged`] owned by `owner`, tracking its bytes against the owner's
+    /// running budget. Mirrors the flat buffer's `tag` so callers can swap the two.
+    #[inline]
+    pub fn tag<O: tagged::Owner>(self, owner: &O) -> tagged::Tagged<O> {
+        tagged::Tagged::new(self, owner)
     }
 
     // --- internal helpers -------------------------------------------------
