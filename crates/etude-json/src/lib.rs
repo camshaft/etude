@@ -285,7 +285,7 @@ pub enum Strictness {
     /// Accept a lenient superset of JSON strings: string content that is not valid UTF-8 and lone
     /// `\u` surrogates are tolerated (a decoder resolves both lossily to U+FFFD).
     ///
-    /// A consumer must NOT assume a string token's content is valid UTF-8 under this mode.
+    /// A consumer must not assume a string token's content is valid UTF-8 under this mode.
     Lenient,
 }
 
