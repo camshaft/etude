@@ -280,6 +280,33 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
+    // Small-value round-trip: a 15-significant-digit literal (the common decimal-literal case, e.g. a JSON
+    // number), whose coefficient fits a u64. The TIERS sweep uses full-width coefficients, so these get
+    // their own cells.
+    {
+        const LIT: &str = "12345678.9012345";
+        let a = Decimal::from_str(LIT).expect("valid");
+        let ra = BigDecimal::from_str(LIT).expect("valid");
+
+        let mut g = group(c, "from_str_small");
+        g.bench_function(BenchmarkId::new("etude", "15d"), |be| {
+            be.iter(|| black_box(Decimal::from_str(black_box(LIT)).expect("valid")))
+        });
+        g.bench_function(BenchmarkId::new("bigdecimal", "15d"), |be| {
+            be.iter(|| black_box(BigDecimal::from_str(black_box(LIT)).expect("valid")))
+        });
+        g.finish();
+
+        let mut g = group(c, "to_string_small");
+        g.bench_function(BenchmarkId::new("etude", "15d"), |be| {
+            be.iter(|| black_box(black_box(&a).to_string()))
+        });
+        g.bench_function(BenchmarkId::new("bigdecimal", "15d"), |be| {
+            be.iter(|| black_box(black_box(&ra).to_string()))
+        });
+        g.finish();
+    }
+
     // Negate: flip the coefficient's sign (an O(limbs) clone + sign bit). Both return an owned value, so
     // this is a fair clone-cost comparison.
     unop(c, "neg", 0x0f0f_a5a5, |r, n| r.dec(n), |a| a.neg(), |a| -a);

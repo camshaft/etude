@@ -668,7 +668,9 @@ impl Decimal {
         }
     }
 
-    /// Compare `|self|` against `|other|` (both assumed nonzero). Exact and allocation-light.
+    /// Compare `|self|` against `|other|`. The caller ([`Decimal::compare`]) only reaches here with both
+    /// nonzero and of the SAME sign, which lets a signed [`etude_bigint::Big`] compare stand in for a
+    /// magnitude compare (flipped for negatives) — no `abs()` clone. Exact and allocation-light.
     ///
     /// When the exponents are equal — the common case (same-scale decimals) — the magnitude order is
     /// exactly the coefficient magnitude order, so it compares the [`etude_bigint::Big`] coefficients
@@ -678,27 +680,31 @@ impl Decimal {
     /// tie does it scale both magnitudes to a common exponent and compare the `Big` values directly. Every
     /// path is allocation-light: no decimal string is ever built.
     fn cmp_magnitude(&self, other: &Decimal) -> Ordering {
+        // The caller (`compare`) only reaches here with `self` and `other` of the same sign (and both
+        // nonzero), so a signed `Big` compare gives the magnitude order for two positives and its reverse
+        // for two negatives: flip for negatives. This yields the magnitude order with no `abs()` clone.
+        let neg = self.coeff.is_negative();
+        let by_mag = |a: &Big, b: &Big| if neg { b.cmp(a) } else { a.cmp(b) };
         if self.exp == other.exp {
-            // Equal scale: |a·10^e| vs |b·10^e| is |a| vs |b|. Compare the coefficient magnitudes via
-            // `Big` (allocation-light, short-circuiting on the top limb) rather than rendering both to
-            // decimal strings — the hot path the scoreboard flagged.
-            return self.coeff.abs().cmp(&other.coeff.abs());
+            // Equal scale: |a·10^e| vs |b·10^e| is |a| vs |b| — a direct coefficient compare.
+            return by_mag(&self.coeff, &other.coeff);
         }
         // Adjusted exponent = position of the most-significant digit = (digit count - 1) + exp, computed
         // from an exact base-10 digit count with no rendering. In i128 so a near-`i64::MAX` exponent
-        // cannot overflow the addition.
+        // cannot overflow the addition. This is a pure magnitude comparison (larger adjusted exponent =
+        // larger magnitude), independent of the shared sign.
         let adj_a = self.coeff.decimal_digit_count() as i128 - 1 + self.exp as i128;
         let adj_b = other.coeff.decimal_digit_count() as i128 - 1 + other.exp as i128;
         if adj_a != adj_b {
             return adj_a.cmp(&adj_b);
         }
-        // Same order of magnitude: scale both magnitudes to the smaller exponent and compare the `Big`
-        // values. The scale gap equals the digit-count difference (that is why the adjusted exponents
-        // tied), so the power of ten stays proportional to the operands — never a runaway.
+        // Same order of magnitude: scale both to the smaller exponent and compare. The scale gap equals
+        // the digit-count difference (that is why the adjusted exponents tied), so the power of ten stays
+        // proportional to the operands — never a runaway.
         let e = self.exp.min(other.exp);
-        let a = scale_pow10(&self.coeff.abs(), (self.exp - e) as u64);
-        let b = scale_pow10(&other.coeff.abs(), (other.exp - e) as u64);
-        a.cmp(&b)
+        let a = scale_pow10(&self.coeff, (self.exp - e) as u64);
+        let b = scale_pow10(&other.coeff, (other.exp - e) as u64);
+        by_mag(&a, &b)
     }
 
     /// Write the canonical decimal rendering directly into a [`core::fmt::Write`] sink — the

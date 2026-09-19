@@ -75,15 +75,18 @@ of the operand — no intermediate negated value is allocated.
 | 2048b | 19.23 µs  | 25.11 µs  | **0.77** |
 | 4096b | 47.43 µs  | 59.78 µs  | **0.79** |
 
-### `cmp` — three-way ordering, equal exponents (`Big::cmp` fast path)
+### `cmp` — three-way ordering, equal exponents (`Big::cmp`, no `abs` clone)
+
+A signed `Big` compare stands in for the magnitude compare (the operands share a sign, so flip for
+negatives) — no `abs()` coefficient clone. Flat ~6 ns at every width, near parity with `bigdecimal`.
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 25.14 ns | 5.48 ns | 4.59 |
-| 256b  | 25.09 ns | 5.48 ns | 4.58 |
-| 1024b | 27.29 ns | 5.49 ns | 4.97 |
-| 2048b | 31.86 ns | 5.47 ns | 5.82 |
-| 4096b | 40.30 ns | 5.48 ns | 7.36 |
+| 64b   | 6.21 ns | 5.48 ns | 1.13 |
+| 256b  | 6.22 ns | 5.48 ns | 1.13 |
+| 1024b | 6.24 ns | 5.54 ns | 1.13 |
+| 2048b | 6.27 ns | 5.53 ns | 1.13 |
+| 4096b | 6.24 ns | 5.55 ns | 1.12 |
 
 ### `cmp_uneq` — three-way ordering, unequal exponents (adjusted-exponent digit-count compare)
 
@@ -111,6 +114,12 @@ itself `O(magnitude)` — that residual is now inside the digit-count primitive,
 | 2048b | 8.707 µs  | 8.976 µs  | 0.97 |
 | 4096b | 22.31 µs  | 21.09 µs  | 1.06 |
 
+Small value (`12345678.9012345`, 15 digits — the common decimal-literal case):
+
+| case | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 15 digits | 167.06 ns | 145.54 ns | 1.15 |
+
 ### `from_str` — parse a decimal literal — we win at scale
 
 The coefficient is now assembled by grouping the parsed digits into 19-digit base-`10¹⁹` limbs and calling
@@ -125,6 +134,13 @@ gap into a win from 1024b up.
 | 1024b | 5.480 µs  | 1.065 µs  | 1.112 µs  | **0.96** |
 | 2048b | 12.32 µs  | 2.060 µs  | 2.465 µs  | **0.84** |
 | 4096b | 31.90 µs  | 4.820 µs  | 6.127 µs  | **0.79** |
+
+Small value (`12345678.9012345`, 15 digits): already at parity — the single-limb Horner absorb needs no
+extra fast path.
+
+| case | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 15 digits | 139.93 ns | 138.39 ns | 1.01 |
 
 ### `neg` — negate
 
@@ -213,12 +229,12 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   add/mul cost, which is `etude-bigint`'s to shave. `sub` now subtracts coefficients directly (`Big::sub`)
   instead of `add(neg)`, so no negated clone is allocated — it edges below `add` at large tiers because a
   difference of same-magnitude operands can cancel to a shorter result.
-- **`cmp`** (equal exponents) is a flat ~25–40 ns via the direct coefficient compare; the residual ~4–7×
-  over `bigdecimal`'s cached-length ~6 ns is the two `abs()` clones. The **`cmp_uneq`** (unequal exponent)
-  path now compares adjusted exponents with an exact `Big::decimal_digit_count` — allocation-free, no
-  decimal render — and only scales on a tie; it wins at 64b but trails at large tiers because the
-  digit-count of a multi-limb magnitude is itself `O(magnitude)` (that residual is now inside the
-  digit-count primitive, no longer a string allocation).
+- **`cmp`** (equal exponents) is a flat ~6 ns at every width — near parity with `bigdecimal` — now that
+  the magnitude compare is a signed `Big` compare with no `abs()` clone. The **`cmp_uneq`** (unequal
+  exponent) path compares adjusted exponents with an exact `Big::decimal_digit_count` (allocation-free, no
+  render) and only scales on a tie; it wins at 64b but trails at large tiers because the digit-count of a
+  multi-limb magnitude is itself `O(magnitude)` (that residual is inside the digit-count primitive, not a
+  string allocation).
 - **`from_str` now wins from 1024b up** after adopting `etude-bigint`'s `from_base_10_pow_k_limbs`
   (base-`10¹⁹` Horner absorb). **`to_string`** still trails on the reverse conversion; it improves once we
   adopt `Big::write_decimal` for the coefficient digits (a requested follow-up already landed on the
@@ -232,10 +248,10 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
 
 ## Next optimizations (ranked by scoreboard leverage)
 
-1. **`to_string`** — adopt `Big::write_decimal` for the coefficient digits (drop the intermediate
-   `to_decimal_string` allocation) to match `bigdecimal` at the small tiers.
-2. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) for the equal-exponent path;
-   and, for `cmp_uneq` at large tiers, a cheaper adjusted-exponent decision than a full digit count (or a
-   faster multi-limb `decimal_digit_count` on the `etude-bigint` side).
-3. **`from_str` / `to_string` small-value fast paths** — mirror the `to_f64` small-value win for the
-   common decimal-literal case (a coefficient that fits a `u64`).
+1. **`to_string`** — write the coefficient digits straight into the sink via `Big::write_decimal` for the
+   contiguous forms (integer, scientific), dropping the intermediate `to_decimal_string` allocation; the
+   point-insertion forms need a split-and-write to stay allocation-free.
+2. **`cmp_uneq` at large tiers** — a cheaper adjusted-exponent decision than a full multi-limb digit
+   count (or a faster `decimal_digit_count` on the `etude-bigint` side).
+3. **`sub` / `mul` large tiers** — bottlenecked on the underlying `Big` subtract/multiply
+   (`etude-bigint`'s to shave).
