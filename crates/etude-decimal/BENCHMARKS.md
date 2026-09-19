@@ -75,15 +75,31 @@ of the operand — no intermediate negated value is allocated.
 | 2048b | 19.23 µs  | 25.11 µs  | **0.77** |
 | 4096b | 47.43 µs  | 59.78 µs  | **0.79** |
 
-### `cmp` — three-way ordering (equal-exponent `Big::cmp` fast path)
+### `cmp` — three-way ordering, equal exponents (`Big::cmp` fast path)
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 24.71 ns | 5.63 ns | 4.39 |
-| 256b  | 24.18 ns | 5.62 ns | 4.30 |
-| 1024b | 25.91 ns | 5.61 ns | 4.62 |
-| 2048b | 30.77 ns | 5.67 ns | 5.43 |
-| 4096b | 39.43 ns | 5.78 ns | 6.82 |
+| 64b   | 25.14 ns | 5.48 ns | 4.59 |
+| 256b  | 25.09 ns | 5.48 ns | 4.58 |
+| 1024b | 27.29 ns | 5.49 ns | 4.97 |
+| 2048b | 31.86 ns | 5.47 ns | 5.82 |
+| 4096b | 40.30 ns | 5.48 ns | 7.36 |
+
+### `cmp_uneq` — three-way ordering, unequal exponents (adjusted-exponent digit-count compare)
+
+The unequal-exponent path compares adjusted exponents `(digit count - 1) + exp` using an exact
+`Big::decimal_digit_count` (no rendering), and only scales when they tie. This drops the two decimal
+strings the old path rendered just to count digits. It wins at 64b (single-limb `ilog10`); at larger
+tiers it trails `bigdecimal`'s flat ~6 ns because `decimal_digit_count` of a multi-limb magnitude is
+itself `O(magnitude)` — that residual is now inside the digit-count primitive, not a string allocation.
+
+| tier | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 64b   | 16.01 ns  | 5.85 ns | 2.73 |
+| 256b  | 391.98 ns | 5.85 ns | 67.0 |
+| 1024b | 887.32 ns | 5.86 ns | 151 |
+| 2048b | 1.985 µs  | 5.84 ns | 340 |
+| 4096b | 5.364 µs  | 5.85 ns | 917 |
 
 ### `to_string` — render to a decimal literal
 
@@ -197,10 +213,12 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   add/mul cost, which is `etude-bigint`'s to shave. `sub` now subtracts coefficients directly (`Big::sub`)
   instead of `add(neg)`, so no negated clone is allocated — it edges below `add` at large tiers because a
   difference of same-magnitude operands can cancel to a shorter result.
-- **`cmp`** is a flat ~24–40 ns via the equal-exponent coefficient compare; the residual ~4–7× over
-  `bigdecimal`'s cached-length ~6 ns is the two `abs()` clones plus the unequal-exponent path (which still
-  renders decimal strings). A magnitude-only `Big` compare and an exact `decimal_digit_count()` (requested
-  from `etude-bigint`) would close it.
+- **`cmp`** (equal exponents) is a flat ~25–40 ns via the direct coefficient compare; the residual ~4–7×
+  over `bigdecimal`'s cached-length ~6 ns is the two `abs()` clones. The **`cmp_uneq`** (unequal exponent)
+  path now compares adjusted exponents with an exact `Big::decimal_digit_count` — allocation-free, no
+  decimal render — and only scales on a tie; it wins at 64b but trails at large tiers because the
+  digit-count of a multi-limb magnitude is itself `O(magnitude)` (that residual is now inside the
+  digit-count primitive, no longer a string allocation).
 - **`from_str` now wins from 1024b up** after adopting `etude-bigint`'s `from_base_10_pow_k_limbs`
   (base-`10¹⁹` Horner absorb). **`to_string`** still trails on the reverse conversion; it improves once we
   adopt `Big::write_decimal` for the coefficient digits (a requested follow-up already landed on the
@@ -216,7 +234,8 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
 
 1. **`to_string`** — adopt `Big::write_decimal` for the coefficient digits (drop the intermediate
    `to_decimal_string` allocation) to match `bigdecimal` at the small tiers.
-2. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) and an exact
-   `decimal_digit_count()` so the unequal-exponent path drops its decimal-string render.
+2. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) for the equal-exponent path;
+   and, for `cmp_uneq` at large tiers, a cheaper adjusted-exponent decision than a full digit count (or a
+   faster multi-limb `decimal_digit_count` on the `etude-bigint` side).
 3. **`from_str` / `to_string` small-value fast paths** — mirror the `to_f64` small-value win for the
    common decimal-literal case (a coefficient that fits a `u64`).

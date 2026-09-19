@@ -204,14 +204,36 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
-    // Exact comparison (equal-exponent coefficient-compare fast path; unequal exponents fall back to an
-    // aligned digit-string compare) vs bigdecimal's cmp.
+    // Exact comparison, equal exponents (the same-scale fast path: a direct `Big` coefficient compare)
+    // vs bigdecimal's cmp.
     {
         let mut g = group(c, "cmp");
         for &(label, nbytes) in TIERS {
             let mut rng = Rng(0x1234_5678 ^ (nbytes as u64));
             let a = rng.dec(nbytes);
             let b = rng.dec(nbytes);
+            let (ra, rb) = (to_ref(&a), to_ref(&b));
+            g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
+                be.iter(|| black_box(a.cmp(black_box(b))))
+            });
+            g.bench_with_input(
+                BenchmarkId::new("bigdecimal", label),
+                &(&ra, &rb),
+                |be, (a, b)| be.iter(|| black_box(a.cmp(black_box(b)))),
+            );
+        }
+        g.finish();
+    }
+
+    // Exact comparison, unequal exponents (the adjusted-exponent path: an exact digit-count compare via
+    // `Big::decimal_digit_count`, no rendering) vs bigdecimal's cmp. Operands share a width but differ in
+    // scale, so their order of magnitude is decided allocation-free without a scale-and-compare.
+    {
+        let mut g = group(c, "cmp_uneq");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0xc3d2_e1f0 ^ (nbytes as u64));
+            let a = Decimal::new(rng.big(nbytes), -12);
+            let b = Decimal::new(rng.big(nbytes), 6); // different scale → unequal-exponent path
             let (ra, rb) = (to_ref(&a), to_ref(&b));
             g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
                 be.iter(|| black_box(a.cmp(black_box(b))))
