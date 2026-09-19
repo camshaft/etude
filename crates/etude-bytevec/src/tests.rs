@@ -84,6 +84,44 @@ fn utf8_bytes_roundtrip_is_lossless() {
     );
 }
 
+/// `from_bytes_unchecked` is the O(1) unchecked twin of `try_from_bytes`: on valid input it yields a
+/// rope with byte-identical content and unchanged chunk structure (a free by-move re-wrap, no scan),
+/// including a codepoint split across a chunk boundary — the same whole-content invariant, vouched
+/// for by the caller rather than scanned.
+#[test]
+fn utf8_from_bytes_unchecked_matches_try_from_bytes_on_valid_input() {
+    // "é" = 0xC3 0xA9 split so each chunk alone is invalid UTF-8; the concatenation "aéb" is valid.
+    let bytes: ByteVec = [chunk(b"a"), chunk(&[0xC3]), chunk(&[0xA9]), chunk(b"b")]
+        .into_iter()
+        .collect();
+    let expected = bytes.copy_to_bytes();
+    let chunk_count = bytes.chunks().count();
+    let checked = Rope::<Utf8>::try_from_bytes(bytes.clone()).expect("aéb is valid UTF-8");
+    // SAFETY: `bytes` is "aéb", valid UTF-8 — confirmed by the successful `try_from_bytes` above.
+    let unchecked = unsafe { Rope::<Utf8>::from_bytes_unchecked(bytes) };
+    assert_eq!(unchecked.len(), checked.len());
+    assert_eq!(unchecked.chunks().count(), chunk_count, "no re-chunking");
+    assert_eq!(
+        unchecked.into_bytes().copy_to_bytes(),
+        expected,
+        "unchecked wrap preserves the exact content"
+    );
+}
+
+/// The debug-only guard fires when the Safety contract is violated, so a caller bug surfaces as a
+/// panic in debug/test builds rather than a silently-unsound rope. Gated on `debug_assertions` so it
+/// is only compiled when that guard is active (a release-mode test run would not panic).
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "not valid UTF-8")]
+fn utf8_from_bytes_unchecked_debug_asserts_on_invalid() {
+    // 0xC3 not followed by a continuation byte — genuinely malformed.
+    let bad: ByteVec = [chunk(&[0xC3, 0x28])].into_iter().collect();
+    // SAFETY: deliberately violating the contract to exercise the debug-only guard; the returned
+    // value is never used (the debug_assert panics first), so no undefined behavior is reached.
+    let _ = unsafe { Rope::<Utf8>::from_bytes_unchecked(bad) };
+}
+
 /// The caller-trusted `Rope<Utf8>` mutators build content correctly against a `String` model,
 /// including `insert_bytes` at the front, an interior boundary, and the end.
 #[test]
