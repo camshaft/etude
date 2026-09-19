@@ -53,6 +53,40 @@ fn rope_chunked(bytes: &[u8], chunk: usize) -> ByteVec {
     r
 }
 
+/// Drives the whole parse but retains nothing — used to assert the adapter never panics on arbitrary
+/// input (it must always return `Ok`/`Err`, never unwind).
+struct NoopVisitor;
+
+impl Visitor for NoopVisitor {
+    type Value = ();
+
+    fn visit_null(self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn visit_bool(self, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
+    fn visit_str(self, _: RopeStr) -> Result<(), Error> {
+        Ok(())
+    }
+    fn visit_bytes(self, _: RopeBytes) -> Result<(), Error> {
+        Ok(())
+    }
+    fn visit_number(self, _: NumberToken) -> Result<(), Error> {
+        Ok(())
+    }
+    fn visit_seq<A: SeqAccess>(self, mut seq: A) -> Result<(), Error> {
+        while seq.next_element(NoopVisitor)?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: MapAccess>(self, mut map: A) -> Result<(), Error> {
+        while map.next_key(NoopVisitor)?.is_some() {
+            map.next_value(NoopVisitor)?;
+        }
+        Ok(())
+    }
+}
+
 /// Decodes a single JSON string value to its `String`, erroring on any other shape.
 struct StringVisitor;
 
@@ -148,6 +182,21 @@ fn adapter_matches_serde_json_on_backslash_free_input() {
                     shown()
                 )
             }
+        }
+    });
+}
+
+#[test]
+fn adapter_never_panics_on_arbitrary_bytes() {
+    use bolero::check;
+
+    // Robustness: on ARBITRARY bytes (invalid UTF-8, raw control bytes, anything) the adapter must
+    // always return Ok/Err and never panic — a Deserializer that unwinds on malformed input is a DoS
+    // bug. This is the fuzz that would have caught the from_utf8 `.expect` panic; it also probes across
+    // rope-chunk boundaries. No serde comparison — the property is purely "does not panic".
+    check!().with_type::<Vec<u8>>().for_each(|raw| {
+        for chunk in [1usize, raw.len().max(1)] {
+            let _ = from_rope(&rope_chunked(raw, chunk), NoopVisitor);
         }
     });
 }
