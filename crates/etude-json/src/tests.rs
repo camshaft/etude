@@ -521,6 +521,52 @@ fn tokenizer_never_panics_on_arbitrary_bytes() {
     });
 }
 
+/// The Strict-mode soundness contract, fuzzed in the accept-then-inspect direction.
+///
+/// `tokenizer_never_panics_on_arbitrary_bytes` fuzzes the *accept-superset* direction (whatever
+/// serde_json accepts, the tokenizer must accept). This fuzzes the converse safety guarantee the
+/// docs make in the other direction: a Strict tokenizer promises that every `String` token it
+/// *produces* has a content span (`Token::string_span`) that is valid UTF-8, which is what makes an
+/// escape-free string readable with an unchecked O(1) conversion (see `Strictness::Strict` and
+/// `Token::string_span`). Nothing else asserts this over fuzzed input — the deterministic tables
+/// pick specific malformed sequences, but a boundary-carry false-accept in the incremental
+/// `Utf8Check` (a truncated or overlong sequence straddling a rope-leaf boundary that slips through
+/// as an accepted token) would leave an invalid-UTF-8 span behind and be caught by nothing.
+///
+/// For arbitrary bytes across several rope-chunk layouts (small chunks force every multi-byte char
+/// to straddle a leaf boundary, exercising the incremental carry), whenever Strict accepts, every
+/// resulting `String` token's content span must pass `core::str::from_utf8` — the literal portions
+/// are Strict-validated UTF-8 and any escape sequences are ASCII, so the raw span is valid UTF-8
+/// with or without escapes. A violation is a soundness bug: it makes `from_utf8_unchecked` on that
+/// span undefined behavior.
+#[test]
+fn strict_string_token_spans_are_valid_utf8() {
+    use bolero::check;
+
+    check!().with_type::<Vec<u8>>().cloned().for_each(|bytes| {
+        for chunk in [1usize, 2, 7, bytes.len().max(1)] {
+            let r = rope(&bytes, chunk);
+            let Ok(tokens) = Tokenizer::new(&r).collect::<Result<Vec<_>, _>>() else {
+                // Strict rejected this input; the guarantee only covers what it accepts.
+                continue;
+            };
+            for t in &tokens {
+                if t.kind() != TokenKind::String {
+                    continue;
+                }
+                let span = t.string_span().expect("a String token has a content span");
+                let content = span_bytes(&r, span);
+                assert!(
+                    core::str::from_utf8(&content).is_ok(),
+                    "Strict accepted a String whose content span is not valid UTF-8 \
+                     (has_escapes={:?}) at chunk={chunk}: span={content:?} input={bytes:?}",
+                    t.string_has_escapes(),
+                );
+            }
+        }
+    });
+}
+
 #[test]
 fn differential_arbitrary_input() {
     use bolero::check;
