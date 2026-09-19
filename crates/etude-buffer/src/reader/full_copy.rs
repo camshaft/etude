@@ -11,6 +11,8 @@ use crate::{
 pub struct FullCopy<'a, S: Buffer + ?Sized>(&'a mut S);
 
 impl<'a, S: Buffer + ?Sized> FullCopy<'a, S> {
+    /// Wraps `storage` so `partial_copy_into` performs a full copy. Prefer
+    /// [`Buffer::full_copy`](crate::reader::Buffer::full_copy).
     #[inline]
     pub fn new(storage: &'a mut S) -> Self {
         Self(storage)

@@ -3,12 +3,18 @@
 
 use crate::{reader::Buffer, writer};
 
+/// A reader wrapper that counts the bytes read through it.
+///
+/// Construct via [`Buffer::track_read`](crate::reader::Buffer::track_read). Reads delegate to the
+/// wrapped reader; [`consumed_len`](Tracked::consumed_len) reports the running total.
 pub struct Tracked<'a, S: Buffer + ?Sized> {
     consumed: usize,
     storage: &'a mut S,
 }
 
 impl<'a, S: Buffer + ?Sized> Tracked<'a, S> {
+    /// Wraps `storage` to count bytes read through it. Prefer
+    /// [`Buffer::track_read`](crate::reader::Buffer::track_read).
     #[inline]
     pub fn new(storage: &'a mut S) -> Self {
         Self {
@@ -17,6 +23,7 @@ impl<'a, S: Buffer + ?Sized> Tracked<'a, S> {
         }
     }
 
+    /// Returns the number of bytes read through this wrapper so far.
     #[inline]
     pub fn consumed_len(&self) -> usize {
         self.consumed

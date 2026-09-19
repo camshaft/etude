@@ -1,13 +1,18 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+/// An error from a buffer operation.
+///
+/// The `E` parameter is the wrapped source error; it defaults to [`core::convert::Infallible`]
+/// for operations whose only failures are the buffer-level [`OutOfRange`](Error::OutOfRange) /
+/// [`InvalidFin`](Error::InvalidFin) variants.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Error<E = core::convert::Infallible> {
-    /// An invalid data range was provided
+    /// A write extended past the buffer's maximum offset.
     OutOfRange,
-    /// The provided final size was invalid for the buffer's state
+    /// A final offset was set that conflicts with the buffer's current state.
     InvalidFin,
-    /// The provided reader failed
+    /// The wrapped reader failed; carries its error.
     ReaderError(E),
 }
 

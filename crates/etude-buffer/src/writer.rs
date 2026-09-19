@@ -1,6 +1,15 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The write side: destinations that accept bytes as slices or owned chunks.
+//!
+//! [`Buffer`] is the writer trait. A destination accepts bytes up to its remaining capacity, by
+//! borrowed slice or by owned [`Bytes`]/[`BytesMut`]. A destination that can adopt an owned chunk
+//! without copying advertises that through [`SPECIALIZES_BYTES`](Buffer::SPECIALIZES_BYTES) /
+//! [`SPECIALIZES_BYTES_MUT`](Buffer::SPECIALIZES_BYTES_MUT), so a reader can hand it a chunk
+//! instead of a slice. The adapters ([`Limit`], [`Tracked`], [`WriteOnce`], [`BufMut`], …) wrap a
+//! destination to bound, count, or bridge it to a `bytes::BufMut`.
+
 use crate::reader::Chunk;
 use bytes::{Bytes, BytesMut};
 
@@ -22,20 +31,35 @@ pub use limit::Limit;
 pub use tracked::Tracked;
 pub use write_once::WriteOnce;
 
-/// An implementation that accepts concrete types of chunked writes
+/// A byte destination that accepts writes as slices or owned chunks.
+///
+/// A writer reports its remaining capacity and accepts bytes into it. Some destinations can adopt
+/// an owned [`Bytes`]/[`BytesMut`] chunk without copying (a refcount move); those set
+/// [`SPECIALIZES_BYTES`](Buffer::SPECIALIZES_BYTES) /
+/// [`SPECIALIZES_BYTES_MUT`](Buffer::SPECIALIZES_BYTES_MUT) so a producer can choose the
+/// copy-free path over [`put_slice`](Buffer::put_slice).
 pub trait Buffer {
+    /// `true` if [`put_bytes`](Buffer::put_bytes) can adopt an owned [`Bytes`] without copying.
+    /// When `false`, copying a slice is typically cheaper than handing over a [`Bytes`].
     const SPECIALIZES_BYTES: bool = false;
+    /// `true` if [`put_bytes_mut`](Buffer::put_bytes_mut) can adopt an owned [`BytesMut`] without
+    /// copying. When `false`, copying a slice is typically cheaper.
     const SPECIALIZES_BYTES_MUT: bool = false;
 
-    /// Writes a slice of bytes into the storage
+    /// Writes `bytes` into the destination.
     ///
-    /// The bytes MUST always be less than `remaining_capacity`.
+    /// `bytes.len()` MUST NOT exceed [`remaining_capacity`](Buffer::remaining_capacity).
     fn put_slice(&mut self, bytes: &[u8]);
 
-    /// Tries to write into a uninit slice for the current storage
+    /// Writes `payload_len` bytes directly into the destination's uninitialized memory via `f`,
+    /// avoiding a staging copy.
     ///
-    /// If `false` is returned, the storage wasn't capable of this operation and a regular `put_*`
-    /// call should be used instead.
+    /// Returns `true` if the write happened. `false` means the destination cannot serve an
+    /// uninitialized slice of that length (e.g. its next chunk is too small); fall back to a
+    /// regular `put_*` call.
+    ///
+    /// # Errors
+    /// Returns any error `f` produces while filling the slice.
     #[inline(always)]
     fn put_uninit_slice<F, Error>(&mut self, payload_len: usize, f: F) -> Result<bool, Error>
     where

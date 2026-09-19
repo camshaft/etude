@@ -12,6 +12,7 @@
 //! layers that on top downstream.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
+#![deny(missing_docs)]
 
 extern crate alloc;
 

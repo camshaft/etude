@@ -29,6 +29,12 @@ const DATA_LEN: usize = (DEFAULT_STREAM_LEN as usize) * if cfg!(miri) { 1 } else
 const DEFAULT_STREAM_LEN: u64 = if cfg!(miri) { DATA_MOD as _ } else { 1024 };
 const DATA_MOD: usize = 256; // Only the first 256 offsets of DATA are unique
 
+/// A deterministic byte-stream model for send/receive tests.
+///
+/// The stream's bytes are a fixed, position-derived pattern, so a receiver can verify what it got
+/// against the offset it got it at without carrying an expected copy. `Data` acts as both a
+/// reader (producing the pattern via [`send`](Data::send)) and a writer (checking received bytes
+/// via [`receive`](Data::receive)), and tracks the current offset and the stream's end.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Data {
     offset: u64,
@@ -72,6 +78,7 @@ impl Data {
     /// The maximum length of a chunk of data for the stream
     pub const MAX_CHUNK_LEN: usize = DATA_LEN;
 
+    /// Creates a stream of `len` bytes starting at offset 0, with its end at `len`.
     pub const fn new(len: u64) -> Self {
         Self {
             buffered_len: len,
@@ -164,6 +171,9 @@ impl Data {
         Some(chunk)
     }
 
+    /// Returns up to `amount` bytes of the stream pattern starting at `offset`, without advancing
+    /// any state. The result may be shorter than `amount` at a pattern boundary, and empty if
+    /// `amount` is 0.
     pub fn send_one_at(offset: u64, amount: usize) -> Bytes {
         let offset = (offset % DATA_MOD as u64) as usize;
         let to_send = amount.min(DATA.len() - offset);

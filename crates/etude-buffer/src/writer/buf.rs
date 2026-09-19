@@ -9,6 +9,8 @@ pub struct BufMut<'a, T: bytes::BufMut> {
 }
 
 impl<'a, T: bytes::BufMut> BufMut<'a, T> {
+    /// Wraps a mutable [`bytes::BufMut`] as a writer [`Buffer`]. Writes are forwarded to
+    /// `buf_mut`.
     #[inline]
     pub fn new(buf_mut: &'a mut T) -> Self {
         Self { buf_mut }

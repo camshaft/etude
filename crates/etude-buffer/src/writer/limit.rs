@@ -11,6 +11,9 @@ pub struct Limit<'a, S: Buffer + ?Sized> {
 }
 
 impl<'a, S: Buffer + ?Sized> Limit<'a, S> {
+    /// Wraps `storage`, capping its writable capacity at `remaining_capacity` (or the storage's
+    /// own capacity, whichever is smaller). Prefer
+    /// [`Buffer::with_write_limit`](crate::writer::Buffer::with_write_limit).
     #[inline]
     pub fn new(storage: &'a mut S, remaining_capacity: usize) -> Self {
         let remaining_capacity = storage.remaining_capacity().min(remaining_capacity);

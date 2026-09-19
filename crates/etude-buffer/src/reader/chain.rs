@@ -17,6 +17,7 @@ where
     A: Buffer<Error = core::convert::Infallible>,
     B: Buffer<Error = core::convert::Infallible>,
 {
+    /// Chains two readers, draining `a` fully before `b`.
     #[inline]
     pub fn new(a: A, b: B) -> Self {
         Self { a, b }
