@@ -13,14 +13,14 @@
 
 use super::*;
 use bytes::Bytes;
-use etude_byterope::ByteRope;
+use etude_bytevec::ByteVec;
 
 // ─── rope construction ──────────────────────────────────────────────────────────────────────────
 
 /// Build a rope holding `bytes`, split into chunks of at most `chunk` bytes. Small `chunk` values
 /// force tokens to straddle rope-leaf boundaries, exercising the copy-avoiding byte-offset scan.
-fn rope(bytes: &[u8], chunk: usize) -> ByteRope {
-    let mut r = ByteRope::new();
+fn rope(bytes: &[u8], chunk: usize) -> ByteVec {
+    let mut r = ByteVec::new();
     let chunk = chunk.max(1);
     let mut i = 0;
     while i < bytes.len() {
@@ -38,7 +38,7 @@ fn tokenize_all(bytes: &[u8]) -> Result<Vec<Token>, Error> {
 }
 
 /// The bytes of `span` read back out of `input`.
-fn span_bytes(input: &ByteRope, span: Span) -> Vec<u8> {
+fn span_bytes(input: &ByteVec, span: Span) -> Vec<u8> {
     (span.start()..span.end())
         .map(|i| input.byte_at(i).unwrap())
         .collect()
@@ -90,7 +90,7 @@ fn expected(v: &serde_json::Value, out: &mut Vec<Expect>) {
 }
 
 /// The normalized expectation for the tokens the tokenizer actually produced.
-fn actual(tokens: &[Token], input: &ByteRope) -> Vec<Expect> {
+fn actual(tokens: &[Token], input: &ByteVec) -> Vec<Expect> {
     tokens
         .iter()
         .map(|t| match t.kind() {
@@ -141,7 +141,7 @@ fn check_valid(bytes: &[u8]) {
 
 /// A structural fingerprint of a token stream: each token's kind, span, and (for strings) decoded
 /// content. Two ropes holding the same bytes must yield identical fingerprints regardless of chunking.
-fn token_repr(toks: &[Token], input: &ByteRope) -> Vec<(TokenKind, usize, usize, Option<String>)> {
+fn token_repr(toks: &[Token], input: &ByteVec) -> Vec<(TokenKind, usize, usize, Option<String>)> {
     toks.iter()
         .map(|t| {
             let decoded = if t.kind() == TokenKind::String {
