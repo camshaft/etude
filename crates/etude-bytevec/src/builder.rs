@@ -44,6 +44,7 @@ impl Default for Builder {
 }
 
 impl Builder {
+    /// The head-buffer capacity used by [`Builder::default`] (128 KiB).
     pub const DEFAULT_CAPACITY: usize = DEFAULT_CAPACITY;
 
     /// Creates a new [`Builder`] with the specified capacity for the head buffer.

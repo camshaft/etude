@@ -1,12 +1,29 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Accounting wrapper that tracks the bytes held by a [`ByteVec`] against an owner.
+//!
+//! Wrapping a [`ByteVec`] in [`Tagged`] reports its length to an [`Owner`] and keeps that count in
+//! step as the buffer grows and shrinks — useful for bounding or observing total buffered bytes
+//! across many buffers. The count follows the bytes: a clone of a `Tagged` adds its length again
+//! (the bytes are now referenced twice), and dropping one subtracts it.
+//!
+//! Implement [`Owner`]/[`Handle`] for a bespoke sink, or use [`crate::static_bytevec_tag`] to
+//! generate a zero-sized owner backed by a process-wide atomic counter.
+
 use bytes::Bytes;
 
 use super::{ByteVec, ByteVecError};
 use core::fmt;
 use std::ops;
 
+/// Generates a zero-sized [`Owner`] (`Tag`) and its [`Handle`] backed by a process-wide
+/// [`AtomicU64`](core::sync::atomic::AtomicU64) counter of outstanding tagged bytes.
+///
+/// The counter rises as bytes are tagged or pushed and falls as tagged buffers shrink or drop;
+/// read the current total with `Tag::current()`. Invoke inside a module so the generated `Tag`,
+/// `Handle`, and counter are scoped to it. The no-argument form additionally defines
+/// `pub type ByteVec = Tagged<Tag>` for that module.
 #[macro_export]
 macro_rules! static_bytevec_tag {
     () => {
@@ -67,17 +84,32 @@ macro_rules! static_bytevec_tag {
     };
 }
 
+/// A sink that accounts for tagged bytes, producing a [`Handle`] per tagged buffer.
 pub trait Owner: 'static + fmt::Debug {
+    /// The per-buffer handle this owner hands out; its lifetime tracks the buffer's bytes.
     type Handle: Handle;
 
+    /// Records `len` bytes as tagged and returns a handle that will keep the owner's count in
+    /// step as the buffer changes and until the handle is dropped.
     fn tag(&self, len: usize) -> Self::Handle;
 }
 
+/// The per-buffer accounting handle produced by an [`Owner`].
+///
+/// It represents `len` bytes currently charged to the owner; the wrapping [`Tagged`] calls
+/// [`increment`](Handle::increment) / [`decrement`](Handle::decrement) as its buffer grows and
+/// shrinks. A `Clone` charges the same bytes again; a `Drop` releases them.
 pub trait Handle: 'static + fmt::Debug + Clone + Sized {
+    /// Charges an additional `len` bytes to the owner.
     fn increment(&mut self, len: usize);
+    /// Releases `len` bytes back to the owner.
     fn decrement(&mut self, len: usize);
 }
 
+/// A [`ByteVec`] whose length is accounted against an [`Owner`].
+///
+/// Derefs to the inner [`ByteVec`] for read-only access; the mutating methods here keep the
+/// owner's count in step. Convert back with [`untag`](Tagged::untag) to stop accounting.
 #[derive(Debug)]
 pub struct Tagged<O: Owner> {
     bytes: ByteVec,
@@ -86,6 +118,7 @@ pub struct Tagged<O: Owner> {
 }
 
 impl<O: Owner> Tagged<O> {
+    /// Wraps `bytes`, charging its current length to `owner`.
     #[inline]
     #[track_caller]
     pub fn new(bytes: ByteVec, owner: &O) -> Self {
@@ -94,27 +127,38 @@ impl<O: Owner> Tagged<O> {
         Self { bytes, tag }
     }
 
+    /// Appends a chunk, charging its length to the owner.
     pub fn push_back(&mut self, bytes: Bytes) {
         self.tag.increment(bytes.len());
         self.bytes.push_back(bytes);
     }
 
+    /// Moves all of `other` onto the end of this buffer, charging its length to the owner and
+    /// leaving `other` empty.
     pub fn append(&mut self, other: &mut ByteVec) {
         self.tag.increment(other.len());
         self.bytes.append(other);
     }
 
+    /// Splits off the first `at` bytes, releasing them from the owner's count and returning them
+    /// as a plain (untagged) [`ByteVec`].
+    ///
+    /// # Errors
+    /// Returns [`ByteVecError::OutOfBounds`] if `at` exceeds the buffer's length.
     pub fn split_to(&mut self, at: usize) -> Result<ByteVec, ByteVecError> {
         let chunk = self.bytes.split_to(at)?;
         self.tag.decrement(chunk.len());
         Ok(chunk)
     }
 
+    /// Consumes the wrapper, returning the inner [`ByteVec`] and releasing its bytes from the
+    /// owner's count.
     #[inline]
     pub fn untag(self) -> ByteVec {
         self.bytes
     }
 
+    /// Clones the inner [`ByteVec`] out without accounting for the copy against the owner.
     #[inline]
     pub fn untag_clone(&self) -> ByteVec {
         self.bytes.clone()
