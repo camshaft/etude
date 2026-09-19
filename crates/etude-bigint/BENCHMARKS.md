@@ -31,7 +31,7 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | mul                       | 64b    | 21.6 ns   | 19.2 ns    | 1.12      |
 | mul                       | 256b   | 42.3 ns   | 52.8 ns    | **0.80**  |
 | mul                       | 1024b  | 390 ns    | 389 ns     | 1.00      |
-| mul                       | 4096b  | 6.19 µs   | 4.99 µs    | 1.24      |
+| mul                       | 4096b  | 5.14 µs   | 4.99 µs    | 1.03      |
 | divmod                    | 64b    | 48.9 ns   | 111 ns     | **0.44**  |
 | divmod                    | 256b   | 207 ns    | 392 ns     | **0.53**  |
 | divmod                    | 1024b  | 1.13 µs   | 2.09 µs    | **0.54**  |
@@ -87,21 +87,23 @@ canonical map-key encode+decode; num-bigint has no matching operation.)
   |--------|-----------------------|---------------|---------|---------------|
   | 256b   | 8.23 µs               | 4.09 µs       | 2.0×    | **0.87**      |
   | 1024b  | 59.5 µs               | 23.5 µs       | 2.5×    | 1.02          |
+- **Karatsuba multiply** above a 40-limb crossover (three half-size products via
+  `z1 = (a0+a1)(b0+b1) − z0 − z2`; recurses through the schoolbook base case): mul/4096b 6.19 µs → 5.14 µs
+  (1.24× → 1.03× num-bigint). Smaller tiers stay schoolbook (unchanged).
 
 ## Where the gaps remain (optimization order)
 
 1. **to_decimal_string — ~2.2–2.9×.** Now chunked; the residual is num-bigint's recursive/divide-and-
    conquer base conversion. A recursive split (halve by a power of ten) would close more.
-2. **mul at 4096b (1.24×).** Schoolbook O(n·m); Karatsuba above a crossover for the large tier.
-3. **sub (1.0–1.76×).** Routes through `add(neg())`, allocating an extra magnitude; a direct signed
+2. **sub (1.0–1.76×).** Routes through `add(neg())`, allocating an extra magnitude; a direct signed
    subtract removes that.
-4. **gcd at 1024b (1.02×).** Stein now matches num-bigint; a Lehmer gcd (word-sized transforms) would
-   pull ahead at the largest tiers.
+3. **mul at 4096b (1.03×) / gcd at 1024b (1.02×).** Both essentially at parity; num-bigint's edge at the
+   largest tiers is Toom-3 mul and a Lehmer gcd (word-sized transforms) — later slices.
 
 ## Roadmap
 
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-Karatsuba mul → direct signed sub → recursive to_decimal_string. num-bigint stays both
+direct signed sub → recursive to_decimal_string → (later) Toom-3 mul, Lehmer gcd. num-bigint stays both
 the correctness oracle and the perf yardstick.
 
 ## Target notes: wasm / 32-bit

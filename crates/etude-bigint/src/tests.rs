@@ -522,3 +522,38 @@ fn divmod_edge_cases_and_wide_operands() {
         assert!(r.is_zero(), "(k*d)%d == 0");
     }
 }
+
+/// Multiplication of WIDE operands vs num-bigint — the small random corpus never reaches the
+/// Karatsuba threshold (32 limbs), so this pins the schoolbook↔Karatsuba boundary (31/32/33 limbs),
+/// the recursive Karatsuba path (100/200 limbs split repeatedly), and unbalanced sizes (where the
+/// dispatch drops back to schoolbook). Both signs.
+#[test]
+fn mul_wide_operands_vs_num_bigint() {
+    let mut rng = Rng(0x51ee_7c0d_e1a5_9b3f);
+    // A `Big` with exactly `n` u64 limbs (top limb forced nonzero so the width is exact), random sign.
+    let mk = |rng: &mut Rng, n: usize| -> Big {
+        let mut mag: Vec<u64> = (0..n).map(|_| rng.next()).collect();
+        if let Some(top) = mag.last_mut() {
+            *top |= 0x8000_0000_0000_0000;
+        }
+        let mut b = Big {
+            neg: rng.next() & 1 == 1,
+            mag,
+        };
+        b.normalize();
+        b
+    };
+    // nb spans below-threshold (schoolbook dispatch) and >=threshold sizes both equal and unequal to
+    // na, so balanced AND unbalanced Karatsuba (and its recursion at 100/200) are all exercised.
+    for &na in &[39usize, 40, 41, 64, 65, 100, 200] {
+        for &nb in &[1usize, 39, 40, 64, na] {
+            let a = mk(&mut rng, na);
+            let b = mk(&mut rng, nb);
+            assert_eq!(
+                to_ref(&a.mul(&b)),
+                to_ref(&a) * to_ref(&b),
+                "mul {na}x{nb} limbs"
+            );
+        }
+    }
+}

@@ -132,36 +132,17 @@ impl Big {
         out
     }
 
-    /// `a * b` over magnitudes (O(n·m) schoolbook), returning a normalized magnitude. Each limb product
-    /// is a widening `u64 * u64 -> (high, low)` via [`wide_mul`], accumulated with `u64` carries — no
-    /// `u128` on the multiply path, so it is native on wasm (see [`wide_mul`]).
+    /// `a * b` over magnitudes, returning a normalized magnitude. Schoolbook O(n·m) below
+    /// [`KARATSUBA_THRESHOLD`] limbs; Karatsuba (O(n^1.585)) once both operands are at least that wide.
     fn mul_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
         if a.is_empty() || b.is_empty() {
             return Vec::new();
         }
-        let mut out = alloc::vec![0u64; a.len() + b.len()];
-        for (i, &av) in a.iter().enumerate() {
-            let mut carry = 0u64;
-            for (j, &bv) in b.iter().enumerate() {
-                let (hi, lo) = wide_mul(av, bv);
-                // out[i+j] += lo + carry; the two carry-outs and hi form the next carry (which the
-                // schoolbook invariant keeps < 2^64, so this add cannot overflow).
-                let (s1, c1) = out[i + j].overflowing_add(lo);
-                let (s2, c2) = s1.overflowing_add(carry);
-                out[i + j] = s2;
-                carry = hi + c1 as u64 + c2 as u64;
-            }
-            // Propagate the final carry into the next limb (and beyond, if it cascades).
-            let mut k = i + b.len();
-            while carry != 0 {
-                let (s, c) = out[k].overflowing_add(carry);
-                out[k] = s;
-                carry = c as u64;
-                k += 1;
-            }
+        if a.len().min(b.len()) < KARATSUBA_THRESHOLD {
+            mul_schoolbook(a, b)
+        } else {
+            mul_karatsuba(a, b)
         }
-        strip(&mut out);
-        out
     }
 
     // ─── signed arithmetic ────────────────────────────────────────────────────────────────────
@@ -704,6 +685,89 @@ fn push_decimal_chunk(digits: &mut Vec<u8>, mut v: u64, pad: usize) {
     // buf[..n] is least-significant first; emit most-significant first, padding with '0' up to `pad`.
     for i in (0..n.max(pad)).rev() {
         digits.push(if i < n { buf[i] } else { b'0' });
+    }
+}
+
+/// Below this many limbs (in the SMALLER operand), schoolbook multiply beats Karatsuba (whose
+/// splitting/recombination overhead dominates for small inputs). Tuned on the `mul` benchmark.
+const KARATSUBA_THRESHOLD: usize = 40;
+
+/// Schoolbook `a * b` over magnitudes (O(n·m)), returning a normalized magnitude. Each limb product is
+/// a widening `u64 * u64 -> (high, low)` via [`wide_mul`], accumulated with `u64` carries — no `u128`
+/// on the multiply path, so it is native on wasm (see [`wide_mul`]). `a`, `b` are non-empty.
+fn mul_schoolbook(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut out = alloc::vec![0u64; a.len() + b.len()];
+    for (i, &av) in a.iter().enumerate() {
+        let mut carry = 0u64;
+        for (j, &bv) in b.iter().enumerate() {
+            let (hi, lo) = wide_mul(av, bv);
+            // out[i+j] += lo + carry; the two carry-outs and hi form the next carry (which the
+            // schoolbook invariant keeps < 2^64, so this add cannot overflow).
+            let (s1, c1) = out[i + j].overflowing_add(lo);
+            let (s2, c2) = s1.overflowing_add(carry);
+            out[i + j] = s2;
+            carry = hi + c1 as u64 + c2 as u64;
+        }
+        // Propagate the final carry into the next limb (and beyond, if it cascades).
+        let mut k = i + b.len();
+        while carry != 0 {
+            let (s, c) = out[k].overflowing_add(carry);
+            out[k] = s;
+            carry = c as u64;
+            k += 1;
+        }
+    }
+    strip(&mut out);
+    out
+}
+
+/// Karatsuba `a * b` over magnitudes. Split each operand at `k` limbs (`a = a1·Bᵏ + a0`), then
+/// `a·b = z2·B²ᵏ + z1·Bᵏ + z0` with `z0 = a0·b0`, `z2 = a1·b1`, and
+/// `z1 = (a0+a1)(b0+b1) − z0 − z2` — three half-size products instead of four. Recurses through
+/// [`Big::mul_mag`], so sub-products below the threshold fall back to schoolbook. `a`, `b` non-empty.
+fn mul_karatsuba(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let k = a.len().max(b.len()).div_ceil(2);
+    let (a0, a1) = a.split_at(k.min(a.len()));
+    let (b0, b1) = b.split_at(k.min(b.len()));
+
+    let z0 = Big::mul_mag(a0, b0);
+    let z2 = Big::mul_mag(a1, b1);
+    // z1 = (a0+a1)(b0+b1) - z0 - z2. Both subtractions are non-negative: (a0+a1)(b0+b1) = z0+z1+z2.
+    let sa = Big::add_mag(a0, a1);
+    let sb = Big::add_mag(b0, b1);
+    let mut z1 = Big::mul_mag(&sa, &sb);
+    z1 = Big::sub_mag(&z1, &z0);
+    z1 = Big::sub_mag(&z1, &z2);
+
+    // result = z0 + z1·Bᵏ + z2·B²ᵏ.
+    let mut out = z0;
+    add_into_at(&mut out, &z1, k);
+    add_into_at(&mut out, &z2, 2 * k);
+    strip(&mut out);
+    out
+}
+
+/// `acc += addend · B^offset` in place (little-endian limbs, `B = 2⁶⁴`), with `u64` carry propagation.
+fn add_into_at(acc: &mut Vec<u64>, addend: &[u64], offset: usize) {
+    if addend.is_empty() {
+        return;
+    }
+    if acc.len() < offset + addend.len() + 1 {
+        acc.resize(offset + addend.len() + 1, 0);
+    }
+    let mut carry = false;
+    for (i, &x) in addend.iter().enumerate() {
+        let (s1, c1) = acc[offset + i].overflowing_add(x);
+        let (s2, c2) = s1.overflowing_add(carry as u64);
+        acc[offset + i] = s2;
+        carry = c1 || c2;
+    }
+    let mut j = offset + addend.len();
+    while carry {
+        let (s, c) = acc[j].overflowing_add(1);
+        acc[j] = s;
+        carry = c;
+        j += 1;
     }
 }
 
