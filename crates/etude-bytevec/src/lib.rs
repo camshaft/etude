@@ -115,7 +115,7 @@ pub mod kind {
 
     /// Marker for a kind whose invariant permits *arbitrary* byte writes, so the unchecked mutators
     /// (`push_back`/`push_front`/`pop_*`/`set_byte`/`replace`/`advance`/`truncate`/…) are safe to
-    /// expose. Implemented for [`Bytes`] only. A validated kind (e.g. [`Utf8`]) is deliberately NOT
+    /// expose. Implemented for [`Bytes`] only. A validated kind (e.g. [`Utf8`]) is deliberately not
     /// `Mutable`: it can only be mutated through its own invariant-preserving entry points, so an
     /// unchecked byte write cannot corrupt it — this is what makes the kind marker *validate*
     /// mutation at the type level.
@@ -129,7 +129,7 @@ pub mod kind {
     /// assert_eq!(v.len(), 2);
     /// ```
     ///
-    /// `Rope<Utf8>` is not `Mutable`, so an unchecked `push_back` must NOT compile:
+    /// `Rope<Utf8>` is not `Mutable`, so an unchecked `push_back` must not compile:
     ///
     /// ```compile_fail
     /// use etude_bytevec::{Rope, Utf8, Bytes};
@@ -288,7 +288,7 @@ impl Rope<kind::Utf8> {
     /// it. Returns the [`Utf8Error`](core::str::Utf8Error) on the first invalid sequence.
     pub fn try_from_bytes(bytes: ByteVec) -> Result<Self, core::str::Utf8Error> {
         // A codepoint may straddle chunk boundaries, so per-chunk validation would be wrong.
-        // Fast path: validate the concatenation by STREAMING over the chunks (carrying at most a
+        // Fast path: validate the concatenation by streaming over the chunks (carrying at most a
         // 3-byte partial codepoint across each boundary), which never allocates a full contiguous
         // copy on the valid path — the ingest hot path. `concatenation_is_valid_utf8` never accepts
         // invalid input, so only its (conservative) reject needs the authoritative check below, which
@@ -407,7 +407,7 @@ impl ByteVec {
 /// and the raw byte-offset structural ops (`slice`, `split_to`, `append`). The unchecked byte
 /// mutators (`push_back`/`push_front`/`pop_*`/`set_byte`/`replace`/`advance`/`truncate`/…) also live
 /// here but are bounded `where K: kind::Mutable`, so they are callable only on a mutable kind (e.g.
-/// [`ByteVec`]) and NOT on a validated kind like `Rope<Utf8>` — the kind marker gates mutation at the
+/// [`ByteVec`]) and not on a validated kind like `Rope<Utf8>` — the kind marker gates mutation at the
 /// type level. Concatenation (`append`) and the raw split/slice ops stay kind-agnostic (a caller of
 /// the raw offset ops is responsible for choosing invariant-preserving boundaries).
 impl<K> Rope<K> {
@@ -1037,7 +1037,7 @@ impl<K> Rope<K> {
         if at == self.len {
             return Ok(core::mem::take(self));
         }
-        // Deep fast path: the split point is in the TREE body, so split the tree once and keep each
+        // Deep fast path: the split point is in the tree body, so split the tree once and keep each
         // buffered end on its side (self.head → front, self.tail → self) — no fold-into-tree round
         // trip. Common case for a split in the middle of a large rope.
         let fast_head_bytes = if let Repr::Deep(d) = &self.repr {
@@ -1100,9 +1100,9 @@ impl<K> Rope<K> {
     /// Panics if the range is out of bounds or `start > end`.
     pub fn slice(&self, range: impl core::ops::RangeBounds<usize>) -> Self {
         use core::ops::Bound;
-        // `saturating_add` so an excluded start / inclusive end of `usize::MAX` cannot wrap the
+        // `saturating_add` so an excluded start / inclusive end of `usize::max` cannot wrap the
         // `+ 1` to 0 (which would silently slice the whole rope in release); it saturates to
-        // `usize::MAX`, which is always `> self.len` and so trips the documented out-of-bounds
+        // `usize::max`, which is always `> self.len` and so trips the documented out-of-bounds
         // panic below.
         let start = match range.start_bound() {
             Bound::Included(&s) => s,
@@ -1147,7 +1147,7 @@ impl<K> Rope<K> {
                 }
                 out
             }
-            // Deep: slice the tree body in ONE descent (`Tree::subrange`, sharing every interior
+            // Deep: slice the tree body in one descent (`Tree::subrange`, sharing every interior
             // subtree) and re-attach only the boundary bytes that fall in the buffered head/tail. No
             // whole-rope clone, no head/tail fold: a slice landing entirely in the tree body (the
             // common case for a large rope) is a single subrange with no boundary pushes at all.
@@ -1237,7 +1237,7 @@ impl<K> Rope<K> {
     }
 
     /// UC4: if `[start, end)` is a small structural edit within a single flat-tier chunk, collapses
-    /// that chunk's kept bytes + the value into ONE new chunk (one allocation, no fragmentation) and
+    /// that chunk's kept bytes + the value into one new chunk (one allocation, no fragmentation) and
     /// returns `true`. Otherwise leaves `self` untouched and returns `false`.
     fn try_coalesce_in_chunk<R>(
         &mut self,
@@ -1303,7 +1303,7 @@ impl<K> Rope<K> {
     }
 
     /// UC6: deep-tier structural splice — `self[..start] ++ value ++ self[end..]`. Folds the buffered
-    /// ends into one tree ONCE, splits out `[start, end)` and stitches the pieces back with O(log₃₂)
+    /// ends into one tree once, splits out `[start, end)` and stitches the pieces back with O(log₃₂)
     /// `Tree::split`/`concat` (subtree-sharing, no per-chunk copy, no intermediate ropes beyond the
     /// value). Owned value chunks stay zero-copy.
     fn splice_deep<R>(&mut self, start: usize, end: usize, value: &mut R)
@@ -1311,7 +1311,7 @@ impl<K> Rope<K> {
         R: etude_buffer::reader::Buffer<Error = core::convert::Infallible>,
     {
         use etude_buffer::reader::Infallible as _;
-        // Fast path: the spliced range lies entirely within the TREE body, so we can splice the tree
+        // Fast path: the spliced range lies entirely within the tree body, so we can splice the tree
         // directly and leave the buffered head/tail untouched — no fold-into-tree / re-derive
         // round-trip (which the general path below pays via `into_tree`/`from_tree`: two extra
         // seam concats plus rebuilding the buffered ends). Same O(log₃₂) split×2 + concat×2 on the
@@ -1542,7 +1542,7 @@ impl<K> Rope<K> {
             chunks.push_front(core::mem::take(head));
         }
         let mut tree = Tree::new();
-        // fold whole blocks into the tree; keep the remainder (< FANOUT) in the tail buffer
+        // fold whole blocks into the tree; keep the remainder (< fanout) in the tail buffer
         let mut block: Vec<Bytes> = Vec::with_capacity(FANOUT);
         let tail: VecDeque<Bytes> = {
             let mut it = chunks.into_iter();
@@ -1758,7 +1758,7 @@ impl<'a> DoubleEndedIterator for Chunks<'a> {
 
 impl ExactSizeIterator for Chunks<'_> {}
 
-/// Batches `chunks` into blocks of up to `FANOUT` and pushes each onto `tree`.
+/// Batches `chunks` into blocks of up to `fanout` and pushes each onto `tree`.
 fn extend_blocks(tree: &mut Tree, chunks: impl Iterator<Item = Bytes>) {
     let mut block = Vec::with_capacity(FANOUT);
     for c in chunks {
@@ -1822,7 +1822,7 @@ fn resolve_range(
     len: usize,
 ) -> Result<(usize, usize), ByteVecError> {
     use core::ops::Bound;
-    // `+ 1` on a bound must be CHECKED: an excluded start / inclusive end of `usize::MAX` would
+    // `+ 1` on a bound must be checked: an excluded start / inclusive end of `usize::max` would
     // wrap to 0 in release (silently resolving to an empty in-bounds range and mutating instead of
     // erroring) and panic in debug. An overflow is unconditionally out of bounds.
     let start = match range.start_bound() {
@@ -2397,7 +2397,7 @@ impl FromIterator<Bytes> for ByteVec {
         let iter = iter.into_iter();
         // When the source already knows it holds more than a flat rope's worth of chunks (the common
         // `collect` from a slice/`Vec`, whose `size_hint` is exact), build the radix tree in one bulk
-        // bottom-up pass — `extend_blocks` folds whole `FANOUT`-sized leaf blocks straight in, instead
+        // bottom-up pass — `extend_blocks` folds whole `fanout`-sized leaf blocks straight in, instead
         // of promoting mid-stream and then re-shuffling. For small or size-unknown inputs, fall back
         // to the plain flat-tier `push_back` loop (which promotes + batches on its own if it turns out
         // large), so the cheap streaming path is unchanged.
