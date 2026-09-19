@@ -2186,20 +2186,39 @@ impl ByteRope {
 
     /// A non-consuming reader over the rope's bytes. Cheap: it holds an O(1)-shared clone, so reading
     /// through it leaves `self` untouched.
+    ///
+    /// The returned [`Reader`] borrows `self` for its lifetime — matching `etude_bytevec`'s
+    /// `reader(&self) -> Reader<'_>` signature — so a bytevec caller's `Reader<'a>` type annotations
+    /// compile unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use etude_byterope::{ByteRope, Reader};
+    ///
+    /// let rope = ByteRope::from(b"data");
+    /// let r: Reader<'_> = rope.reader();
+    /// assert_eq!(r.len(), 4);
+    /// ```
     #[inline]
-    pub fn reader(&self) -> Reader {
+    pub fn reader(&self) -> Reader<'_> {
         Reader {
             inner: self.clone(),
+            _borrow: core::marker::PhantomData,
         }
     }
 }
 
 /// A non-consuming [`reader::Buffer`] over a [`ByteRope`]. See [`ByteRope::reader`].
-pub struct Reader {
+///
+/// Carries a lifetime tied to the source rope (matching `etude_bytevec::Reader<'a>`); the bytes are
+/// held via an O(1)-shared clone, so iterating/reading does not disturb the source.
+pub struct Reader<'a> {
     inner: ByteRope,
+    _borrow: core::marker::PhantomData<&'a ByteRope>,
 }
 
-impl Reader {
+impl Reader<'_> {
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -2211,7 +2230,7 @@ impl Reader {
     }
 }
 
-impl reader::Buffer for Reader {
+impl reader::Buffer for Reader<'_> {
     type Error = core::convert::Infallible;
 
     #[inline]
@@ -2233,7 +2252,7 @@ impl reader::Buffer for Reader {
     }
 }
 
-impl Iterator for Reader {
+impl Iterator for Reader<'_> {
     type Item = Bytes;
 
     #[inline]
