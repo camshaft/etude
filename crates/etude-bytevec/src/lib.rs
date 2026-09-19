@@ -305,6 +305,34 @@ impl Rope<kind::Utf8> {
         })
     }
 
+    /// Wraps `bytes` as a UTF-8 rope **without validating** — the unchecked, **O(1)** twin of
+    /// [`try_from_bytes`](Self::try_from_bytes): a by-move field re-wrap, no scan.
+    ///
+    /// This is for callers that already established the UTF-8 invariant out of band and would
+    /// otherwise pay a redundant O(n) re-scan — for example a decoder that validated the bytes while
+    /// lexing and holds a zero-copy [`ByteVec`] slice of them that cannot be retyped as `String`
+    /// without a copy (so the safe [`From<String>`](#impl-From<String>-for-Rope<Utf8>) path does not
+    /// apply). It is the inverse of [`into_bytes`](Self::into_bytes).
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `bytes`' *concatenated* content is valid UTF-8. A codepoint may
+    /// span chunk boundaries, so per-chunk validity is neither required nor sufficient — the same
+    /// whole-content invariant [`try_from_bytes`](Self::try_from_bytes) checks. If the content is not
+    /// valid UTF-8, later char-boundary / `as_str` / iteration operations on the returned rope are
+    /// undefined behavior. When the invariant cannot be proven, use the safe
+    /// [`try_from_bytes`](Self::try_from_bytes) instead.
+    #[inline]
+    pub unsafe fn from_bytes_unchecked(bytes: ByteVec) -> Self {
+        // Defense-in-depth: surface a contract violation in debug/test builds instead of silently
+        // constructing an unsound rope. Compiled out of release builds, so the fast path stays O(1).
+        debug_assert!(
+            concatenation_is_valid_utf8(&bytes),
+            "from_bytes_unchecked: concatenated content is not valid UTF-8 (Safety contract violated)"
+        );
+        Self::from_valid_bytes(bytes)
+    }
+
     /// Converts back to an unvalidated [`ByteVec`] — **free**: only the zero-sized kind marker is
     /// dropped, the representation moves as-is with no copy or re-validation.
     #[inline]
