@@ -239,12 +239,24 @@ impl PartialOrd for Rational {
 }
 
 impl Ord for Rational {
-    /// Exact three-way comparison. Both denominators are strictly positive, so `a/b ? c/d` is decided by
-    /// the cross-products `a*d ? c*b`.
+    /// Exact three-way comparison.
+    ///
+    /// Two O(1)/O(limbs) fast paths before the general cross-multiply: strictly-different signs decide
+    /// immediately, and equal denominators reduce to a direct numerator compare (both denominators are
+    /// strictly positive). Otherwise `a/b ? c/d` is decided by the cross-products `a*d ? c*b`.
     fn cmp(&self, other: &Rational) -> Ordering {
-        let lhs = self.num.mul(&other.den);
-        let rhs = other.num.mul(&self.den);
-        lhs.cmp(&rhs)
+        // Strictly-different signs decide immediately (zero counts as non-negative, so `0 vs positive`
+        // and `0 vs 0` fall through to the exact paths below — both handle them correctly).
+        match (self.num.is_negative(), other.num.is_negative()) {
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            _ => {}
+        }
+        // Equal denominators (both strictly positive): `a/b ? c/b` is just `a ? c`.
+        if self.den == other.den {
+            return self.num.cmp(&other.num);
+        }
+        self.num.mul(&other.den).cmp(&other.num.mul(&self.den))
     }
 }
 

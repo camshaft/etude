@@ -175,6 +175,26 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
+    // Equal-denominator comparison: exercises the direct numerator-compare fast path (both
+    // implementations fast-path this — a fair fast-path-vs-fast-path measurement).
+    {
+        let mut g = group(c, "cmp_eqden");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x5a5a_1357 ^ (nbytes as u64));
+            let (a, b) = rng.rat_pair_eqden(nbytes);
+            let (ra, rb) = (to_ref(&a), to_ref(&b));
+            g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
+                be.iter(|| black_box(a.cmp(black_box(b))))
+            });
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", label),
+                &(&ra, &rb),
+                |be, (a, b)| be.iter(|| black_box(a.cmp(black_box(b)))),
+            );
+        }
+        g.finish();
+    }
+
     // Reciprocal: den/num renormalized.
     {
         let mut g = group(c, "recip");
