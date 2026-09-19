@@ -327,6 +327,54 @@ fn display_honors_padding_ignores_precision() {
 }
 
 #[test]
+fn native_arith_tier_boundaries() {
+    // Pin the exact fast-path/fallback transitions the native i64/i128/u128 arithmetic tiers hinge on —
+    // deterministically, where the differential oracle only crosses them by luck. Each result (and its
+    // sign variants) is checked against bigdecimal via `assert_same`, so a broken tier or sign flag shows
+    // immediately.
+    let cases: &[(&str, &str, char)] = &[
+        // add: coefficient fits i64 but the sum overflows it → i128 tier (combine_wide)
+        ("9223372036854775807", "1", '+'), // i64::MAX + 1 = 2^63
+        ("9223372036854775807", "9223372036854775807", '+'), // 2·i64::MAX, fits i128
+        // add: sum overflows i128 → exact Big path
+        ("170141183460469231731687303715884105727", "1", '+'), // i128::MAX + 1 = 2^127
+        // sub across the same boundaries
+        ("9223372036854775808", "1", '-'), // 2^63 - 1 (back inside i64)
+        ("170141183460469231731687303715884105728", "1", '-'), // 2^127 - 1
+        // mul: product < 2^127 → i128 tier
+        ("9223372036854775808", "2", '*'), // 2^63 · 2 = 2^64
+        // mul: product in [2^127, 2^128) → u128 magnitude tier (big_from_u128)
+        ("18446744073709551615", "18446744073709551615", '*'), // (2^64 − 1)² < 2^128
+        // mul: product ≥ 2^128 → exact Big path
+        ("18446744073709551616", "18446744073709551616", '*'), // 2^64 · 2^64 = 2^128
+    ];
+    for &(a, b, op) in cases {
+        let (da, db) = (Decimal::from_str(a).unwrap(), Decimal::from_str(b).unwrap());
+        let (ra, rb) = (
+            BigDecimal::from_str(a).unwrap(),
+            BigDecimal::from_str(b).unwrap(),
+        );
+        let check = |ours: &Decimal, refs: &BigDecimal| assert_same(ours, refs);
+        match op {
+            '+' => {
+                check(&da.add(&db), &(&ra + &rb));
+                check(&da.neg().add(&db), &(-ra.clone() + &rb)); // negative left operand
+            }
+            '-' => {
+                check(&da.sub(&db), &(&ra - &rb));
+                check(&db.sub(&da), &(&rb - &ra)); // reversed sign of the difference
+            }
+            '*' => {
+                check(&da.mul(&db), &(&ra * &rb));
+                check(&da.neg().mul(&db), &(-ra.clone() * &rb)); // negative product (big_from_u128 sign)
+                check(&da.neg().mul(&db.neg()), &(-ra.clone() * (-rb.clone()))); // negative × negative
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn to_f64_matches_float_parse() {
     // Correctly-rounded direct conversion must agree bit-for-bit with the std float parser (itself
     // correctly rounded) across normals, rounding boundaries, subnormals, overflow, and underflow.
