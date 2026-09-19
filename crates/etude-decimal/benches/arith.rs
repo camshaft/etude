@@ -175,6 +175,43 @@ fn bench(c: &mut Criterion) {
     binop(c, "sub", |a, b| a.sub(b), |a, b| a - b);
     binop(c, "mul", |a, b| a.mul(b), |a, b| a * b);
 
+    // Small values (i64-fitting coefficients — the common real decimal, e.g. a price or measurement),
+    // where the coefficients and their product/sum fit native integers. The TIERS sweep starts at a full
+    // 64-bit coefficient, so these get their own cells.
+    {
+        let a = Decimal::from_str("12345.6789").expect("valid");
+        let b = Decimal::from_str("9876.54321").expect("valid");
+        let ra = BigDecimal::from_str("12345.6789").expect("valid");
+        let rb = BigDecimal::from_str("9876.54321").expect("valid");
+        for (name, ours, theirs) in [
+            (
+                "add_small",
+                &(|a: &Decimal, b: &Decimal| a.add(b)) as &dyn Fn(&Decimal, &Decimal) -> Decimal,
+                &(|a: &BigDecimal, b: &BigDecimal| a + b)
+                    as &dyn Fn(&BigDecimal, &BigDecimal) -> BigDecimal,
+            ),
+            (
+                "sub_small",
+                &(|a: &Decimal, b: &Decimal| a.sub(b)),
+                &(|a: &BigDecimal, b: &BigDecimal| a - b),
+            ),
+            (
+                "mul_small",
+                &(|a: &Decimal, b: &Decimal| a.mul(b)),
+                &(|a: &BigDecimal, b: &BigDecimal| a * b),
+            ),
+        ] {
+            let mut g = group(c, name);
+            g.bench_function(BenchmarkId::new("etude", "10d"), |be| {
+                be.iter(|| black_box(ours(black_box(&a), black_box(&b))))
+            });
+            g.bench_function(BenchmarkId::new("bigdecimal", "10d"), |be| {
+                be.iter(|| black_box(theirs(black_box(&ra), black_box(&rb))))
+            });
+            g.finish();
+        }
+    }
+
     // Rounded division to a fixed working precision (exact `div` returns None for non-terminating
     // quotients, so the fair head-to-head is the rounded operation both must support).
     {

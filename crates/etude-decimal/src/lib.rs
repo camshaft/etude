@@ -237,6 +237,9 @@ impl Decimal {
         if other.is_zero() {
             return self.clone();
         }
+        if let Some(d) = self.combine_small(other, i64::checked_add) {
+            return d;
+        }
         self.combine(other, Big::add)
     }
 
@@ -249,7 +252,29 @@ impl Decimal {
         if other.is_zero() {
             return self.clone();
         }
+        if let Some(d) = self.combine_small(other, i64::checked_sub) {
+            return d;
+        }
         self.combine(other, Big::sub)
+    }
+
+    /// Native fast path for [`Decimal::add`] / [`Decimal::sub`] on small values: when both coefficients
+    /// fit an `i64` and aligning them to the smaller exponent (scaling by a power of ten) and combining
+    /// with `op` (`checked_add` / `checked_sub`) all stay within `i64`, do the arithmetic natively — no
+    /// `Big` power-of-ten, scale, or intermediate is allocated. Returns `None` on any overflow (including
+    /// an exponent gap past 10^18), so the caller falls back to the exact `Big` path.
+    fn combine_small(
+        &self,
+        other: &Decimal,
+        op: impl Fn(i64, i64) -> Option<i64>,
+    ) -> Option<Decimal> {
+        let ca = self.coeff.to_i64_checked()?;
+        let cb = other.coeff.to_i64_checked()?;
+        let e = self.exp.min(other.exp);
+        let sa = ca.checked_mul(pow10_i64((self.exp - e) as u32)?)?;
+        let sb = cb.checked_mul(pow10_i64((other.exp - e) as u32)?)?;
+        let r = op(sa, sb)?;
+        Some(Decimal::new(Big::from_i64(r), e))
     }
 
     /// Align two nonzero operands to the smaller exponent — scaling the larger-exponent coefficient by
@@ -271,6 +296,13 @@ impl Decimal {
     pub fn mul(&self, other: &Decimal) -> Decimal {
         if self.is_zero() || other.is_zero() {
             return Decimal::zero();
+        }
+        // Native fast path: when both coefficients and their product fit an i64, multiply natively and
+        // skip the Big multiply/allocation. Falls through on overflow.
+        if let (Some(ca), Some(cb)) = (self.coeff.to_i64_checked(), other.coeff.to_i64_checked())
+            && let (Some(coeff), Some(exp)) = (ca.checked_mul(cb), self.exp.checked_add(other.exp))
+        {
+            return Decimal::new(Big::from_i64(coeff), exp);
         }
         // Exponents come from parsing bounded to ≤18 digits, so their sum fits i64 for any realistic
         // input; saturate only in the astronomically-extreme case rather than wrap.
@@ -832,6 +864,12 @@ const POW10_F64: [f64; 23] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
     1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
 ];
+
+/// `10^k` as an `i64`, or `None` when it overflows (`k > 18`, since `10^19 > i64::MAX`). Used by the
+/// native small-value arithmetic fast paths to scale a coefficient by a power of ten.
+fn pow10_i64(k: u32) -> Option<i64> {
+    10i64.checked_pow(k)
+}
 
 /// `10^k` as a nonnegative [`Big`], by binary exponentiation (base-10, squaring). `10^0 == 1`.
 fn pow10(k: u64) -> Big {
