@@ -24,6 +24,25 @@ fn size_matches_flat_buffer() {
     );
 }
 
+/// A `Rope`'s content-kind marker is zero-cost: a `Rope<K>` of ANY kind has the exact layout of
+/// `ByteVec` (= `Rope<kind::Bytes>`). This is the layout contract the free `StrRope`/`ByteVec`
+/// conversion and the serde-zerocopy path rely on — a future `Rope<Utf8>` must reinterpret to a
+/// `ByteVec` with no copy — so it is pinned here against the arbitrary marker below.
+#[test]
+fn kind_marker_is_zero_cost_layout() {
+    struct OtherKind;
+    assert_eq!(
+        core::mem::size_of::<crate::Rope<OtherKind>>(),
+        core::mem::size_of::<ByteVec>(),
+        "a content-kind marker must not change the rope's size"
+    );
+    assert_eq!(
+        core::mem::align_of::<crate::Rope<OtherKind>>(),
+        core::mem::align_of::<ByteVec>(),
+        "a content-kind marker must not change the rope's alignment"
+    );
+}
+
 #[test]
 fn single_chunk_is_flat_and_allocation_light() {
     let mut rope = ByteVec::new();
