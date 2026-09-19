@@ -66,6 +66,28 @@ impl Big {
         !self.is_even()
     }
 
+    /// The least-significant decimal digit of `|self|` — `|self| mod 10` (zero returns `0`). So
+    /// `last_decimal_digit() == 0` is a divisibility-by-10 test, and the digit itself drives rounding.
+    ///
+    /// Computed by a limb sum, not a division: since `2⁶⁴ ≡ 6 (mod 10)` and `6ᵏ ≡ 6 (mod 10)` for
+    /// `k ≥ 1`, every limb above the lowest contributes its value times 6, so
+    /// `|self| ≡ limb₀ + 6·Σ_{i≥1} limbᵢ (mod 10)`. Each per-limb step is a `% 10` and an add — no
+    /// per-limb reciprocal multiply as [`Big::rem_u64`] uses — which is cheaper at the wide magnitudes
+    /// where a decimal normalizes results (a divisibility-by-10 check on every even coefficient).
+    pub fn last_decimal_digit(&self) -> u8 {
+        let (lo, rest) = match self.mag.split_first() {
+            Some(pair) => pair,
+            None => return 0, // zero
+        };
+        // `Σ (limbᵢ mod 10)` over the high limbs. Each term is `≤ 9`, so this overflows a `u64` only past
+        // ~2⁶⁰ limbs (exabytes of magnitude) — unreachable; no per-iteration reduction needed.
+        let mut high: u64 = 0;
+        for &limb in rest {
+            high += limb % 10;
+        }
+        ((lo % 10 + 6 * (high % 10)) % 10) as u8
+    }
+
     /// The absolute value `|self|`.
     pub fn abs(&self) -> Big {
         Big {

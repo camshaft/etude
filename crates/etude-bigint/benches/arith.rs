@@ -613,6 +613,26 @@ fn bench_i128(c: &mut Criterion) {
     g.finish();
 }
 
+/// `last_decimal_digit` (limb-sum mod 10, no per-limb reciprocal) vs `rem_u64(10)` (the reciprocal
+/// remainder scan it replaces) — the divisibility-by-10 check a decimal runs when canonicalizing every
+/// even coefficient. Both on etude; the limb-sum should win at wide magnitudes.
+fn bench_last_decimal_digit(c: &mut Criterion) {
+    let mut g = group(c, "last_decimal_digit");
+    let mut rng = Rng(0x0a10_0a10_0a10_0a10);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        g.bench_with_input(
+            BenchmarkId::new("last_decimal_digit", label),
+            &a,
+            |bch, a| bch.iter(|| black_box(black_box(a).last_decimal_digit())),
+        );
+        g.bench_with_input(BenchmarkId::new("rem_u64(10)", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).rem_u64(black_box(10))))
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -640,6 +660,7 @@ criterion_group!(
     bench_o1_accessors,
     bench_from_base_10_pow_k,
     bench_decimal_digit_count,
-    bench_i128
+    bench_i128,
+    bench_last_decimal_digit
 );
 criterion_main!(benches);

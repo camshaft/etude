@@ -327,6 +327,13 @@ fn scalar_primitives_vs_num_bigint() {
         }
         assert_eq!(a.rem_u64(0), None, "rem_u64 by zero");
         assert!(a.divmod_u64(0).is_none(), "divmod_u64 by zero");
+        // last_decimal_digit = |self| mod 10 (the 2⁶⁴≡6 limb-sum identity), cross-checked against the
+        // reciprocal rem_u64(10) it is meant to replace (which is itself checked vs num-bigint above).
+        assert_eq!(
+            a.last_decimal_digit() as u64,
+            a.rem_u64(10).unwrap(),
+            "last_decimal_digit {a:?}"
+        );
     }
     // Zero and small explicit values.
     assert!(Big::zero().is_even());
@@ -336,6 +343,13 @@ fn scalar_primitives_vs_num_bigint() {
     assert_eq!(
         Big::from_i64(-17).divmod_u64(5),
         Some((Big::from_i64(-3), 2))
+    );
+    assert_eq!(Big::zero().last_decimal_digit(), 0);
+    assert_eq!(Big::from_i64(-17).last_decimal_digit(), 7); // |−17| = 17 → 7
+    // Multi-limb, crossing the 6·high-limb term: i128::MAX = …105727 → 7.
+    assert_eq!(
+        Big::from_i128(i128::MAX).last_decimal_digit(),
+        (i128::MAX % 10) as u8
     );
 }
 
