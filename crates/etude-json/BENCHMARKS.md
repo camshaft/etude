@@ -59,3 +59,28 @@ the closing quote/escapes. The `position` predicate over the leaf may not fully 
 three byte classes, including a `< 0x20` range). Next lever, if this workload matters: a SIMD /
 `memchr`-style leaf scan (e.g. `memchr2` for `"`/`\` plus a vectorized control-byte check). The
 allocation column stays zero regardless.
+
+## Span-resolution cost — the O(log n)-per-token re-access (`tokenize_and_read`)
+
+Tokenizing is cheap and 0-alloc, but a `Span` is `(offset, len)`: reading a token's bytes later means
+`ByteVec::slice(span)`, an O(log n) tree descent to locate the span's leaf. `tokenize_and_read`
+resolves every token's span; the delta over `tokenize` is that re-access cost (aarch64, jemalloc,
+release, 1.0 s):
+
+| shape             | tokenize | tokenize_and_read | serde_json | read/tokenize | read/serde |
+|-------------------|---------:|------------------:|-----------:|--------------:|-----------:|
+| array_10k_ints    | 239 µs   | 1098 µs           | 270 µs     | 4.6×          | 4.1× |
+| array_10k_floats  | 247 µs   | 1144 µs           | 335 µs     | 4.6×          | 3.4× |
+| array_5k_strings  | 128 µs   | 574 µs            | 228 µs     | 4.5×          | 2.5× |
+| objects_1k        | 306 µs   | 1562 µs           | 649 µs     | 5.1×          | 2.4× |
+| nested_100        | 2.26 µs  | 11.55 µs          | 5.55 µs    | 5.1×          | 2.1× |
+| big_string_100k   | 77.3 µs  | 77.5 µs           | 23.9 µs    | 1.0×          | 3.2× |
+
+**Finding:** on token-dense documents, resolving each span costs ~4.5–5× the tokenize time and flips
+etude_json from *faster* than serde_json to **2–4× slower**. On `big_string_100k` (one token) it is
+negligible. So the 0-alloc tokenize win is real only while a consumer *skips* tokens; a consumer that
+*reads* them pays O(log n) per span.
+
+This quantifies the motivation for **chunk-ref-carrying tokens** (a token that also holds the leaf
+`&[u8]` + local position, or a cursor bookmark) so reading a token's bytes is O(1) rather than an
+O(log n) re-descent — see the open design question on the `etude-span` extraction (PR #101).

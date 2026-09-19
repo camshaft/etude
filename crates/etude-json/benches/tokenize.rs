@@ -177,6 +177,17 @@ fn tokenize(input: &ByteVec) {
     }
 }
 
+/// Tokenize AND resolve every token's span back to a rope slice — the O(log n)-per-span re-access a
+/// consumer pays to read a token's bytes from an `(offset, len)` span (a tree descent to locate the
+/// span's leaf). The delta over [`tokenize`] isolates that span-resolution cost, which is what a
+/// chunk-ref-carrying token would drive toward O(1).
+fn tokenize_and_read(input: &ByteVec) {
+    for tok in Tokenizer::new(input) {
+        let t = tok.expect("valid json");
+        black_box(input.slice(t.span().range()));
+    }
+}
+
 // ─── the allocation scoreboard (printed before timings) ──────────────────────────────────────────
 
 fn print_alloc_scoreboard(corpus: &[(&'static str, String)]) {
@@ -216,6 +227,9 @@ fn bench(c: &mut Criterion) {
         let mut group = c.benchmark_group(*name);
         group.bench_function("etude_json_tokenize", |b| {
             b.iter(|| tokenize(black_box(&input)))
+        });
+        group.bench_function("etude_json_tokenize_and_read", |b| {
+            b.iter(|| tokenize_and_read(black_box(&input)))
         });
         group.bench_function("serde_json_parse", |b| {
             b.iter(|| serde_json::from_slice::<serde_json::Value>(black_box(bytes)).unwrap())
