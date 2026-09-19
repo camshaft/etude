@@ -62,6 +62,24 @@ no remaining hard losses; the non-wins are at parity or minor:
 3. **`normalize`/`add_eqden` @1024b — ~1.00 (parity).** Both bottom out on a single large gcd; parity
    with num-rational's Stein gcd. Further headroom is a Lehmer-gcd item in etude-bigint (raised).
 
+## Native i128 fast path — small (i64-fitting) operands
+
+The common real-world case is *small* rationals (`3/10`, `127/5000`, …) whose numerator and denominator
+fit `i64`. There, `mul`/`div` take a **native `i128` fast path**: `a*c`/`b*d` (or `a*d`/`b*c`) fit `i128`
+with no overflow, reduced by a native `u128` gcd, boxed back to `Big` — **zero bignum arithmetic**.
+num-rational always uses `BigInt`, so this is a large win:
+
+| op      | operands | etude    | num-rational | ratio     |
+|---------|----------|----------|--------------|-----------|
+| mul_i64 | 48-bit   | 0.43 µs  | 4.04 µs      | **0.107** |
+| div_i64 | 48-bit   | ~0.43 µs | ~4.1 µs      | **~0.11** |
+
+~9× faster than num-rational on small operands. (The byte-width tiers below UNDER-represent this case:
+their top magnitude bit is set, so a "64b" coefficient exceeds `i64` and takes the `Big` path.) The
+residual ~0.43 µs is the two result-`Big` allocations (`from_i64`) — both implementations must allocate
+the result; only our *arithmetic* went native. `add`/`sub` will get the same native path (with a checked
+`i128` add for the `a*d + c*b` overflow edge) in a follow-up.
+
 ## Large-tier scaling (2048b/4096b tiers — now part of the default board)
 
 Sample ratios at the large tiers (`ratio = etude / num-rational`; full numbers via `cargo bench`):
@@ -111,6 +129,10 @@ bignum-render-bound, not addressable locally.
   in the noise at large tiers where the bignum ops dominate).
 - **slice 9** — `impl Display for Rational` (was missing) + alloc-lean `to_decimal_string`, both via
   etude-bigint's sink-writing `Big::write_decimal` (#79): one `String` instead of three.
+- **slice 11** — native `i128` fast path for `mul`/`div` on i64-fitting operands (the common small case):
+  compute in `i128` (overflow-free for products of i64s), native `u128` gcd, box back — no bignum
+  arithmetic. `mul_i64` 0.107× num-rational (~9× faster); `div` symmetric. Guarded by the differential
+  oracle (its i64 seeds exercise the native path). add/sub native path (checked add) to follow.
 - **slice 10** — re-add the `to_string` render bench (now a 64b WIN, 0.66, via etude-bigint's single-limb
   `to_decimal` fast path #82 + our alloc-lean Display) + corrected the large-tier scaling analysis:
   Karatsuba is already landed (#53), so add/sub@4096b parity is expected (num-bigint has it too) — a lead
