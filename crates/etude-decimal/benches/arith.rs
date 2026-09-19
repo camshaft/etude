@@ -210,6 +210,25 @@ fn bench(c: &mut Criterion) {
             });
             g.finish();
         }
+
+        // Mid product: two ~18-digit coefficients that each fit an i64 but whose product does not — it
+        // fits an i128 (the common "large price × quantity" shape). This exercises the native i128 mul
+        // tier (the i64 path overflows on the product, the coefficients are far below i128), which the
+        // full-width `mul` TIERS above cannot reach (those coefficients already exceed i64).
+        {
+            let a = Decimal::from_str("1234567890.12345678").expect("valid"); // coeff ~1.2e17 < i64::MAX
+            let b = Decimal::from_str("9876543210.98765432").expect("valid"); // product ~1.2e35, fits i128
+            let ra = BigDecimal::from_str("1234567890.12345678").expect("valid");
+            let rb = BigDecimal::from_str("9876543210.98765432").expect("valid");
+            let mut g = group(c, "mul_mid");
+            g.bench_function(BenchmarkId::new("etude", "18d"), |be| {
+                be.iter(|| black_box(black_box(&a).mul(black_box(&b))))
+            });
+            g.bench_function(BenchmarkId::new("bigdecimal", "18d"), |be| {
+                be.iter(|| black_box(black_box(&ra) * black_box(&rb)))
+            });
+            g.finish();
+        }
     }
 
     // Rounded division to a fixed working precision (exact `div` returns None for non-terminating

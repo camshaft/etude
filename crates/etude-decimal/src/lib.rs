@@ -378,6 +378,14 @@ impl Decimal {
         {
             return Decimal::new(Big::from_i64(coeff), exp);
         }
+        // Wider native tier: the product of two `i64`-fitting coefficients always fits `i128`, and a full
+        // 64-bit coefficient fits `i128` (its product may too). Read the limbs straight into `i128` and box
+        // only the result — no `Big` multiply or allocation — falling through on `i128` overflow.
+        if let (Some(ca), Some(cb)) = (self.coeff.to_i128_checked(), other.coeff.to_i128_checked())
+            && let (Some(coeff), Some(exp)) = (ca.checked_mul(cb), self.exp.checked_add(other.exp))
+        {
+            return Decimal::new(Big::from_i128(coeff), exp);
+        }
         // Exponents come from parsing bounded to ≤18 digits, so their sum fits i64 for any realistic
         // input; saturate only in the astronomically-extreme case rather than wrap.
         let exp = self.exp.saturating_add(other.exp);
