@@ -11,7 +11,7 @@
 
 use bytes::Bytes;
 use etude_bytevec::ByteVec;
-use etude_json::{Error, TokenKind, Tokenizer};
+use etude_json::{Error, Strictness, TokenKind, Tokenizer};
 
 fn rope(bytes: &[u8], chunk: usize) -> ByteVec {
     let chunk = chunk.max(1);
@@ -74,60 +74,71 @@ fn utf8_and_surrogate_escapes() {
         Some("CJK 日本語 and é and \u{1F600}")
     );
 
-    // A lone high surrogate is valid escape *syntax* (four hex digits), so the lexer accepts the
-    // string; decoding is infallible and yields U+FFFD for the non-scalar. serde_json parses the
-    // value and rejects the lone surrogate — the intended lexer/parser split.
+    // A lone high surrogate is valid escape *syntax* (four hex digits) but names no scalar. The two
+    // modes split on it: Strict (the default) rejects it as a `LoneSurrogate` — parity with
+    // serde_json, which also rejects — while Lenient accepts the syntax and decodes it lossily to
+    // U+FFFD (the historical accept-superset behavior).
     let bytes = br#""lone\uD800end""#;
     for chunk in [1usize, 4, bytes.len()] {
         let r = rope(bytes, chunk);
-        let toks: Vec<_> = Tokenizer::new(&r).collect::<Result<_, _>>().unwrap();
-        assert_eq!(toks[0].kind(), TokenKind::String);
+        let strict: Result<Vec<_>, _> = Tokenizer::new(&r).collect();
         assert_eq!(
-            toks[0].decode_string(&r).as_deref(),
+            strict.map_err(|e| e.kind()),
+            Err(etude_json::ErrorKind::LoneSurrogate),
+            "Strict rejects a lone surrogate at chunk={chunk}"
+        );
+        let lenient: Vec<_> = Tokenizer::with_strictness(&r, Strictness::Lenient)
+            .collect::<Result<_, _>>()
+            .expect("Lenient accepts a lone surrogate");
+        assert_eq!(lenient[0].kind(), TokenKind::String);
+        assert_eq!(
+            lenient[0].decode_string(&r).as_deref(),
             Some("lone\u{FFFD}end")
         );
     }
     assert!(serde_json::from_slice::<serde_json::Value>(br#""lone\uD800end""#).is_err());
 }
 
-/// KNOWN SPEC DIVERGENCE (tracked repro, breaker-byterope): the tokenizer accepts a JSON string
-/// whose content is not valid UTF-8 — a raw `0xFF` byte between the quotes, unescaped — as a normal
-/// escape-free `String` token. RFC 8259 §8.1 requires JSON text to be UTF-8, and `serde_json`
-/// rejects the same input. This is the byte-oriented lexer being more permissive than the spec, the
-/// same strict-vs-lossy class as the still-open lone-surrogate ruling.
-///
-/// Downstream consequences this divergence causes (surfaced on their PRs):
-/// - the etude-json-serde adapter (#184) does `StrRope::from_utf8(content).expect(...)` on the
-///   escape-free arm and PANICS on this input — a deserializer must return `Err`;
-/// - `Token::decode_str_rope` (#147) lossy-decodes the same content to U+FFFD.
-///
-/// So consumers disagree and neither matches `serde_json`. Pending the owner's design ruling: if the
-/// tokenizer moves to validate string-content UTF-8 at lex time (matching serde_json / RFC, and
-/// making the `from_utf8_unchecked` zero-copy wiring in #208/#213 sound by construction), this test
-/// flips to assert rejection — it is the change-detector for that decision.
+/// String-content UTF-8 validity is the tokenizer's configurable [`Strictness`] axis. RFC 8259 §8.1
+/// requires JSON text to be UTF-8 and `serde_json` rejects non-UTF-8 content, so:
+/// - Strict (the default, `Tokenizer::new`) validates content UTF-8 at lex time and rejects a raw
+///   `0xFF` byte between the quotes with `InvalidUtf8` — parity with serde_json. This is what makes a
+///   Strict string token's content span sound to read with an unchecked O(1) conversion (the
+///   zero-copy wiring the `from_utf8_unchecked` in #208/#213 unlocks).
+/// - Lenient accepts the documented superset: the same bytes tokenize as one escape-free `String`
+///   token whose content is genuinely not valid UTF-8, for a consumer to resolve lossily.
 #[test]
-fn string_content_invalid_utf8_is_accepted_diverging_from_serde() {
+fn string_content_utf8_validation_is_configurable() {
     let bytes: &[u8] = b"\"a\xffb\""; // a raw 0xFF byte inside the string, no escape
-    let r = rope(bytes, bytes.len());
-    let toks: Vec<_> = Tokenizer::new(&r)
-        .collect::<Result<_, _>>()
-        .expect("byte-oriented lexer currently accepts non-UTF-8 string content");
-    assert_eq!(toks.len(), 1, "one String token");
-    assert_eq!(toks[0].kind(), TokenKind::String);
-    assert_eq!(
-        toks[0].string_has_escapes(),
-        Some(false),
-        "escape-free, so a consumer takes the zero-copy borrow arm"
-    );
-    // The accepted content is genuinely not valid UTF-8 — the crux of the divergence.
-    let span = toks[0]
-        .string_span()
-        .expect("string token has a content span");
-    let content = r.slice(span.range()).copy_to_bytes();
-    assert!(
-        core::str::from_utf8(&content).is_err(),
-        "content is not valid UTF-8 (the divergence)"
-    );
+    for chunk in [1usize, 2, bytes.len()] {
+        let r = rope(bytes, chunk);
+        // Strict (default): rejected as InvalidUtf8, matching serde_json.
+        let strict: Result<Vec<_>, _> = Tokenizer::new(&r).collect();
+        assert_eq!(
+            strict.map_err(|e| e.kind()),
+            Err(etude_json::ErrorKind::InvalidUtf8),
+            "Strict rejects non-UTF-8 content at chunk={chunk}"
+        );
+        // Lenient: accepted as one escape-free String with genuinely non-UTF-8 content.
+        let toks: Vec<_> = Tokenizer::with_strictness(&r, Strictness::Lenient)
+            .collect::<Result<_, _>>()
+            .expect("Lenient accepts non-UTF-8 string content");
+        assert_eq!(toks.len(), 1, "one String token");
+        assert_eq!(toks[0].kind(), TokenKind::String);
+        assert_eq!(
+            toks[0].string_has_escapes(),
+            Some(false),
+            "escape-free, so a consumer takes the zero-copy borrow arm"
+        );
+        let span = toks[0]
+            .string_span()
+            .expect("string token has a content span");
+        let content = r.slice(span.range()).copy_to_bytes();
+        assert!(
+            core::str::from_utf8(&content).is_err(),
+            "Lenient content is genuinely not valid UTF-8"
+        );
+    }
     // serde_json rejects the same bytes outright.
     assert!(
         serde_json::from_slice::<serde_json::Value>(bytes).is_err(),

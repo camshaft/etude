@@ -342,6 +342,87 @@ fn rejects_control_char_in_string() {
     assert_eq!(err.offset(), 2);
 }
 
+/// Tokenize `bytes` in a given [`Strictness`] under a specific rope chunk layout.
+fn tokenize_mode(bytes: &[u8], strictness: Strictness, chunk: usize) -> Result<Vec<Token>, Error> {
+    let r = rope(bytes, chunk);
+    Tokenizer::with_strictness(&r, strictness).collect()
+}
+
+#[test]
+fn strict_and_lenient_string_correctness() {
+    // The two axes on which Strict (the default, = serde_json parity) and Lenient (accept-superset)
+    // differ: string-content UTF-8 validity and `\u` surrogate pairing. `chunk == 1` forces every
+    // multi-byte char to straddle a rope-leaf boundary, exercising the incremental UTF-8 carry.
+    //
+    // (bytes, strict_kind): a string that Strict must REJECT with `strict_kind` and Lenient must
+    // ACCEPT (tokenize as one String). serde_json must agree with Strict and reject the bytes.
+    let strict_rejects: &[(&[u8], ErrorKind)] = &[
+        // Lone / unpaired `\u` surrogates.
+        (br#""\uD800""#, ErrorKind::LoneSurrogate), // lone high
+        (br#""\uDE00""#, ErrorKind::LoneSurrogate), // lone low
+        (br#""\uD800\uD800""#, ErrorKind::LoneSurrogate), // high then high (not a low)
+        (br#""\uD800n""#, ErrorKind::LoneSurrogate), // high not followed by an escape
+        (br#""\uDC00\uDC00""#, ErrorKind::LoneSurrogate), // low first
+        // Invalid UTF-8 content bytes.
+        (b"\"a\xffb\"", ErrorKind::InvalidUtf8), // stray 0xFF
+        (b"\"a\x80b\"", ErrorKind::InvalidUtf8), // stray continuation byte
+        (b"\"\xc3\"", ErrorKind::InvalidUtf8),   // 2-byte lead cut short by the closing quote
+        (b"\"\xc3\x28\"", ErrorKind::InvalidUtf8), // lead + non-continuation
+        (b"\"\xed\xa0\x80\"", ErrorKind::InvalidUtf8), // UTF-8-encoded surrogate (D800)
+        (b"\"\xf0\x9f\x98\"", ErrorKind::InvalidUtf8), // 4-byte emoji truncated to 3 bytes
+        (b"\"\xc0\xaf\"", ErrorKind::InvalidUtf8), // overlong `/`
+    ];
+    for (bytes, kind) in strict_rejects {
+        // serde_json (the reference) also rejects these.
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(bytes).is_err(),
+            "expected serde_json to reject {:?}",
+            String::from_utf8_lossy(bytes)
+        );
+        for chunk in [1usize, 2, 3, bytes.len().max(1)] {
+            let strict = tokenize_mode(bytes, Strictness::Strict, chunk);
+            assert_eq!(
+                strict.as_ref().map_err(|e| e.kind()),
+                Err(*kind),
+                "Strict should reject {:?} with {kind:?} at chunk={chunk}",
+                String::from_utf8_lossy(bytes)
+            );
+            // Lenient accepts the superset: exactly one String token, no error.
+            let lenient = tokenize_mode(bytes, Strictness::Lenient, chunk).unwrap_or_else(|e| {
+                panic!(
+                    "Lenient should accept {:?}: {e}",
+                    String::from_utf8_lossy(bytes)
+                )
+            });
+            assert_eq!(lenient.len(), 1, "{:?}", String::from_utf8_lossy(bytes));
+            assert_eq!(lenient[0].kind(), TokenKind::String);
+        }
+    }
+
+    // Strings both modes must accept identically (valid UTF-8, paired surrogate, BMP escape).
+    let both_accept: &[&[u8]] = &[
+        b"\"\\uD83D\\uDE00\"",   // a valid `\u` surrogate pair (U+1F600)
+        b"\"\\u0041\"",          // BMP `\u` escape
+        b"\"\xc3\xa9\"",         // é
+        b"\"\xf0\x9f\x98\x80\"", // 😀 emoji (4 bytes)
+        b"\"plain ascii\"",
+    ];
+    for bytes in both_accept {
+        for chunk in [1usize, 2, 3, bytes.len().max(1)] {
+            for mode in [Strictness::Strict, Strictness::Lenient] {
+                let toks = tokenize_mode(bytes, mode, chunk).unwrap_or_else(|e| {
+                    panic!(
+                        "{mode:?} should accept {:?}: {e}",
+                        String::from_utf8_lossy(bytes)
+                    )
+                });
+                assert_eq!(toks.len(), 1, "{:?}", String::from_utf8_lossy(bytes));
+                assert_eq!(toks[0].kind(), TokenKind::String);
+            }
+        }
+    }
+}
+
 #[test]
 fn chunk_layout_does_not_change_tokens() {
     // Keys deliberately in non-sorted insertion order — the tokenizer preserves document order, so
@@ -422,8 +503,9 @@ fn tokenizer_never_panics_on_arbitrary_bytes() {
     // (invalid UTF-8, control bytes, anything) across rope-chunk layouts: draining the tokenizer must
     // always terminate in Ok/Err and never unwind (a tokenizer that panics on malformed input is a
     // DoS bug), and the accept-superset invariant must hold — whatever serde_json accepts, the
-    // tokenizer must also tokenize. (The reverse does not hold: the byte-oriented lexer accepts a
-    // documented superset, e.g. non-UTF-8 string content — see the conformance repro.)
+    // tokenizer must also tokenize. (The default `Tokenizer::new` is Strict, so its string accept/
+    // reject matches serde_json; `Strictness::Lenient` accepts a documented superset, e.g. non-UTF-8
+    // string content and lone surrogates — see `strict_and_lenient_string_correctness`.)
     check!().with_type::<Vec<u8>>().cloned().for_each(|bytes| {
         for chunk in [1usize, 2, 7, bytes.len().max(1)] {
             let r = rope(&bytes, chunk);
