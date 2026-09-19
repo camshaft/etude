@@ -73,6 +73,26 @@ this landed the fast path cloned the chunk first, which forced the refcount to 2
 reclaim, so it always copied; moving the chunk out by value (the rope is consumed anyway) restores the
 documented zero-copy. Fenced content-wise by the shared harness (`CopyToBytesMutCheck`).
 
+### Socket-read zero-init memset (runnable: `cargo bench -p etude-bytevec -- socket_read`)
+
+`Builder::for_socket_read` routes through `put_uninit_slice`, which zero-inits the requested spare
+region before the read closure runs (the #173 info-leak fix). This measures that memset so the
+deferred follow-up that would reclaim it (report bytes-written and skip the zero-init) is pursued only
+if it is material. Latest run (aarch64, jemalloc, release):
+
+| read size | memset only (zero-init) | recv copy, no memset | full path (memset + recv) |
+|-----------|-------------------------|----------------------|---------------------------|
+| 1500 B | 14.7 ns | 71 ns | 130 ns |
+| 65536 B | 467 ns | 1.19 µs | 2.53 µs |
+
+The zero-init is a linear extra pass over the read buffer (~15 ns per 1.5 KB, ~467 ns per 64 KB — about
+140 GB/s), which is roughly 11–18% of the userspace fill-and-commit path here. Two caveats when reading
+this for the reclaim decision: the `recv` in this bench is a userspace memcpy, but a real socket read is
+a `recv` syscall (kernel copy) that is far more expensive, so the memset's real-world share is smaller
+than the table suggests; and the `full path` column carries `Builder` routing beyond the memset, so the
+isolated `memset only` column is the honest zero-init cost. Net: measurable and size-scaling, material
+for large or high-throughput reads, diluted by the syscall on a real socket.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
