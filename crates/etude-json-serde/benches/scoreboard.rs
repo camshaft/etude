@@ -9,15 +9,19 @@
 //!
 //! Current standing (read alongside `tests/alloc_scoreboard.rs`): the adapter wins **allocation**
 //! decisively (~2200x fewer allocs on the mixed doc) but currently **trails serde_json ~3x on
-//! wall-clock time**. The gap is the tokenizer's per-byte rope access (O(log n) leaf descent) vs
-//! serde's O(1) contiguous-slice reads — not allocation, which is already near-zero. Closing it is the
-//! chunk-cursor scan optimization (iterate leaves, not `byte_at` per byte; cf. etude-json #124's
-//! chunk-ref fast path). This bench is the scoreboard that motivates and will track that work; it does
-//! not yet claim a time win. A consumer that materializes every value pays more still — separate story.
+//! wall-clock time**. The `raw_tokenize` baseline below *attributes* that gap, and it is **not** the
+//! rope scan: raw tokenization is ~59µs on the mixed doc — faster than serde's full 147µs parse. The
+//! ~491µs of adapter overhead is the **per-token handoff**, chiefly (a) `StrRope::from_utf8` re-scanning
+//! each escape-free string to validate UTF-8 the tokenizer already guaranteed (O(n) per string; wants a
+//! checked-elsewhere `from_utf8_unchecked`), and (b) eager `NumberToken` sub-rope slicing (lexeme +
+//! three components per number) even when the consumer ignores them. So the latency lever is the
+//! *handoff*, not a chunk-cursor scan of the lexer. This bench tracks that; it claims no time win yet.
+//! A consumer that materializes every value pays more still — a separate story.
 
 use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use etude_bytevec::ByteVec;
+use etude_json::Tokenizer;
 use etude_json_serde::from_rope;
 use etude_serde::{Error, MapAccess, NumberToken, RopeBytes, RopeStr, SeqAccess, Visitor};
 use serde_json::Value;
@@ -177,6 +181,19 @@ fn bench_workload(c: &mut Criterion, name: &str, doc: String) {
     });
     group.bench_function("etude_adapter", |b| {
         b.iter(|| black_box(from_rope(black_box(&rope), Digest).unwrap()))
+    });
+    // Attribution baseline: the raw tokenizer scan alone (count tokens, touch no content). Isolates
+    // the lexer's per-byte rope-scan cost from the adapter's grammar + per-token sub-rope slicing, so
+    // the ~3x gap vs serde can be pinned on the scan (byte_at) vs the handoff.
+    group.bench_function("raw_tokenize", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for tok in Tokenizer::new(black_box(&rope)) {
+                black_box(tok.unwrap());
+                n += 1;
+            }
+            black_box(n)
+        })
     });
 
     group.finish();
