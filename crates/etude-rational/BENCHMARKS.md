@@ -157,20 +157,22 @@ etude-bigint for the still-gcd-bound `normalize`/`add_eqden`@≥1024b (raw unred
 
 | tier  | etude    | num-rational | ratio    |
 |-------|----------|--------------|----------|
-| 64b   | 104 ns   | 290 ns       | **0.36** |
-| 256b  | 489 ns   | 682 ns       | **0.72** |
-| 1024b | 6.67 µs  | 4.66 µs      | 1.43     |
-| 2048b | 16.2 µs  | 18.1 µs      | **0.90** |
-| 4096b | 43.3 µs  | 42.2 µs      | 1.02     |
+| 64b   | 104 ns   | 285 ns       | **0.37** |
+| 256b  | 491 ns   | 680 ns       | **0.72** |
+| 1024b | 5.90 µs  | 4.66 µs      | 1.27     |
+| 2048b | 13.3 µs  | 18.1 µs      | **0.74** |
+| 4096b | 33.3 µs  | 42.6 µs      | **0.78** |
 
-**64b/256b/2048b are WINS**; 1024b/4096b are the last render losses (1.43×, 1.02×). Two ingredients:
+**64b/256b/2048b/4096b are WINS**; only 1024b remains a render loss (1.27×). Ingredients:
 (a) `to_decimal_string` pre-sizes the result `String` from the O(1) `byte_len` (decimal digits ≈
 `bytes × 2.41`) and writes each component straight into it via `Big::write_decimal`, bypassing the
 `write!`/`format_args` machinery and any mid-render reallocation — this alone nearly halved 64b (0.65× →
-**0.36×**) and moved every tier; (b) etude-bigint's reciprocal-`÷10^19` peel (#115) + qhat-reciprocal Knuth
-divmod (#127) sped the recursive `to_decimal` (256b/2048b/4096b). The residual 1024b/4096b gap is the
-recursive `to_decimal`'s own constant factors (the power-stack `10^k` squarings) in etude-bigint, which
-they are attacking next — re-bench on each render land.
+**0.37×**) and moved every tier; (b) etude-bigint's reciprocal-`÷10^19` peel (#115), qhat-reciprocal Knuth
+divmod (#127), and — biggest at scale — skipping the wasted top squaring in the recursive `to_decimal`
+power stack (#169), which crossed 4096b 1.02× → **0.78×** and moved 2048b 0.90× → 0.74× / 1024b 1.43× →
+1.27×. The residual 1024b gap is now the recursive split's own overhead (the `divmod` calls + per-node
+hi/lo allocations), not the squarings; a scratch-reusing split node in etude-bigint is the next lever —
+re-bench on each render land.
 
 ## History
 
@@ -255,6 +257,11 @@ they are attacking next — re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 25** — banked the render crossing from etude-bigint's "skip the wasted top squaring" in the
+  recursive `to_decimal` (#169): `to_string` **4096b 1.02× → 0.78×** (now beats num-rational), 2048b 0.90× →
+  0.74×, 1024b 1.43× → 1.27×; 64b/256b unchanged (linear peel). Scoreboard refresh only, no local change
+  (render is bignum-render-bound). Corrected the residual attribution (it is the recursive split's
+  `divmod`/per-node allocation overhead, not the power-stack squarings — etude-bigint #157/#169).
 - **slice 24** — lower `CMP_SMALL_BYTES` 64 → 16: the slice-22 `q ∈ {0,1}` fast path made the
   continued-fraction comparison cheap enough to beat cross-multiply from ~32 bytes up, so route 256b+
   operands to CF (previously cross-multiply). `cmp` 256b **0.65× → 0.43×** (94 ns → 62 ns); 64b (8-byte,
