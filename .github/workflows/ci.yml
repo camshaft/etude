@@ -3,14 +3,18 @@
 
 name: ci
 
+# CRON-ONLY (operator directive 2026-09-19, cadenza precedent): no per-PR / per-push runs —
+# the fleet's push cadence starved the account's Actions concurrency/minutes, and the operator
+# will not raise spend. The land model is merge-on-local-green (agents run cargo test/clippy/
+# fmt/wasm gates locally and self-merge); this scheduled run is the periodic safety net — a red
+# here is fixed FORWARD, it blocks nothing. Miri runs in nightly.yml on the same model.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  schedule:
+    - cron: "41 2,10,18 * * *"
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}
   cancel-in-progress: true
 
 env:
