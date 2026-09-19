@@ -20,6 +20,7 @@
 //! have varying byte lengths, and front-consumption does not require a strict left-full invariant.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
+#![deny(missing_docs)]
 
 extern crate alloc;
 
@@ -2219,11 +2220,13 @@ pub struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    /// Returns the number of bytes remaining to be read.
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    /// Returns `true` when no bytes remain to be read.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
