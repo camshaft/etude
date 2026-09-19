@@ -475,6 +475,23 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
     if num.is_zero() {
         return Some(Rational::zero());
     }
+    // Native i128 fast path for i64-fitting components — the common small-rational construction case
+    // (`from_ratio_i64`, `new` on small `Big`s): native sign fixup + native `u128` gcd + box back, with no
+    // `Big` gcd/divmod. The `add`/`sub` general path feeds large products here, so its `to_i64_checked`
+    // fails fast (O(1)) and falls through. `n`/`d` fit i64, so every step is overflow-free in i128.
+    if let (Some(n), Some(d)) = (num.to_i64_checked(), den.to_i64_checked()) {
+        let mut n = n as i128;
+        let mut d = d as i128; // d != 0 (den was nonzero)
+        if d < 0 {
+            n = -n; // move the sign onto the numerator so the denominator is strictly positive
+            d = -d;
+        }
+        let g = gcd_u128(n.unsigned_abs(), d as u128) as i128; // g >= 1 divides both
+        return Some(Rational {
+            num: big_from_i128(n / g),
+            den: big_from_i128(d / g),
+        });
+    }
     // Move the sign onto the numerator so the denominator is strictly positive.
     if den.is_negative() {
         num = num.neg();

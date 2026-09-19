@@ -89,6 +89,7 @@ num-rational always uses `BigInt`, so this is a large win:
 | sub_i64 | 48-bit   | ~0.40 µs | ~3.1 µs      | **~0.13** |
 | cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
 | add_eqden_i64 | 48-bit | 0.12 µs | 0.47 µs   | **0.26**  |
+| from_ratio_i64 | 48-bit | 0.18 µs | 1.16 µs  | **0.16**  |
 
 **~6–9× faster than num-rational on small operands** — all four arithmetic ops AND `cmp` now take the
 native path (`add`/`sub` via `(a*d ± c*b)/(b*d)` with a checked `i128` numerator for the overflow edge;
@@ -101,6 +102,26 @@ coefficient exceeds `i64` and takes the `Big` path.) The residual ~0.4 µs is th
 allocations (`from_i64`) — both implementations must allocate the result; only our *arithmetic* went
 native, and etude-bigint's 1-limb `Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr
 item), so that residual will shrink further when that lands.
+
+`normalize` also takes this native path for i64-fitting components, so **small-rational construction**
+(`from_ratio_i64`, `new` on small `Big`s) reduces with a native `u128` gcd instead of a `Big` gcd:
+`from_ratio_i64` went 0.83 µs → **0.18 µs** (0.73× → **0.16×**, ~6.4× faster than num-rational). The `Big`
+normalize tiers are unaffected (their components exceed `i64`, so the `to_i64_checked` probe fails O(1) and
+falls through).
+
+## Construction and accessors
+
+`from_ratio_i64` (the load-bearing small-rational constructor, above) is a **0.16×** win via the native
+normalize path. The `n/1` constructors are clone/alloc-bound at the smallest size — `from_i64` is 25 ns vs
+6 ns (**4.2×**) and `from_bigint` 1.5–4.1× — because each allocates the `Big` `1` denominator (and, for
+`from_bigint`, moves the numerator in without a clone); this is the same etude-bigint 1-limb-`Big`
+allocation cost as `recip`/`neg`/`abs`@64b and closes with the same inline-repr item. `from_bigint` narrows
+toward parity as the integer grows.
+
+The O(1) accessors — `numer`, `denom`, `is_zero`, `is_negative`, `is_integer` — lower to a field read (or a
+single `Big::bit_len`/`is_negative` call) and are **intentionally unbenched**: a criterion cell there would
+measure only harness/`black_box` overhead, not the function. (If a no-regression *guard* is wanted — to
+catch an accidental non-inline regression — that is a separate ask flagged to the operator.)
 
 ## Large-tier scaling (2048b/4096b tiers — now part of the default board)
 
@@ -198,3 +219,9 @@ not addressable locally; re-bench on each etude-bigint render land.
   (neg 1.51×, abs 1.59×), the same etude-bigint small-`Big`-clone root as recip@64b. Refreshed the render
   board after etude-bigint's qhat-reciprocal divmod (#127): render 4096b 1.14× → 1.04×, 2048b crossed below
   1.0. No code change to the library; measured deltas only.
+- **slice 18** — constructor benches (`from_ratio_i64`/`from_i64`/`from_bigint`) + **native `i128` normalize
+  fast path**. Benching `from_ratio_i64` surfaced that small-rational construction routed through the `Big`
+  gcd; adding the native path to `normalize` (i64-fitting components → native sign-fixup + `u128` gcd + box)
+  cut `from_ratio_i64` 0.83 µs → **0.18 µs** (0.73× → **0.16×**), no regression on the `Big` normalize tiers
+  (they exceed `i64` and fall through). Documented the `n/1` ctors as clone-bound (etude-bigint inline-repr)
+  and the O(1) accessors as intentionally unbenched.

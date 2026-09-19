@@ -353,6 +353,56 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
+    // Construction. `from_ratio_i64` is the common small-rational constructor (e.g. `3/10`) — it reduces
+    // via a gcd, so it is the load-bearing ctor; `from_i64`/`from_bigint` are `n/1` (no reduction). All are
+    // compared against num-rational's constructors on the same values.
+    {
+        let mut rng = Rng(0xc057_ac70_bad5_eed1);
+        let (n, d) = (rng.i64_small(), rng.i64_small());
+
+        let mut g = group(c, "from_ratio_i64");
+        g.bench_function(BenchmarkId::new("etude", "48b"), |be| {
+            be.iter(|| {
+                black_box(Rational::from_ratio_i64(black_box(n), black_box(d)).expect("nonzero"))
+            })
+        });
+        g.bench_function(BenchmarkId::new("num-rational", "48b"), |be| {
+            be.iter(|| {
+                black_box(BigRational::new(
+                    BigInt::from(black_box(n)),
+                    BigInt::from(black_box(d)),
+                ))
+            })
+        });
+        g.finish();
+
+        let mut g = group(c, "from_i64");
+        g.bench_function(BenchmarkId::new("etude", "48b"), |be| {
+            be.iter(|| black_box(Rational::from_i64(black_box(n))))
+        });
+        g.bench_function(BenchmarkId::new("num-rational", "48b"), |be| {
+            be.iter(|| black_box(BigRational::from_integer(BigInt::from(black_box(n)))))
+        });
+        g.finish();
+
+        // from_bigint: a wide integer as `n/1` (no reduction) across the magnitude tiers.
+        let mut g = group(c, "from_bigint");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0xb197_c0de ^ (nbytes as u64));
+            let big = rng.big(nbytes);
+            let bbig = to_bigint(&big);
+            g.bench_with_input(BenchmarkId::new("etude", label), &big, |be, big| {
+                be.iter(|| black_box(Rational::from_bigint(big.clone())))
+            });
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", label),
+                &bbig,
+                |be, bbig| be.iter(|| black_box(BigRational::from_integer(bbig.clone()))),
+            );
+        }
+        g.finish();
+    }
+
     // Rendering to a decimal string: our alloc-lean Display (one String via Big::write_decimal) vs
     // num-rational's `to_string`. Now a win at small tiers after etude-bigint's single-limb to_decimal
     // fast path (#82); tracked to guard it.
