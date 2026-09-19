@@ -328,13 +328,25 @@ impl Builder {
             self.flush_and_reserve(preferred_read_size);
         }
 
-        let len = self
+        let reported = self
             .head
             .put_uninit_slice(preferred_read_size, |slice| {
                 let len = f(slice);
                 Err(len)
             })
             .unwrap_err();
+
+        // The callback was handed a slice of exactly `preferred_read_size` uninitialized bytes, so it
+        // can only have initialized bytes WITHIN that slice. A reported length beyond it (a buggy or
+        // hostile socket read claiming more than the buffer it was given) must NOT reach the unsafe
+        // `advance_mut`, or uninitialized heap memory past the slice would be committed as rope content
+        // (a safe-code info-leak). Clamp to the slice length so the commit is always sound; debug builds
+        // additionally assert the contract to surface caller misuse early.
+        debug_assert!(
+            reported <= preferred_read_size,
+            "for_socket_read callback reported {reported} bytes for a {preferred_read_size}-byte slice"
+        );
+        let len = reported.min(preferred_read_size);
 
         unsafe {
             use bytes::BufMut;
