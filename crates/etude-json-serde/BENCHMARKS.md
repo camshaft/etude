@@ -38,6 +38,8 @@ tokens, touch no content — the attribution baseline). Absolute µs vary with m
 | digest_mixed (200 objects) | ~150 µs | ~493 µs | ~60–90 µs |
 | digest_strings (500 strings) | ~29 µs | ~106 µs | ~26 µs |
 | digest_numbers (500 numbers) | ~21 µs | ~86 µs | ~20 µs |
+| digest_containers (500 empty arrays, post-#247) | ~20 µs | **~54 µs** (2.64×) | ~18 µs |
+| digest_escaped (500 escaped strings) | ~68 µs | ~169 µs (2.48×) | **~77 µs** |
 
 **Reading it — the copy-avoidance win is allocation, not (yet) wall-clock.** The adapter trails
 `serde_json` ~3× on time despite ~2200× fewer allocations. Crucially, `raw_tokenize` is *at or below*
@@ -62,8 +64,21 @@ the rope scan — it is the per-token **handoff**. Two attributed costs and thei
   time win far exceeds the 20% size cut because the token is copied several times per element. Done
   (`etude-json` #247). Further compaction (relative-`u32` number offsets, ~another halving) is
   **declined**: it truncates on a pathological >4 GB number lexeme — a correctness risk vs the oracle.
+- **Escaped strings — the exception where laziness pays a double-scan** (`digest_escaped`, added to
+  justify-or-kill an unchecked escaped-decode variant, "#147"): serde ~68 µs, adapter ~169 µs (2.48×),
+  and `raw_tokenize` ~77 µs — *the tokenizer alone already exceeds serde's whole parse*, unlike every
+  escape-free workload where it beats serde. Two costs, neither fixable by skipping the final
+  `from_utf8` (that saves only single-digit µs of the ~100 µs gap): (1) escape lexing is byte-at-a-time
+  (each `\` breaks the bulk-skip) and, in Strict, validates content runs; (2) **lazy decode re-scans
+  the content a second time** — the tokenizer scans escapes to find the string end, then
+  `decode_string` re-walks to unescape, where serde unescapes in its single parse pass. The
+  double-scan is the *cost of laziness* and the right trade: escape-free strings (the common case) get
+  the zero-copy borrow and win; escaped strings (the minority) pay twice. So **"#147" is declined** —
+  a negligible measured win that would add an `unsafe` public API to the lexer.
 
 The `raw_tokenize` baseline is what re-attributed this gap: an earlier reading blamed the tokenizer's
-`byte_at` scan, and a fresh measurement falsified it — the scan is competitive, the handoff is the lever.
-The remaining ~2.64× is now the generic `Visitor` dispatch + per-element recursive re-entry + the
-lookahead fill/take, not memcpy — the next lever, if pursued, lives there.
+`byte_at` scan, and a fresh measurement falsified it — for escape-free input the scan is competitive
+(beats serde) and the handoff was the lever (cut by #247); only escape-heavy input makes the scan lose.
+The remaining ~2.64× on containers is generic-`Visitor` dispatch + per-element recursive re-entry + the
+lookahead fill/take, not memcpy — the next lever, if pursued, lives there (spike-side; the adapter stays
+spike-only per the operator's Decision 0 pending #184 review).

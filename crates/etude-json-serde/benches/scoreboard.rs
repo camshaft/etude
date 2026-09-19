@@ -171,6 +171,27 @@ fn string_doc(count: usize) -> String {
     s
 }
 
+/// Escape-heavy: a flat array of strings that all contain escape sequences (`\"`, `\\`, `\n`, `\t`,
+/// `\uXXXX`), so every string takes the materializing `decode_string` -> `RopeStr::Owned` path rather
+/// than the zero-copy borrow. Isolates the escaped-string handoff: the adapter must tokenize, then
+/// unescape into a fresh buffer, then (in Strict) validate it — where `serde_json` unescapes and
+/// validates in a single pass. Quantifies whether the escaped path is a lever worth pursuing.
+fn escaped_doc(count: usize) -> String {
+    let mut s = String::from("[");
+    for i in 0..count {
+        if i > 0 {
+            s.push(',');
+        }
+        // Valid JSON escapes (quote, backslash, newline, tab) plus a raw multi-byte char (é) copied
+        // through as content — so the decode path exercises both escape expansion and byte runs.
+        s.push_str(&format!(
+            r#""row {i}:\t\"quoted\" value\nwith a backslash \\ and unicode é tail""#
+        ));
+    }
+    s.push(']');
+    s
+}
+
 /// Number-heavy: a flat array of varied numbers (ints, decimals, exponents) — isolates the number
 /// handoff (eager lexeme + component sub-rope slicing) from the string path.
 fn number_doc(count: usize) -> String {
@@ -249,6 +270,7 @@ fn bench_workload(c: &mut Criterion, name: &str, doc: String) {
 fn benches(c: &mut Criterion) {
     bench_workload(c, "digest_mixed", mixed_doc(200));
     bench_workload(c, "digest_strings", string_doc(500));
+    bench_workload(c, "digest_escaped", escaped_doc(500));
     bench_workload(c, "digest_numbers", number_doc(500));
     bench_workload(c, "digest_containers", container_doc(500));
 }
