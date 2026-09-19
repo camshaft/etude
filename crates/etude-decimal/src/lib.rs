@@ -26,7 +26,9 @@
 //! may change. Construct through [`Decimal::zero`], [`Decimal::from_i64`], [`Decimal::from_bigint`],
 //! [`Decimal::new`], [`Decimal::from_ascii`]/[`Decimal::from_str`]; inspect through
 //! [`Decimal::coefficient`], [`Decimal::exponent`], [`Decimal::is_zero`], [`Decimal::is_negative`],
-//! [`Decimal::is_integer`], [`Decimal::to_f64`], the [`Ord`]/[`PartialOrd`] comparison, and `Display`.
+//! [`Decimal::is_integer`], [`Decimal::to_f64`], the [`Ord`]/[`PartialOrd`] comparison, and `Display` /
+//! [`Decimal::write_to`] (the allocation-conscious rendering path — write straight into a
+//! [`core::fmt::Write`] sink rather than building an intermediate `String`).
 
 #![cfg_attr(not(test), no_std)]
 #![deny(missing_docs)]
@@ -291,9 +293,12 @@ impl Decimal {
     /// Convert to the nearest `f64` (correctly rounded via the standard library's float parser).
     /// Magnitudes beyond `f64` range become `±∞`, matching `f64` decimal parsing.
     pub fn to_f64(&self) -> f64 {
-        // Building the canonical decimal string and letting the (correctly-rounded) std parser do the
-        // work is exact-input rounding without reimplementing decimal-to-binary conversion.
-        self.render().parse::<f64>().unwrap_or(f64::NAN)
+        // f64 parsing needs a contiguous string, so this path builds one (it is NOT the Display path,
+        // which stays allocation-conscious via `write_to`). Letting the correctly-rounded std parser do
+        // the decimal→binary conversion is exact-input rounding without reimplementing it.
+        let mut s = String::new();
+        let _ = self.write_to(&mut s);
+        s.parse::<f64>().unwrap_or(f64::NAN)
     }
 
     /// Exact three-way comparison, consistent with the numeric value. Public callers use the [`Ord`] /
@@ -360,54 +365,58 @@ impl Decimal {
         Ordering::Equal
     }
 
-    /// Render the canonical decimal string. The output is always a valid JSON number and re-parses via
-    /// [`Decimal::from_ascii`] to the same value. A plain (point) form is used for modest exponents; a
-    /// bounded `<digits>e<exp>` scientific form is used for large magnitudes so the string stays small.
-    fn render(&self) -> String {
-        use core::fmt::Write;
+    /// Write the canonical decimal rendering DIRECTLY into a [`core::fmt::Write`] sink — the
+    /// allocation-conscious rendering path that [`Display`] uses (no intermediate `String` is built for
+    /// the framing). The output is always a valid JSON number and re-parses via [`Decimal::from_ascii`]
+    /// to the same value: a plain (point) form for modest exponents, and a bounded `<digits>e<exp>`
+    /// scientific form for large magnitudes so the output stays small.
+    ///
+    /// One residual allocation remains: the coefficient's digits come from
+    /// [`etude_bigint::Big::to_decimal_string`], which allocates. A sink-writing digit emitter on `Big`
+    /// (requested from etude-bigint) would make this fully allocation-free; everything else here writes
+    /// straight to `w`.
+    pub fn write_to<W: core::fmt::Write>(&self, w: &mut W) -> core::fmt::Result {
         if self.is_zero() {
-            return String::from("0");
+            return w.write_str("0");
         }
-        let neg = self.coeff.is_negative();
+        if self.coeff.is_negative() {
+            w.write_str("-")?;
+        }
         let mag = self.coeff.abs().to_decimal_string(); // digits only, no sign, no leading zero
-        let mut out = String::new();
-        if neg {
-            out.push('-');
-        }
         // Threshold that bounds the plain-form length; beyond it, fall back to scientific notation. All
         // comparisons stay in i64 (narrowing to usize only once bounded ≤ PLAIN_PAD) so a large
         // exponent cannot truncate on a 32-bit-usize target like wasm32.
         const PLAIN_PAD: i64 = 30;
         if self.exp == 0 {
-            out.push_str(&mag);
+            w.write_str(&mag)
         } else if self.exp > 0 && self.exp <= PLAIN_PAD {
-            out.push_str(&mag);
+            w.write_str(&mag)?;
             for _ in 0..self.exp {
-                out.push('0');
+                w.write_str("0")?;
             }
+            Ok(())
         } else if self.exp < 0 {
             let k = -self.exp; // positive point shift, in i64
             let l = mag.len() as i64;
             if k < l {
                 // Point sits inside the digit string: "ddd.ddd".
                 let cut = (l - k) as usize;
-                out.push_str(&mag[..cut]);
-                out.push('.');
-                out.push_str(&mag[cut..]);
+                w.write_str(&mag[..cut])?;
+                w.write_str(".")?;
+                w.write_str(&mag[cut..])
             } else if k <= l + PLAIN_PAD {
                 // "0.00…ddd" — leading zeros before the significant digits.
-                out.push_str("0.");
+                w.write_str("0.")?;
                 for _ in 0..(k - l) {
-                    out.push('0');
+                    w.write_str("0")?;
                 }
-                out.push_str(&mag);
+                w.write_str(&mag)
             } else {
-                let _ = write!(out, "{mag}e{}", self.exp);
+                write!(w, "{mag}e{}", self.exp)
             }
         } else {
-            let _ = write!(out, "{mag}e{}", self.exp);
+            write!(w, "{mag}e{}", self.exp)
         }
-        out
     }
 }
 
@@ -468,7 +477,8 @@ fn big_from_ascii_digits(int_digits: &[u8], frac_digits: &[u8]) -> Big {
 
 impl core::fmt::Display for Decimal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&self.render())
+        // The Formatter is itself a `core::fmt::Write` sink — write straight into it, no String.
+        self.write_to(f)
     }
 }
 

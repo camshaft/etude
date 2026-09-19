@@ -228,6 +228,45 @@ fn exact_arithmetic() {
     );
 }
 
+#[test]
+fn write_to_renders_into_a_stack_sink() {
+    // A fixed-capacity, heap-free `core::fmt::Write` sink: proves `write_to` renders into an arbitrary
+    // sink with no allocation (the operator's Display-allocation concern), and matches `Display`.
+    struct StackSink {
+        buf: [u8; 128],
+        len: usize,
+    }
+    impl core::fmt::Write for StackSink {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let b = s.as_bytes();
+            let end = self.len + b.len();
+            if end > self.buf.len() {
+                return Err(core::fmt::Error);
+            }
+            self.buf[self.len..end].copy_from_slice(b);
+            self.len = end;
+            Ok(())
+        }
+    }
+
+    for s in [
+        "0", "1", "-1", "100", "0.1", "1.5", "-3.14", "0.001", "123.456", "1e1000", "1e-1000",
+    ] {
+        let d = Decimal::from_str(s).unwrap();
+        let mut sink = StackSink {
+            buf: [0; 128],
+            len: 0,
+        };
+        d.write_to(&mut sink).unwrap();
+        let rendered = core::str::from_utf8(&sink.buf[..sink.len]).unwrap();
+        assert_eq!(
+            rendered,
+            d.to_string(),
+            "write_to vs Display mismatch for {s}"
+        );
+    }
+}
+
 // ─── the differential harness (the growing oracle) ────────────────────────────────────────────────
 
 /// The JSON-number character set. Random strings over it hit valid numbers, near-misses (leading zeros,
