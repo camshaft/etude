@@ -558,6 +558,43 @@ mod tests {
             });
     }
 
+    /// Red (breaker-byterope): `Display for StrRope` writes via `f.write_str` and ignores the
+    /// formatter's width/fill/precision, so `format!("{:>6}", rope)` yields `"ab"` where the same
+    /// format over `&str` yields `"    ab"` — a silent divergence from the type StrRope models.
+    /// `str`'s own `Display` routes through `Formatter::pad`, which honors width, alignment, fill,
+    /// and precision (truncation); the fix should do the same over the linearized content. The
+    /// assertions are parity-based, so any conforming implementation passes.
+    #[test]
+    fn display_honors_format_parameters_like_str() {
+        let s = StrRope::from("ab");
+        assert_eq!(
+            format!("{:>6}", s),
+            format!("{:>6}", "ab"),
+            "right-align width"
+        );
+        assert_eq!(
+            format!("{:<6}", s),
+            format!("{:<6}", "ab"),
+            "left-align width"
+        );
+        assert_eq!(
+            format!("{:-^7}", s),
+            format!("{:-^7}", "ab"),
+            "center with fill"
+        );
+        let t = StrRope::from("héllo");
+        assert_eq!(
+            format!("{:.3}", t),
+            format!("{:.3}", "héllo"),
+            "precision truncates by chars"
+        );
+        assert_eq!(
+            format!("{:>8.2}", t),
+            format!("{:>8.2}", "héllo"),
+            "width plus precision"
+        );
+    }
+
     #[test]
     fn from_str_and_basic_queries() {
         let s = StrRope::from("héllo");
