@@ -1100,3 +1100,36 @@ fn tree_overwrite_small_span_in_large_shared_chunk_is_bounded() {
         "tree-level equal-length overwrite copied the WHOLE shared chunk (unbounded COW)"
     );
 }
+
+/// Trait-impl parity with `etude_bytevec::ByteVec`: the conversions and equality impls a drop-in
+/// caller relies on. Covers the impls added for compat — `From<String>`, `Extend<Vec<u8>>`, the
+/// `PartialEq<[Bytes]>` family, and `From<ByteRopeError> for std::io::Error`.
+#[test]
+fn trait_impl_parity_with_bytevec() {
+    // From<String>
+    let from_string = ByteRope::from(String::from("hello"));
+    assert_eq!(from_string, b"hello");
+
+    // Extend<Vec<u8>>
+    let mut r = ByteRope::from(b"a");
+    r.extend([alloc::vec![b'b', b'c'], alloc::vec![b'd']]);
+    assert_eq!(r, b"abcd");
+
+    // PartialEq<[Bytes]> / <&[Bytes]> / <[Bytes; N]> / <&[Bytes; N]> — chunking-independent.
+    let rope: ByteRope = [chunk(b"foo"), chunk(b"bar")].into_iter().collect();
+    let chunks_arr = [Bytes::from_static(b"foo"), Bytes::from_static(b"bar")];
+    assert_eq!(rope, chunks_arr); // [Bytes; N]
+    assert_eq!(rope, &chunks_arr); // &[Bytes; N]
+    assert_eq!(rope, chunks_arr[..]); // [Bytes]
+    assert_eq!(rope, &chunks_arr[..]); // &[Bytes]
+    // Different chunking, same bytes, still equal (content compare, not chunk-identity).
+    let one_chunk = [Bytes::from_static(b"foobar")];
+    assert_eq!(rope, one_chunk[..]);
+    // Inequality is detected.
+    let wrong = [Bytes::from_static(b"foo"), Bytes::from_static(b"baz")];
+    assert!(rope != wrong);
+
+    // From<ByteRopeError> for std::io::Error maps OutOfBounds -> UnexpectedEof.
+    let io_err: std::io::Error = ByteRopeError::OutOfBounds(7).into();
+    assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
+}

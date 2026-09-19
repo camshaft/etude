@@ -67,6 +67,16 @@ impl core::fmt::Display for ByteRopeError {
 
 impl core::error::Error for ByteRopeError {}
 
+#[cfg(feature = "std")]
+impl From<ByteRopeError> for std::io::Error {
+    #[inline]
+    fn from(error: ByteRopeError) -> Self {
+        match error {
+            ByteRopeError::OutOfBounds(_) => Self::new(std::io::ErrorKind::UnexpectedEof, error),
+        }
+    }
+}
+
 /// A tiered byte rope. See the crate docs.
 #[derive(Clone, Default)]
 pub struct ByteRope {
@@ -1665,6 +1675,42 @@ impl<const N: usize> PartialEq<&[u8; N]> for ByteRope {
     }
 }
 
+// Equality against a slice/array of `Bytes` chunks (chunking-independent — compares flattened byte
+// content), mirroring `etude_bytevec::ByteVec` for a drop-in swap.
+impl PartialEq<[Bytes]> for ByteRope {
+    #[inline]
+    fn eq(&self, other: &[Bytes]) -> bool {
+        if self.is_empty() != other.is_empty() {
+            return false;
+        }
+        if other.len() == 1 {
+            return self.eq(&other[0][..]);
+        }
+        self.chunks().flatten().eq(other.iter().flatten())
+    }
+}
+
+impl PartialEq<&[Bytes]> for ByteRope {
+    #[inline]
+    fn eq(&self, other: &&[Bytes]) -> bool {
+        self.eq(*other)
+    }
+}
+
+impl<const LEN: usize> PartialEq<[Bytes; LEN]> for ByteRope {
+    #[inline]
+    fn eq(&self, other: &[Bytes; LEN]) -> bool {
+        self.eq(&other[..])
+    }
+}
+
+impl<const LEN: usize> PartialEq<&[Bytes; LEN]> for ByteRope {
+    #[inline]
+    fn eq(&self, other: &&[Bytes; LEN]) -> bool {
+        self.eq(&other[..])
+    }
+}
+
 impl From<Bytes> for ByteRope {
     fn from(bytes: Bytes) -> Self {
         let mut rope = Self::new();
@@ -1851,6 +1897,13 @@ impl From<Vec<u8>> for ByteRope {
     }
 }
 
+impl From<alloc::string::String> for ByteRope {
+    #[inline]
+    fn from(value: alloc::string::String) -> Self {
+        value.into_bytes().into()
+    }
+}
+
 impl From<&'static [u8]> for ByteRope {
     #[inline]
     fn from(value: &'static [u8]) -> Self {
@@ -1914,6 +1967,15 @@ impl Extend<ByteRope> for ByteRope {
     fn extend<I: IntoIterator<Item = ByteRope>>(&mut self, iter: I) {
         for mut rope in iter {
             self.append(&mut rope);
+        }
+    }
+}
+
+impl Extend<Vec<u8>> for ByteRope {
+    #[inline]
+    fn extend<I: IntoIterator<Item = Vec<u8>>>(&mut self, iter: I) {
+        for bytes in iter {
+            self.push_back(bytes.into());
         }
     }
 }
