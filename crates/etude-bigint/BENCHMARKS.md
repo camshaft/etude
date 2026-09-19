@@ -245,8 +245,14 @@ Scalar codecs are flat: `i64_checked_from_sign_magnitude_bytes` 5.43 ns, `i128_f
 ## Where the gaps remain (optimization order)
 
 1. **to_decimal_string at 256b/1024b (1.38× / 1.58×).** The peel is alloc-free with a reciprocal ÷10¹⁹,
-   and the recursive path's divmods now use the reciprocal `qhat`; the residual is the recursive
-   conversion's own constant factors (power-stack squarings, split overhead) rather than the divmod.
+   and the recursive path's divmods use the reciprocal `qhat`. The residual is **not** the power-stack
+   squarings: a symmetric schoolbook squaring for the `pow[i] = pow[i-1]²` stack was measured
+   neutral-to-worse (1024b +4.2%, 4096b −1.4%, small tiers unchanged — the stack entries are small, so
+   the three-pass overhead outweighs the ~½ multiply saving, and the stack is a small fraction of the
+   total) and reverted. So the residual is the **recursive split's own overhead — the divmod calls and
+   per-node allocations**, not the squarings. Moving this needs fewer/cheaper splits (e.g. avoiding the
+   wasted top squaring, a leaner node that reuses scratch), not a faster square. 256b is the linear peel
+   (4 limbs, below the 10-limb recursive threshold), a separate constant-factor path.
 2. **clone / from_i64 / neg / abs at 64b (2.20× / 1.77× / 2.19× / 1.80×).** All four are the same
    small-value path heap-allocating a one-limb `Vec`. An inline small-value magnitude repr fixes them
    together (measured clone 2.20→~1.0×, from_i64 1.77→0.97×) but REGRESSES add/mul unless the arithmetic
