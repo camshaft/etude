@@ -29,6 +29,9 @@ use bytes::{Bytes, BytesMut};
 mod tree;
 use tree::Tree;
 
+pub mod builder;
+pub use builder::Builder;
+
 pub mod tagged;
 pub use tagged::Tagged;
 
@@ -109,6 +112,14 @@ impl ByteRope {
     #[inline]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a [`Builder`] for efficiently constructing a rope by buffering writes into a head
+    /// buffer of the given chunk capacity. Mirrors the flat buffer's `builder` so callers can swap
+    /// the two.
+    #[inline]
+    pub fn builder(chunk_capacity: usize) -> builder::Builder {
+        builder::Builder::new(chunk_capacity)
     }
 
     /// Total number of bytes in the rope.
