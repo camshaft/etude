@@ -599,11 +599,21 @@ impl Decimal {
         }
     }
 
-    /// Compare `|self|` against `|other|` (both assumed nonzero). Exact and allocation-light: it first
-    /// compares the adjusted exponent (the base-10 order of magnitude of the most-significant digit),
+    /// Compare `|self|` against `|other|` (both assumed nonzero). Exact and allocation-light.
+    ///
+    /// When the exponents are EQUAL — the common case (same-scale decimals) — the magnitude order is
+    /// exactly the coefficient magnitude order, so it compares the [`etude_bigint::Big`] coefficients
+    /// directly (a limb-wise, top-limb-first compare) with no base-10 rendering. Otherwise it falls back
+    /// to comparing the adjusted exponent (the base-10 order of magnitude of the most-significant digit),
     /// and only when those tie does it compare the digit strings aligned at that most-significant digit
     /// — so no power-of-ten scaling is ever materialized.
     fn cmp_magnitude(&self, other: &Decimal) -> Ordering {
+        if self.exp == other.exp {
+            // Equal scale: |a·10^e| vs |b·10^e| is |a| vs |b|. Compare the coefficient magnitudes via
+            // `Big` (allocation-light, short-circuiting on the top limb) rather than rendering both to
+            // decimal strings — the hot path the scoreboard flagged.
+            return self.coeff.abs().cmp(&other.coeff.abs());
+        }
         let da = self.coeff.abs().to_decimal_string();
         let db = other.coeff.abs().to_decimal_string();
         // Adjusted exponent = position of the most-significant digit = (#digits - 1) + exp. Computed in
