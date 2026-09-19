@@ -76,11 +76,15 @@ num-rational always uses `BigInt`, so this is a large win:
 | add_i64 | 48-bit   | 0.40 µs  | 3.14 µs      | **0.126** |
 | sub_i64 | 48-bit   | ~0.40 µs | ~3.1 µs      | **~0.13** |
 | cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
+| add_eqden_i64 | 48-bit | 0.12 µs | 0.47 µs   | **0.26**  |
 
 **~6–9× faster than num-rational on small operands** — all four arithmetic ops AND `cmp` now take the
 native path (`add`/`sub` via `(a*d ± c*b)/(b*d)` with a checked `i128` numerator for the overflow edge;
 `cmp` via `a*d ? c*b` in `i128`; falling back to `Big`). `cmp_small` also skips the `byte_len` size probe
-for the common i64-fitting case. (The byte-width tiers below UNDER-represent this case: their top magnitude bit is set, so a "64b"
+for the common i64-fitting case. The native `add`/`sub` path is tried BEFORE the Big equal-denominator
+path, so small **equal-denominator** add/sub (`add_eqden_i64` — a shared-denominator accumulation, e.g.
+tallying `k/1_000_003`) also goes native rather than allocating a Big sum + Big-gcd normalize: **0.26×**
+num-rational (~3.8× faster). (The byte-width tiers below UNDER-represent this case: their top magnitude bit is set, so a "64b"
 coefficient exceeds `i64` and takes the `Big` path.) The residual ~0.4 µs is the two result-`Big`
 allocations (`from_i64`) — both implementations must allocate the result; only our *arithmetic* went
 native, and etude-bigint's 1-limb `Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr
@@ -149,3 +153,9 @@ bignum-render-bound, not addressable locally.
   `to_decimal` fast path #82 + our alloc-lean Display) + corrected the large-tier scaling analysis:
   Karatsuba is already landed (#53), so add/sub@4096b parity is expected (num-bigint has it too) — a lead
   needs Toom-3; Lehmer gcd is the remaining bignum lever for the ≥1024b gcd-bound cells.
+- **slice 14** — route small equal-denominator `add`/`sub` through the native `i128` path: try
+  `addsub_small` BEFORE the Big equal-denominator branch (for i64-fitting operands `(a*b + c*b)/(b*b)`
+  reduces natively to `(a+c)/b`, cheaper than a Big sum + Big-gcd normalize). New `add_eqden_i64` cell:
+  **0.26×** num-rational (~3.8× faster), no regression on the Big tiers. Also wired etude-bigint's
+  quotient-only `Big::div_exact` into `normalize`/`reduce_by` (drops the discarded divmod remainder on the
+  shared-factor Big path; no random-bench delta since random gcd=1 hits the allocation-free skip).
