@@ -87,20 +87,9 @@ jobs:
       - run: cargo build -p etude-ensure --target thumbv7em-none-eabihf
       - run: cargo build -p etude-buffer --no-default-features --target thumbv7em-none-eabihf
 
-  # The buffer adapters use `unsafe`; check them under Miri.
-  miri:
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: ""
-      # bolero corpus discovery does a filesystem stat, which Miri's isolation blocks.
-      MIRIFLAGS: -Zmiri-disable-isolation
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-      - uses: camshaft/rust-cache@v1
-      - run: cargo miri test --workspace --all-features
+  # Miri moved to the scheduled nightly workflow (operator-authorized 2026-09-19): the
+  # full-workspace run takes 30-60+ min, so per-PR it never completed before being superseded
+  # (zero signal) while camping a runner and starving every queued PR run. See nightly.yml.
 
   # Model-check the `vectored_copy` proof (and any future proofs) with Kani.
   # DISABLED (operator-authorized 2026-09-19): model-checking/kani-github-action@v1.1 (the
