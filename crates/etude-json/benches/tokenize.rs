@@ -23,7 +23,7 @@
 use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
 use etude_bytevec::ByteVec;
-use etude_json::Tokenizer;
+use etude_json::{Token, TokenKind, Tokenizer};
 use std::alloc::{GlobalAlloc, Layout};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -146,6 +146,86 @@ fn corpus() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The string-decode corpus: (name, JSON array-of-strings bytes). Each shape stresses a different
+/// path of `Token::decode_string`: unescaped content (a straight copy), sparse escapes, dense unicode
+/// escapes (surrogate decoding), and a single large value. The reference is `serde_json` parsing the
+/// same bytes into a `Vec<String>` — the fair differential, since that also materializes exactly one
+/// owned `String` per element and nothing else.
+fn decode_corpus() -> Vec<(&'static str, String)> {
+    // Many short strings with no escapes — the common web-payload shape; decode is a plain copy.
+    let mut no_escape = String::from("[");
+    for i in 0..5_000 {
+        if i > 0 {
+            no_escape.push(',');
+        }
+        no_escape.push('"');
+        no_escape.push_str(itoa(i).as_str());
+        no_escape.push_str("_value_field");
+        no_escape.push('"');
+    }
+    no_escape.push(']');
+
+    // Strings with a few escapes each — decode copies runs, then expands `\n` `\t` `\"`.
+    let mut escaped = String::from("[");
+    for i in 0..5_000 {
+        if i > 0 {
+            escaped.push(',');
+        }
+        escaped.push_str(&format!(r#""line {i}\tcol\ttab\nnext\t\"quoted\"""#));
+    }
+    escaped.push(']');
+
+    // Strings that are all `\u` escapes — the surrogate/hex-decode path.
+    let mut unicode = String::from("[");
+    for i in 0..2_000 {
+        if i > 0 {
+            unicode.push(',');
+        }
+        // A BMP escape, an accented char, and an astral char via a surrogate pair.
+        unicode.push_str(&format!(r#""éA{i}😀""#));
+    }
+    unicode.push(']');
+
+    // One large unescaped string — decode is a single big copy (isolates per-byte copy throughput).
+    let mut big_no_escape = String::from("[\"");
+    for _ in 0..100_000 {
+        big_no_escape.push('a');
+    }
+    big_no_escape.push_str("\"]");
+
+    // One large string that is one-third escapes — decode alternates copy runs with expansions.
+    let mut big_escaped = String::from("[\"");
+    for _ in 0..30_000 {
+        big_escaped.push_str("ab\\n");
+    }
+    big_escaped.push_str("\"]");
+
+    vec![
+        ("no_escape_5k", no_escape),
+        ("escaped_5k", escaped),
+        ("unicode_2k", unicode),
+        ("big_no_escape_100k", big_no_escape),
+        ("big_escaped_90k", big_escaped),
+    ]
+}
+
+/// Collect the `String`-kind tokens of `input` (done outside the measured region so a decode
+/// benchmark times only `Token::decode_string`, not the tokenize scan).
+fn string_tokens(input: &ByteVec) -> Vec<Token> {
+    Tokenizer::new(input)
+        .map(|t| t.expect("valid json"))
+        .filter(|t| t.kind() == TokenKind::String)
+        .collect()
+}
+
+/// Decode every collected string token's content to an owned `String` — the on-demand
+/// unescape/materialize cost of `Token::decode_string`, in isolation.
+fn decode_all(tokens: &[Token], input: &ByteVec) {
+    for t in tokens {
+        black_box(t.decode_string(input).expect("string token decodes"));
+    }
+}
+
 /// Minimal `usize`→decimal without allocating through `format!` in the hot corpus loop.
 fn itoa(mut n: usize) -> String {
     if n == 0 {
@@ -216,11 +296,36 @@ fn print_alloc_scoreboard(corpus: &[(&'static str, String)]) {
     println!();
 }
 
+/// Allocation scoreboard for string decoding: `Token::decode_string` over every string in the doc vs
+/// `serde_json` parsing the same bytes into a `Vec<String>`. Both materialize one owned `String` per
+/// element, so this compares the decode path's allocation behavior head to head.
+fn print_decode_alloc_scoreboard(corpus: &[(&'static str, String)]) {
+    println!(
+        "\n=== decode allocation scoreboard (per parse) — Token::decode_string vs serde_json Vec<String> ==="
+    );
+    println!(
+        "{:<20} {:>10} {:>14} {:>10} {:>14}",
+        "shape", "ej_allocs", "ej_bytes", "sj_allocs", "sj_bytes"
+    );
+    for (name, doc) in corpus {
+        let bytes = doc.as_bytes();
+        let input = rope(bytes);
+        let tokens = string_tokens(&input);
+        let (ej_allocs, ej_bytes) = count_allocs(|| decode_all(&tokens, &input));
+        let (sj_allocs, sj_bytes) =
+            count_allocs(|| serde_json::from_slice::<Vec<String>>(bytes).unwrap());
+        println!("{name:<20} {ej_allocs:>10} {ej_bytes:>14} {sj_allocs:>10} {sj_bytes:>14}");
+    }
+    println!();
+}
+
 // ─── criterion timing ────────────────────────────────────────────────────────────────────────────
 
 fn bench(c: &mut Criterion) {
     let corpus = corpus();
     print_alloc_scoreboard(&corpus);
+    let dcorpus = decode_corpus();
+    print_decode_alloc_scoreboard(&dcorpus);
     for (name, doc) in &corpus {
         let bytes = doc.as_bytes();
         let input = rope(bytes);
@@ -233,6 +338,22 @@ fn bench(c: &mut Criterion) {
         });
         group.bench_function("serde_json_parse", |b| {
             b.iter(|| serde_json::from_slice::<serde_json::Value>(black_box(bytes)).unwrap())
+        });
+        group.finish();
+    }
+
+    // Per-function: Token::decode_string (string materialization) vs serde_json Vec<String>. Tokens
+    // are collected outside the timed closure so only decode is measured.
+    for (name, doc) in &dcorpus {
+        let bytes = doc.as_bytes();
+        let input = rope(bytes);
+        let tokens = string_tokens(&input);
+        let mut group = c.benchmark_group(format!("decode/{name}"));
+        group.bench_function("etude_json_decode_string", |b| {
+            b.iter(|| decode_all(black_box(&tokens), black_box(&input)))
+        });
+        group.bench_function("serde_json_vec_string", |b| {
+            b.iter(|| serde_json::from_slice::<Vec<String>>(black_box(bytes)).unwrap())
         });
         group.finish();
     }

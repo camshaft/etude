@@ -84,3 +84,43 @@ negligible. So the 0-alloc tokenize win is real only while a consumer *skips* to
 This quantifies the motivation for **chunk-ref-carrying tokens** (a token that also holds the leaf
 `&[u8]` + local position, or a cursor bookmark) so reading a token's bytes is O(1) rather than an
 O(log n) re-descent — see the open design question on the `etude-span` extraction (PR #101).
+
+## String decode — `Token::decode_string` per-function bench (differential vs `serde_json`)
+
+`decode_string` is the on-demand path that materializes a string token's content into an owned
+`String` (applying JSON escapes). The reference is `serde_json` parsing the same bytes into a
+`Vec<String>` — a fair differential, since both allocate exactly one owned `String` per element.
+Tokens are collected outside the timed region, so this measures decode alone (aarch64, jemalloc,
+release, 1.0 s):
+
+| shape               | decode_string | serde_json Vec<String> | ratio | note |
+|---------------------|--------------:|-----------------------:|------:|------|
+| big_no_escape_100k  | 48.8 µs       | 23.9 µs                | 2.04  | one large copy |
+| big_escaped_90k     | 143 µs        | 379 µs                 | **0.38** | 2.6× faster (dense escapes) |
+| escaped_5k          | 705 µs        | 518 µs                 | 1.36  | a few escapes each |
+| unicode_2k          | 168 µs        | 83 µs                  | 2.02  | all `\u`/surrogate |
+| no_escape_5k        | 438 µs        | 202 µs                 | 2.17  | many short strings |
+
+Allocations are one `String` per element on both sides (etude_json allocates *fewer bytes* — it sizes
+each buffer to the content, serde over-reserves): e.g. no_escape_5k etude_json 80 KB vs serde 472 KB.
+
+### Optimization applied — bulk-copy ordinary-byte runs
+
+The decoder copied ordinary content one `push` per byte. It now finds the next escape and copies the
+whole run in one `extend_from_slice` (the same lever the tokenizer's string scan uses), so a string
+with no escapes is one scan plus one copy. Measured before → after:
+
+- **big_no_escape_100k: 124 µs → 48.8 µs (−60%)** — closes most of the gap to serde_json (5.2× → 2.0×).
+- no_escape_5k 476 → 438 µs, escaped_5k 728 → 705 µs (realistic escape density improves).
+- big_escaped_90k 124 → 143 µs (+15%): a synthetic worst case (one third of the bytes are `\`-escapes,
+  so runs are 2 bytes and the run scan costs more than it saves) — still 2.6× faster than serde_json.
+  Regressing a pathological shape that remains far ahead, to win 60% on the common large-payload shape.
+
+### Next levers (continuous improvement)
+
+The small-many-strings shapes (no_escape_5k, unicode_2k) are ~2× serde_json despite comparable
+allocation counts; the suspects are per-token `copy_to_bytes` setup and the two linear passes
+(scan-for-escape then copy). Candidates: a single-pass copy-until-escape (fuse the scan into the
+copy), a no-escape fast path keyed off `string_has_escapes` that skips the escape machinery entirely,
+and (once chunk-ref tokens land, PR #124) decoding from the token's leaf slice to drop `copy_to_bytes`.
+A win here is the new baseline, not a stopping point.

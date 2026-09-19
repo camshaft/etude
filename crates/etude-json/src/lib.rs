@@ -489,15 +489,22 @@ fn decode_content(input: &ByteVec, content: Span) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(src.len());
     let mut pos = 0;
     while pos < src.len() {
-        let b = src[pos];
-        if b != b'\\' {
-            // Copy the raw byte. Multi-byte UTF-8 sequences are copied byte-for-byte and reassembled
-            // by the final `from_utf8` conversion.
-            out.push(b);
-            pos += 1;
-            continue;
+        // Bulk-copy the run of ordinary bytes up to the next escape in one `extend_from_slice`
+        // instead of one `push` per byte — the same lever the tokenizer's string scan uses (#91).
+        // Multi-byte UTF-8 sequences are copied byte-for-byte and reassembled by the final
+        // `from_utf8` conversion; a string with no escapes is one scan plus one copy.
+        match src[pos..].iter().position(|&b| b == b'\\') {
+            None => {
+                out.extend_from_slice(&src[pos..]);
+                break;
+            }
+            Some(0) => {}
+            Some(run) => {
+                out.extend_from_slice(&src[pos..pos + run]);
+                pos += run;
+            }
         }
-        // Escape sequence.
+        // At an escape sequence (`src[pos] == b'\\'`).
         let esc = src.get(pos + 1).copied().unwrap_or(0);
         match esc {
             b'"' => out.push(b'"'),
