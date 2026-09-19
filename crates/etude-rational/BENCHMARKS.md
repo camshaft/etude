@@ -26,10 +26,10 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | sub        | 64b    | 0.95 µs   | 3.98 µs      | **0.24**  |
 | sub        | 256b   | 10.5 µs   | 16.5 µs      | **0.63**  |
 | sub        | 1024b  | 24.1 µs   | 94.1 µs      | **0.26**  |
-| mul        | 64b    | 2.08 µs   | 5.02 µs      | **0.41**  |
+| mul        | 64b    | 0.27 µs   | 4.96 µs      | **0.054** |
 | mul        | 256b   | 8.16 µs   | 20.8 µs      | **0.39**  |
 | mul        | 1024b  | 50.1 µs   | 117 µs       | **0.43**  |
-| div        | 64b    | 1.86 µs   | 5.24 µs      | **0.36**  |
+| div        | 64b    | 0.24 µs   | 5.26 µs      | **0.045** |
 | div        | 256b   | 8.98 µs   | 21.9 µs      | **0.41**  |
 | div        | 1024b  | 48.5 µs   | 114 µs       | **0.42**  |
 | recip      | 64b    | 29.7 ns   | 14.5 ns      | 2.04      |
@@ -109,12 +109,20 @@ native path (`add`/`sub` via `(a*d ± c*b)/(b*d)` with a checked `i128` numerato
 for the common i64-fitting case. The native `add`/`sub` path is tried BEFORE the Big equal-denominator
 path, so small **equal-denominator** add/sub (`add_eqden_i64` — a shared-denominator accumulation, e.g.
 tallying `k/1_000_003`) also goes native rather than allocating a Big sum + Big-gcd normalize: **0.26×**
-num-rational (~3.8× faster). (The byte-width tiers below UNDER-represent this case: their top magnitude bit is set, so a "64b"
-coefficient exceeds `i64` and takes the `Big` path.) The residual ~0.2 µs (after `mul`/`div` cross-reduce on
+num-rational (~3.8× faster). The residual ~0.2 µs (after `mul`/`div` cross-reduce on
 the i64 originals — slice 26) is dominated by the two result-`Big` allocations (`from_i64`) — both
 implementations must allocate the result; only our *arithmetic* went native, and etude-bigint's 1-limb
 `Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr item), so that residual will
 shrink further when that lands.
+
+**A second native tier covers the `64b` byte-width band** (`~1-limb` components whose top magnitude bit is
+set, so they exceed `i64` and miss the `to_i64` paths, but whose magnitudes still fit `u64`). There `mul`,
+`div`, and `cmp` use `u128`: the cross-products `|a|*d`, `|c|*b` are `u64 * u64` (`< 2^128`), so the
+arithmetic runs natively — `cmp` compares them directly (`cmp_small_u128`); `mul`/`div` cross-reduce on the
+u64 magnitudes and box the (possibly `> i128`) products via a sign + `u128`→`Big` encode (`big_from_u128`).
+This took the `64b` binop tier from the `Big` path to native: **`mul` 0.41× → 0.054×** (2.08 µs → 0.27 µs),
+**`div` 0.36× → 0.045×** (1.86 µs → 0.24 µs), **`cmp` 0.93× → 0.18×**. The `mul_div_native_u64_magnitude`
+and `cmp_native_u64_magnitude` tests cover the band (the i64-seeded oracle can't reach it).
 
 `normalize` also takes this native path for i64-fitting components, so **small-rational construction**
 (`from_ratio_i64`, `new` on small `Big`s) reduces with a native gcd instead of a `Big` gcd. The native
@@ -268,6 +276,15 @@ very wide renders are unaffected. Re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 32** — native `u128` `mul`/`div` for the `64b` band (`mul_small_u128`/`div_small_u128`),
+  generalizing slice 31's `cmp` win to arithmetic: `~1-limb` components with the top magnitude bit set
+  exceed `i64` (missing the `to_i64` paths) but their magnitudes fit `u64`, so after cross-reducing on the
+  u64 magnitudes the products fit `u128` (`< 2^128`). They can exceed `i128`, so the sign is carried
+  separately and boxed via a new `big_from_u128` (sign + 16 LE magnitude bytes). **`mul` 64b 2.08 µs →
+  0.27 µs (0.41× → 0.054×)**, **`div` 64b 1.86 µs → 0.24 µs (0.36× → 0.045×)** — ~8× faster, ~20× vs
+  num-rational. `mul_i64`/`div_i64` (i64 path) and 256b+ (Big) unchanged. New `mul_div_native_u64_magnitude`
+  test covers the band (products near `2^128` also exercise `big_from_u128`) across sign combinations vs
+  num-rational.
 - **slice 31** — native `u128` `cmp` for the `64b` tier (`cmp_small_u128`): ~1-limb components with the top
   magnitude bit set exceed `i64` (missing `cmp_small`) but their magnitudes fit `u64`, so `|a|*d` and `|c|*b`
   are `u64 * u64` products that fit `u128`. Compare them natively — sign already resolved by the caller,

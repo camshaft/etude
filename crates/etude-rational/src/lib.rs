@@ -242,6 +242,11 @@ impl Rational {
         if let Some(r) = self.mul_small(other) {
             return r;
         }
+        // Native u128 path for the ~1-limb `64b` band (magnitudes fit u64 but exceed i64, so `mul_small`
+        // misses them): the cross-reduced products fit u128 (see `mul_small_u128`).
+        if let Some(r) = self.mul_small_u128(other) {
+            return r;
+        }
         // `a*c / (b*d)`: cancel gcd(a,d) and gcd(c,b). `b,d > 0` and the cancelled factors are positive,
         // so the resulting denominator is positive — the sign stays on the numerator.
         let (num, den) = cross_reduce_mul(&self.num, &self.den, &other.num, &other.den);
@@ -279,6 +284,38 @@ impl Rational {
         })
     }
 
+    /// Native product when every component's MAGNITUDE fits `u64` but a component exceeds `i64` (so
+    /// `mul_small` misses it — the ~1-limb `64b` band). After cross-reducing on the u64 magnitudes, each
+    /// reduced factor is `<= u64::MAX`, so the products `num`/`den` fit `u128` (`<= (2^64-1)^2 < 2^128`) with
+    /// no overflow — but they can exceed `i128`, so the sign is carried separately and boxed via
+    /// [`big_from_u128`]. Returns `None` (fall back to `Big`) when any magnitude exceeds `u64`. `self`/`other`
+    /// are nonzero (the `mul` zero-guard ran first) and canonical, so `b, d > 0`.
+    fn mul_small_u128(&self, other: &Rational) -> Option<Rational> {
+        let a = self.num.to_i128_checked()?;
+        let b = self.den.to_i128_checked()?;
+        let c = other.num.to_i128_checked()?;
+        let d = other.den.to_i128_checked()?;
+        let max = u64::MAX as u128;
+        let (am, cm) = (a.unsigned_abs(), c.unsigned_abs());
+        let (bm, dm) = (b as u128, d as u128); // b, d > 0 (canonical)
+        if am > max || bm > max || cm > max || dm > max {
+            return None;
+        }
+        // Cross-reduce on the u64 magnitudes (`gcd(|a|,d)`, `gcd(|c|,b)`) — see `mul_small`.
+        let g1 = gcd_u64(am as u64, dm as u64) as u128;
+        let g2 = gcd_u64(cm as u64, bm as u64) as u128;
+        let (num_mag, den_mag) = if g1 == 1 && g2 == 1 {
+            (am * cm, bm * dm) // coprime: skip the four `x/1` u128 divisions
+        } else {
+            ((am / g1) * (cm / g2), (bm / g2) * (dm / g1))
+        };
+        // den > 0; result sign is `sign(a) XOR sign(c)`.
+        Some(Rational {
+            num: big_from_u128(num_mag, (a < 0) != (c < 0)),
+            den: big_from_u128(den_mag, false),
+        })
+    }
+
     /// Exact quotient `self / other` = `(a/b) / (c/d) = (a*d)/(b*c)`. Returns `None` when `other` is zero.
     ///
     /// Same cross-reduction as [`Rational::mul`] (dividing by `c/d` is multiplying by `d/c`): cancel
@@ -293,6 +330,10 @@ impl Rational {
         }
         // Native i128 fast path (same overflow-freedom as `mul_small`).
         if let Some(r) = self.div_small(other) {
+            return Some(r);
+        }
+        // Native u128 path for the ~1-limb `64b` band (see `div_small_u128`).
+        if let Some(r) = self.div_small_u128(other) {
             return Some(r);
         }
         // Multiply `a/b` by `d/c` (both coprime pairs): cancel gcd(a,c) and gcd(d,b).
@@ -335,6 +376,37 @@ impl Rational {
         Some(Rational {
             num: big_from_i128(num),
             den: big_from_i128(den),
+        })
+    }
+
+    /// Native quotient for the ~1-limb `64b` band (magnitudes fit `u64`, a component exceeds `i64`, so
+    /// `div_small` misses it). `a/b ÷ c/d = a*d / (b*c)`; cross-reduce on the u64 magnitudes (`gcd(|a|,|c|)`,
+    /// `gcd(d,b)`), after which the products fit `u128` (see [`Rational::mul_small_u128`]). The divisor
+    /// numerator `c` may be negative, so the sign is carried onto the numerator (denominator stays positive).
+    /// Returns `None` (fall back to `Big`) when any magnitude exceeds `u64`. `self`/`other` are nonzero.
+    fn div_small_u128(&self, other: &Rational) -> Option<Rational> {
+        let a = self.num.to_i128_checked()?;
+        let b = self.den.to_i128_checked()?;
+        let c = other.num.to_i128_checked()?;
+        let d = other.den.to_i128_checked()?;
+        let max = u64::MAX as u128;
+        let (am, cm) = (a.unsigned_abs(), c.unsigned_abs());
+        let (bm, dm) = (b as u128, d as u128); // b, d > 0 (canonical)
+        if am > max || bm > max || cm > max || dm > max {
+            return None;
+        }
+        let g1 = gcd_u64(am as u64, cm as u64) as u128; // gcd(|a|, |c|)
+        let g2 = gcd_u64(dm as u64, bm as u64) as u128; // gcd(d, b)
+        let (num_mag, den_mag) = if g1 == 1 && g2 == 1 {
+            (am * dm, bm * cm)
+        } else {
+            ((am / g1) * (dm / g2), (bm / g2) * (cm / g1))
+        };
+        // Denominator magnitude `b*c` is positive; the true denominator sign is `sign(c)`, moved onto the
+        // numerator so the stored denominator is positive. Result sign = `sign(a) XOR sign(c)`.
+        Some(Rational {
+            num: big_from_u128(num_mag, (a < 0) != (c < 0)),
+            den: big_from_u128(den_mag, false),
         })
     }
 
@@ -684,6 +756,21 @@ fn big_from_i128(v: i128) -> Big {
             Big::i128_to_sign_magnitude_bytes_into(v, &mut buf).expect("17 bytes holds any i128");
         Big::from_sign_magnitude_bytes(&buf[..n])
     }
+}
+
+/// Box a `u128` magnitude with an explicit sign as a `Big`. `from_i64` when the magnitude fits `i64` (the
+/// small case), else via the canonical sign-magnitude byte encoding: `[sign] + 16 little-endian magnitude
+/// bytes` (any `u128` magnitude fits, including the `~2^128` products the native `u128` mul/div path can
+/// produce, which exceed `i128`). Trailing zero magnitude bytes are tolerated (the parser strips them).
+fn big_from_u128(mag: u128, negative: bool) -> Big {
+    if mag <= i64::MAX as u128 {
+        let v = mag as i64;
+        return Big::from_i64(if negative { -v } else { v });
+    }
+    let mut buf = [0u8; 17]; // 1 sign byte + 16 magnitude bytes
+    buf[0] = negative as u8;
+    buf[1..].copy_from_slice(&mag.to_le_bytes());
+    Big::from_sign_magnitude_bytes(&buf)
 }
 
 /// `n / g` where `g` is a known divisor of `n`, WITHOUT allocating when the division is a no-op: returns a
