@@ -9,6 +9,77 @@ fn chunk(s: &[u8]) -> Bytes {
     Bytes::copy_from_slice(s)
 }
 
+/// One step of a reader-drain script for the borrowed-vs-owning parity checks. Decoded from raw
+/// fuzz/fixture bytes (two bytes per step: op selector + arg) so the exact same sequence drives both
+/// a borrowed [`Reader`] and an owned clone.
+#[derive(Clone, Copy)]
+enum ReaderStep {
+    ReadChunk(usize),
+    PartialCopy(usize),
+    Pop,
+}
+
+fn reader_steps(script: &[u8]) -> alloc::vec::Vec<ReaderStep> {
+    script
+        .chunks(2)
+        .map(|w| {
+            let arg = *w.get(1).unwrap_or(&0) as usize;
+            match w[0] % 3 {
+                0 => ReaderStep::ReadChunk(arg),
+                1 => ReaderStep::PartialCopy(arg % 48),
+                _ => ReaderStep::Pop,
+            }
+        })
+        .collect()
+}
+
+/// Drives a borrowed [`Reader`] through `script`, returning the per-call output trace (for
+/// `PartialCopy`, the bytes written into the destination followed by the returned run — so both the
+/// content and where the maximal-run boundary falls are captured).
+fn trace_reader(mut r: Reader<'_>, script: &[u8]) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+    use etude_buffer::{reader::Buffer as _, writer::Buffer as _};
+    let mut trace = alloc::vec::Vec::new();
+    for step in reader_steps(script) {
+        match step {
+            ReaderStep::ReadChunk(w) => trace.push(r.read_chunk(w).unwrap()[..].to_vec()),
+            ReaderStep::PartialCopy(cap) => {
+                let mut buf = alloc::vec![0u8; cap];
+                let mut dest = bytes::buf::UninitSlice::new(&mut buf);
+                let run = r.partial_copy_into(&mut dest).unwrap()[..].to_vec();
+                let written = cap - dest.remaining_capacity();
+                trace.push(buf[..written].to_vec());
+                trace.push(run);
+            }
+            ReaderStep::Pop => trace.push(r.next().map(|b| b[..].to_vec()).unwrap_or_default()),
+        }
+    }
+    trace
+}
+
+/// Drives an owned clone through the SAME `script` via ByteVec's own reader primitives — the oracle
+/// the borrowed reader must match call-for-call.
+fn trace_owning_clone(mut rope: ByteVec, script: &[u8]) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+    use etude_buffer::{reader::Buffer as _, writer::Buffer as _};
+    let mut trace = alloc::vec::Vec::new();
+    for step in reader_steps(script) {
+        match step {
+            ReaderStep::ReadChunk(w) => trace.push(rope.read_chunk(w).unwrap()[..].to_vec()),
+            ReaderStep::PartialCopy(cap) => {
+                let mut buf = alloc::vec![0u8; cap];
+                let mut dest = bytes::buf::UninitSlice::new(&mut buf);
+                let run = rope.partial_copy_into(&mut dest).unwrap()[..].to_vec();
+                let written = cap - dest.remaining_capacity();
+                trace.push(buf[..written].to_vec());
+                trace.push(run);
+            }
+            ReaderStep::Pop => {
+                trace.push(rope.pop_front().map(|b| b[..].to_vec()).unwrap_or_default())
+            }
+        }
+    }
+    trace
+}
+
 /// A `ByteVec` must stay the footprint of the flat chunk buffer it replaced: the `Deep` variant is
 /// boxed, so the value is exactly `len + head Bytes + additional VecDeque`. Pinned to that footprint
 /// (not just `<=`) so the tiered representation can never quietly grow past the flat buffer's size.
@@ -1488,6 +1559,36 @@ fn trait_impls_behave() {
     assert_eq!(v.len(), 2);
 }
 
+/// Deterministic companion to the fuzzed `ReaderOwningParity` op: the borrowed-Small cursor reader
+/// must match the owning-clone oracle call-for-call across sizes spanning the whole Small tier, the
+/// Small/Deep promotion boundary (`PROMOTE_AT`), and well into Deep — under a mixed drain script of
+/// read_chunk splits, partial_copy_into runs, and whole-chunk pops. Reading must also leave the
+/// source untouched.
+#[test]
+fn borrowed_reader_matches_owning_clone_across_tiers() {
+    // 0..96 as raw bytes decodes to a long mixed script: watermarks 0..95 (sub-chunk, chunk-
+    // spanning, and past-end reads), capacities 0..47, and interleaved whole-chunk pops.
+    let script: alloc::vec::Vec<u8> = (0u8..96).collect();
+    for &n in &[0usize, 1, 2, 5, 31, 32, 33, 63, 64, 65, 100, 200] {
+        let mut rope = ByteVec::new();
+        let mut model: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        for i in 0..n {
+            // Varied chunk lengths (1..=5) so reads land both within and across chunk boundaries.
+            let len = (i % 5) + 1;
+            let bytes = alloc::vec![i as u8; len];
+            model.extend_from_slice(&bytes);
+            rope.push_back(chunk(&bytes));
+        }
+        let subject = trace_reader(rope.reader(), &script);
+        let oracle = trace_owning_clone(rope.clone(), &script);
+        assert_eq!(
+            subject, oracle,
+            "borrowed reader vs owning-clone trace at n={n}"
+        );
+        assert_eq!(rope, model, "reader left the source intact at n={n}");
+    }
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn io_read_write() {
@@ -1559,6 +1660,7 @@ fn differential_against_model() {
         IoReadWrite(usize, Vec<u8>),
         CopyToBytesMutCheck,
         ReaderDrain(usize),
+        ReaderOwningParity(Vec<u8>),
         Compact,
         CompactWith(u8),
     }
@@ -1887,8 +1989,9 @@ fn differential_against_model() {
                     // The non-consuming reader::Buffer surface (distinct from ByteVec's own
                     // consuming impl): a full read_chunk drain at a fuzz-chosen watermark must
                     // reconstruct the content in order, each chunk must respect the watermark, and
-                    // the source rope must be left untouched (it reads an O(1)-shared clone). The
-                    // global asserts below re-check the source content + any alias.
+                    // the source rope must be left untouched (a Small source is read through a
+                    // borrowing cursor, a Deep source through an O(1)-shared clone). The global
+                    // asserts below re-check the source content + any alias.
                     use etude_buffer::reader::Buffer as _;
                     let watermark = (w % 40) + 1;
                     let mut reader = rope.reader();
@@ -1905,6 +2008,18 @@ fn differential_against_model() {
                         got, model,
                         "reader full drain reconstructs content (w={watermark})"
                     );
+                }
+                Op::ReaderOwningParity(script) => {
+                    // Guardrail for the borrowed-Small cursor: `rope.reader()` (a borrowing cursor
+                    // for Small sources, an owning clone for Deep) must produce the byte-for-byte,
+                    // call-for-call SAME trace as draining an owned clone directly through ByteVec's
+                    // own reader::Buffer primitives — including partial_copy_into's maximal-run
+                    // ordering. Any divergence in where chunk boundaries or capacity-filling runs
+                    // fall shows up as a trace mismatch. `script` (fuzz-chosen) mixes read_chunk,
+                    // partial_copy_into, and whole-chunk pops at varied watermarks/capacities.
+                    let subject = trace_reader(rope.reader(), script);
+                    let oracle = trace_owning_clone(rope.clone(), script);
+                    assert_eq!(subject, oracle, "borrowed reader vs owning-clone trace");
                 }
                 Op::AsContiguousCheck => {
                     // The only soundness face of as_contiguous: a Some view must be the ENTIRE
