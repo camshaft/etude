@@ -953,30 +953,27 @@ fn write_decimal_chunk<W: core::fmt::Write>(
     mut v: u64,
     pad: usize,
 ) -> core::fmt::Result {
-    let mut lsf = [0u8; 20]; // digits least-significant first; a u64 is at most 20 decimal digits
-    let mut n = 0;
+    // Fill one buffer from the right (least-significant digit written last), so the digits land
+    // most-significant first with no separate reversal pass. A u64 is at most 20 decimal digits.
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
     if v == 0 {
-        lsf[0] = b'0';
-        n = 1;
+        i -= 1;
+        buf[i] = b'0';
     } else {
         while v > 0 {
-            lsf[n] = b'0' + (v % 10) as u8;
+            i -= 1;
+            buf[i] = b'0' + (v % 10) as u8;
             v /= 10;
-            n += 1;
         }
     }
-    // Assemble most-significant first into `out`, left-padding with '0' up to `pad` (pad ≤ 19, n ≤ 20).
-    let width = n.max(pad);
-    let mut out = [0u8; 20];
-    for (i, slot) in out[..width].iter_mut().enumerate() {
-        let from_right = width - 1 - i; // position i from the left is digit `width-1-i` from the right
-        *slot = if from_right < n {
-            lsf[from_right]
-        } else {
-            b'0'
-        };
+    // Left-pad with '0' up to `pad` digits (pad ≤ 19 ≤ 20; a full chunk already has ≥ pad digits, so
+    // this adds nothing there). `buf.len() - i` is the digit count written so far.
+    while buf.len() - i < pad {
+        i -= 1;
+        buf[i] = b'0';
     }
-    w.write_str(core::str::from_utf8(&out[..width]).expect("ascii digits"))
+    w.write_str(core::str::from_utf8(&buf[i..]).expect("ascii digits"))
 }
 
 /// Below this many limbs (in the SMALLER operand), schoolbook multiply beats Karatsuba (whose

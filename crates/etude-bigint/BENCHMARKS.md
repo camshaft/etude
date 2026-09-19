@@ -51,9 +51,9 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
-| to_decimal_string         | 64b    | 61.9 ns   | 72.2 ns    | **0.86**  |
+| to_decimal_string         | 64b    | 58.3 ns   | 72.2 ns    | **0.81**  |
 | to_decimal_string         | 256b   | 342 ns    | 248 ns     | 1.38      |
-| to_decimal_string         | 1024b  | 3.19 µs   | 2.22 µs    | 1.44      |
+| to_decimal_string         | 1024b  | 3.14 µs   | 2.22 µs    | 1.42      |
 | to_decimal_string         | 4096b  | 17.1 µs   | 21.0 µs    | **0.81**  |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
@@ -70,7 +70,7 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | from_base_10_pow_k        | 4096b  | 2.32 µs   | 4.77 µs    | **0.49**  |
 
 We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), **cmp** (three of four
-tiers), and **to_decimal_string at 64b and 4096b** (0.86× / 0.81×), and reach parity-or-better on
+tiers), and **to_decimal_string at 64b and 4096b** (0.81× / 0.81×), and reach parity-or-better on
 **mul at 256b/1024b** and **sub at 256b**.
 
 `clone` and `from_i64` are the small-value CONSTRUCTION paths: at 64b both trail num-bigint (2.20× /
@@ -264,6 +264,11 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   4096b 22.1 → 17.1 µs (1.04× → **0.81× — now beats num-bigint**). The 64b/256b tiers use the linear
   peel, unaffected. (Distinct from — and unlike — the reverted symmetric-squaring attempt, which only
   made the squarings faster; this removes one entirely.)
+- **Single-buffer chunk formatter** — `write_decimal_chunk` (run per 19-digit chunk at every tier) filled
+  a least-significant-first scratch buffer and then reversed it into a second buffer. It now fills one
+  buffer from the right, so the digits land most-significant-first with no reversal pass and no second
+  buffer. Helps most where the formatter is the larger share of the work: 64b 61.9 → 58.3 ns
+  (0.86× → **0.81×**), 1024b 3.19 → 3.14 µs (1.44× → **1.42×**); 256b/4096b within noise (divmod-dominated).
 
 ## Where the gaps remain (optimization order)
 
