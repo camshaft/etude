@@ -1149,10 +1149,58 @@ fn bench_build_crossover(c: &mut Criterion) {
     }
 }
 
+/// Promote/demote amplitude sweep — locates where a buffer oscillating around the tier boundary starts
+/// to churn its representation. Each shape oscillates the backlog around a center of 48 (the midpoint of
+/// `DEMOTE_AT` = 32 and `PROMOTE_AT` = 64) with a growing amplitude: grow by `span` chunks, then drain
+/// the same `span`. Below the ~32-wide hysteresis band the swing stays in one tier (the rope tracks the
+/// naive deque's op count), and once the amplitude clears the band each cycle pays a full `promote` +
+/// `demote` — so the rope-vs-naive ratio steps up exactly at the band edge, pinning the band width.
+fn bench_churn_sweep(c: &mut Criterion) {
+    const CENTER: usize = 48;
+    let feed: Vec<Bytes> = (0..64).map(|i| mtu_chunk(i as u8)).collect();
+    for &amp in &[16usize, 24, 32, 40, 56, 64] {
+        let lo = CENTER - amp / 2;
+        let hi = CENTER + amp / 2;
+        let span = hi - lo;
+        let label = format!("amp{amp}_{lo}_{hi}");
+        let mut g = group(c, "churn_sweep");
+        g.bench_function(BenchmarkId::new("rope", &label), |b| {
+            b.iter_batched_ref(
+                || rope_of(lo),
+                |r| {
+                    for chunk in feed.iter().take(span) {
+                        r.push_back(chunk.clone());
+                    }
+                    for _ in 0..span {
+                        black_box(r.pop_front());
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", &label), |b| {
+            b.iter_batched_ref(
+                || naive_of(lo),
+                |v| {
+                    for chunk in feed.iter().take(span) {
+                        v.push_back(chunk.clone());
+                    }
+                    for _ in 0..span {
+                        black_box(v.pop_front());
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_stream,
     bench_build_crossover,
+    bench_churn_sweep,
     bench_push_back,
     bench_push_front,
     bench_mutating,
