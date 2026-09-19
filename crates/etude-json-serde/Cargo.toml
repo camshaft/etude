@@ -30,6 +30,9 @@ etude-strrope = { version = "0.1", path = "../etude-strrope", default-features =
 serde_json = "1"
 # Build input ropes with explicit chunk layouts.
 bytes = "1"
+# Property/differential fuzzing of the adapter against serde_json (mirrors etude-json's tokenizer-level
+# bolero tests; runs bounded under `cargo test`, fuzzable under `cargo bolero`).
+bolero = "0.13"
 # A concrete number value type, to prove the real number decode: Decimal::parse over the lexeme
 # sub-rope's byte iterator. The adapter core stays value-type-agnostic (a consumer picks the type).
 etude-decimal = { version = "0.1", path = "../etude-decimal" }
