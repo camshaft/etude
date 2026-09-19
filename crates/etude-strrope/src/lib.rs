@@ -184,13 +184,17 @@ impl StrRope {
     #[must_use]
     pub fn slice<R: core::ops::RangeBounds<usize>>(&self, range: R) -> StrRope {
         use core::ops::Bound;
+        // `saturating_add` so an excluded start / inclusive end of `usize::MAX` cannot wrap the
+        // `+ 1` to 0 (which would silently return the wrong slice in release); it saturates to
+        // `usize::MAX`, which is past the end and so fails the `is_char_boundary` assert below —
+        // the documented out-of-bounds panic.
         let start = match range.start_bound() {
             Bound::Included(&s) => s,
-            Bound::Excluded(&s) => s + 1,
+            Bound::Excluded(&s) => s.saturating_add(1),
             Bound::Unbounded => 0,
         };
         let end = match range.end_bound() {
-            Bound::Included(&e) => e + 1,
+            Bound::Included(&e) => e.saturating_add(1),
             Bound::Excluded(&e) => e,
             Bound::Unbounded => self.len(),
         };
