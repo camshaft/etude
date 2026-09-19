@@ -226,6 +226,15 @@ fn decode_all(tokens: &[Token], input: &ByteVec) {
     }
 }
 
+/// Decode every collected string token to a `StrRope` — the copy-avoiding string value path
+/// (`Token::decode_str_rope`): a zero-copy structural-share of the rope when the string has no
+/// escapes, a built `StrRope` when it does. The delta over `decode_all` is the allocation avoided.
+fn decode_all_rope(tokens: &[Token], input: &ByteVec) {
+    for t in tokens {
+        black_box(t.decode_str_rope(input).expect("string token decodes"));
+    }
+}
+
 /// Minimal `usize`→decimal without allocating through `format!` in the hot corpus loop.
 fn itoa(mut n: usize) -> String {
     if n == 0 {
@@ -304,17 +313,20 @@ fn print_decode_alloc_scoreboard(corpus: &[(&'static str, String)]) {
         "\n=== decode allocation scoreboard (per parse) — Token::decode_string vs serde_json Vec<String> ==="
     );
     println!(
-        "{:<20} {:>10} {:>14} {:>10} {:>14}",
-        "shape", "ej_allocs", "ej_bytes", "sj_allocs", "sj_bytes"
+        "{:<20} {:>10} {:>12} {:>10} {:>12} {:>10} {:>12}",
+        "shape", "str_allocs", "str_bytes", "rope_allocs", "rope_bytes", "sj_allocs", "sj_bytes"
     );
     for (name, doc) in corpus {
         let bytes = doc.as_bytes();
         let input = rope(bytes);
         let tokens = string_tokens(&input);
-        let (ej_allocs, ej_bytes) = count_allocs(|| decode_all(&tokens, &input));
+        let (str_allocs, str_bytes) = count_allocs(|| decode_all(&tokens, &input));
+        let (rope_allocs, rope_bytes) = count_allocs(|| decode_all_rope(&tokens, &input));
         let (sj_allocs, sj_bytes) =
             count_allocs(|| serde_json::from_slice::<Vec<String>>(bytes).unwrap());
-        println!("{name:<20} {ej_allocs:>10} {ej_bytes:>14} {sj_allocs:>10} {sj_bytes:>14}");
+        println!(
+            "{name:<20} {str_allocs:>10} {str_bytes:>12} {rope_allocs:>10} {rope_bytes:>12} {sj_allocs:>10} {sj_bytes:>12}"
+        );
     }
     println!();
 }
@@ -351,6 +363,9 @@ fn bench(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("decode/{name}"));
         group.bench_function("etude_json_decode_string", |b| {
             b.iter(|| decode_all(black_box(&tokens), black_box(&input)))
+        });
+        group.bench_function("etude_json_decode_str_rope", |b| {
+            b.iter(|| decode_all_rope(black_box(&tokens), black_box(&input)))
         });
         group.bench_function("serde_json_vec_string", |b| {
             b.iter(|| serde_json::from_slice::<Vec<String>>(black_box(bytes)).unwrap())

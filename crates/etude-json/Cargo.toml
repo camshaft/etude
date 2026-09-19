@@ -20,6 +20,9 @@ std = ["etude-bytevec/std", "etude-span/std"]
 etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
 # Shared byte-scanning primitives: the chunk-streaming `Cursor` and the `Span` type (re-exported).
 etude-span = { version = "0.1", path = "../etude-span", default-features = false }
+# The UTF-8 string rope: string values decode into a `StrRope` that rides the input rope's chunks
+# (zero-copy borrow when a string has no escapes) instead of allocating a flat `String`.
+etude-strrope = { version = "0.1", path = "../etude-strrope", default-features = false }
 
 [dev-dependencies]
 # Turn on etude-bytevec's invariant checker in this crate's tests (structural validation at the

@@ -124,3 +124,49 @@ allocation counts; the suspects are per-token `copy_to_bytes` setup and the two 
 copy), a no-escape fast path keyed off `string_has_escapes` that skips the escape machinery entirely,
 and (once chunk-ref tokens land, PR #124) decoding from the token's leaf slice to drop `copy_to_bytes`.
 A win here is the new baseline, not a stopping point.
+
+## StrRope-backed string values — `Token::decode_str_rope` (the copy-avoiding value)
+
+`decode_str_rope` returns the string value as a [`StrRope`] (a UTF-8 rope over the input's chunks)
+instead of an allocated `String`. No escapes: a zero-copy structural-share of the input rope (via
+`StrRope::from_utf8` over a `ByteVec::slice`; the borrow shares chunks, no bytes copied). Escapes: the
+unescaped content is decoded once and wrapped in a single rope leaf. Same corpus, same
+tokens-collected-outside-the-region method:
+
+| shape               | decode_string | decode_str_rope | serde_json | note |
+|---------------------|--------------:|----------------:|-----------:|------|
+| big_no_escape_100k  | 48.9 µs       | **5.0 µs**      | 23.9 µs    | borrow: 10× vs String, 4.8× vs serde |
+| no_escape_5k        | 420 µs        | 507 µs          | 203 µs     | borrow: rope-node setup per tiny string |
+| unicode_2k          | 161 µs        | 181 µs          | 82 µs      | borrow (literal multi-byte UTF-8) |
+| escaped_5k          | 664 µs        | 853 µs          | 518 µs     | build: decode + one-leaf wrap |
+| big_escaped_90k     | 147 µs        | **150 µs**      | 376 µs     | build: ≈ String, 2.5× vs serde |
+
+Allocations are the headline (the copy-avoiding axis). `decode_str_rope` on a no-escape corpus barely
+touches the heap — the borrow shares the input chunks:
+
+| shape               | decode_string allocs / bytes | decode_str_rope allocs / bytes |
+|---------------------|-----------------------------:|-------------------------------:|
+| no_escape_5k        | 5,030 / 80 KB                | **9 / 1.1 KB**                 |
+| big_no_escape_100k  | 18 / 201 KB                  | **3 / 896 B**                  |
+| unicode_2k          | 2,010 / 21 KB                | **3 / 384 B**                  |
+| escaped_5k          | 5,069 / 188 KB               | 10,044 / 308 KB (build)        |
+
+**Finding:** the borrow path realizes the copy-avoiding goal — near-zero allocation for every
+no-escape string, and a 10× time win when the value is large (one big string: 5 µs vs 49 µs, and
+4.8× faster than serde_json). For many *small* strings the per-string rope-node construction makes
+the borrow ~1.2× slower in time than the flat-`String` decode even though it allocates ~500× less;
+that is the rope's fixed per-node cost, worth it wherever the value is held/shared rather than
+immediately flattened. The escape path decodes once and wraps in a single leaf: ≈ the `String` path
+and 2.5× faster than serde_json on a large escaped value; on many small escaped strings it is ~1.3×
+the `String` path (the extra wrap copy).
+
+### Next levers
+
+- The escape path copies the decoded buffer once more when wrapping (`StrRope::from(String)` →
+  `append_bytes`). Moving the buffer in (`ByteVec::from(Vec<u8>)` + `from_utf8`) removes that copy but
+  was measured *slower* on many small strings — its validation scan plus an infallibility guard scan
+  cost more than the single copy. A trusted `StrRope::from_utf8_unchecked(ByteVec)` (move, no
+  validation) would get the escape path to one alloc + zero extra copy/scan; that is a demand-driven
+  request to etude-str-migration, now backed by these numbers.
+- Small-string borrow overhead is the rope's per-node fixed cost; a threshold that keeps very short
+  values inline is a possible future refinement.
