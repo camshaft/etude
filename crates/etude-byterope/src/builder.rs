@@ -581,6 +581,34 @@ mod tests {
         assert_eq!(out, b"seed-tail");
     }
 
+    /// RED reproducer (breaker-byterope): `for_socket_read` is a SAFE fn that trusts the SAFE
+    /// callback's returned length and feeds it to `unsafe BytesMut::advance_mut`. A callback that
+    /// returns `len > preferred_read_size` (but within the head's spare capacity) commits
+    /// UNINITIALIZED heap memory as rope content — safe code exposing uninit bytes (observed: a
+    /// 3-byte write claiming 100 yields a 100-byte rope whose tail is stale allocator garbage).
+    /// A sound implementation must either clamp the commit to the provided slice's length or
+    /// panic on the contract violation — either passes this test; committing past the slice fails.
+    #[test]
+    fn for_socket_read_never_commits_more_than_the_provided_slice() {
+        let result = std::panic::catch_unwind(|| {
+            let mut b = ByteRope::builder(1024);
+            b.for_socket_read(8, |slice| {
+                slice[0..3].copy_from_slice(b"abc");
+                100 // a buggy callback claims more than the 8-byte slice it was given
+            });
+            b
+        });
+        // A panicking defense is acceptable (Err); a clamping defense must not commit past the
+        // 8-byte slice the callback was actually handed.
+        if let Ok(b) = result {
+            assert!(
+                b.len() <= 8,
+                "committed {} bytes for an 8-byte read slice (uninitialized memory exposed)",
+                b.len()
+            );
+        }
+    }
+
     #[test]
     fn out_of_bounds_split_to_errors() {
         let mut b = ByteRope::builder(1024);
