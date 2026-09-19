@@ -964,3 +964,49 @@ fn set_byte_tree_split_propagation_stress() {
     assert_eq!(snapshot.len(), base_len);
     assert_eq!(snapshot.byte_at(3), Some(0));
 }
+
+/// RED reproducer (breaker-byterope): an equal-length `replace` of a SMALL span inside a large
+/// SHARED chunk that lives in the TREE copies the WHOLE chunk — `Node::overwrite`'s leaf arm calls
+/// `overwrite_one`, whose shared path is `BytesMut::from(&shared[..])` (unbounded). The flat tier
+/// and the deep head/tail deques use the bounded `cow_edit` split instead (shared prefix/suffix,
+/// copy bounded by the edited span — pointer-identity-proven by
+/// `replace_small_span_in_large_shared_chunk_is_bounded`), and tree `set_byte` is ALREADY bounded.
+/// Observed: a 4-byte overwrite of a shared 16 KiB tree chunk leaves 0 chunks sharing the original
+/// allocation (whole chunk copied); a 1-byte overwrite of a shared 1 GiB tree chunk would copy
+/// 1 GiB. Expected (parity with every other tier): shared prefix/suffix views remain. Fix shape:
+/// switch `Node::overwrite`'s leaf arm to `cow_edit` + the existing `finish_leaf`/`InsertResult`
+/// split plumbing (byte totals conserved; only chunk counts change).
+#[test]
+fn tree_overwrite_small_span_in_large_shared_chunk_is_bounded() {
+    // A large shared chunk that lands INSIDE the tree (not the buffered ends).
+    let big = Bytes::from(alloc::vec![7u8; COW_SPLIT_ABOVE * 4]);
+    let base = big.as_ptr() as usize;
+    let mut rope = ByteRope::new();
+    for i in 0..(PROMOTE_AT + 1) {
+        if i == 5 {
+            rope.push_back(big.clone());
+        } else {
+            rope.push_back(Bytes::from(alloc::vec![i as u8; 4]));
+        }
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+    let at = 5 * 4 + COW_SPLIT_ABOVE; // inside the big chunk
+    // Equal-length overwrite of 4 bytes (UC1-3 path -> Node::overwrite in the tree).
+    rope.replace(at..at + 4, &b"abcd"[..]).unwrap();
+    // Content must be right regardless (and is — this part passes today).
+    assert_eq!(rope.byte_at(at), Some(b'a'));
+    assert_eq!(rope.byte_at(at + 4), Some(7));
+    assert_eq!(big[at], 7, "shared original untouched");
+    // Bounded COW leaves shared prefix/suffix views into big's allocation, as the flat tier does.
+    let shared_views = rope
+        .chunks()
+        .filter(|c| {
+            let p = c.as_ptr() as usize;
+            p >= base && p < base + COW_SPLIT_ABOVE * 4
+        })
+        .count();
+    assert!(
+        shared_views > 0,
+        "tree-level equal-length overwrite copied the WHOLE shared chunk (unbounded COW)"
+    );
+}
