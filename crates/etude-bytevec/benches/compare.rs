@@ -865,6 +865,41 @@ fn bench_builder(c: &mut Criterion) {
     }
 }
 
+/// Reading a `ByteVec` non-destructively through [`ByteVec::reader`]: `reader()` takes an O(1)
+/// structural-shared clone, then the [`Iterator`] yields each chunk (a cheap `Bytes` handle) via
+/// `pop_front` on that clone, leaving the source untouched. The naive equivalent of a non-destructive
+/// full read is an O(n) `clone()` of the deque followed by a `pop_front` drain, so the comparison
+/// isolates the reader's O(1)-clone setup against the deque's copy-the-whole-spine setup.
+fn bench_reader(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let rope = rope_of(n);
+        let naive = naive_of(n);
+
+        let mut g = group(c, "reader_iterate");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter(|| {
+                let mut count = 0usize;
+                for chunk in rope.reader() {
+                    count += chunk.len();
+                }
+                black_box(count)
+            })
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", label), |b| {
+            b.iter(|| {
+                let mut v = naive.clone();
+                let mut count = 0usize;
+                while let Some(chunk) = v.pop_front() {
+                    count += chunk.len();
+                }
+                black_box(count)
+            })
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_push_back,
@@ -884,6 +919,7 @@ criterion_group!(
     bench_copy_to_bytes_mut,
     bench_socket_read,
     bench_utf8_mutate,
-    bench_builder
+    bench_builder,
+    bench_reader
 );
 criterion_main!(benches);

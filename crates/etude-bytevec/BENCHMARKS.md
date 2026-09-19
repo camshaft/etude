@@ -146,6 +146,29 @@ holds by reference, so it is `push_back` through the builder's flush machinery a
 per-chunk build family (1.28–1.53×, the per-chunk `Arc` + flush-check overhead) — the builder adds
 coalescing value on copied writes, not on by-reference chunk handoff.
 
+### Reader — non-destructive full read via `ByteVec::reader` (runnable: `cargo bench -p etude-bytevec -- reader_iterate`)
+
+`reader()` takes an O(1) structural-shared clone and the `Iterator` yields each chunk (a cheap `Bytes`
+handle) without disturbing the source. The naive equivalent of a non-destructive full read is an O(n)
+`clone()` of the deque followed by a `pop_front` drain. Latest run (aarch64, jemalloc, release; `deep` =
+1000, `shallow` = 4):
+
+| op | shape | rope reader | naive clone + drain | ratio |
+|----|-------|-------------|---------------------|-------|
+| reader_iterate | shallow | 93.2 ns | 75.2 ns | 1.24 |
+| reader_iterate | deep | 22.4 µs | 16.1 µs | 1.39 |
+
+The reader trails 1.24–1.39×, for the same persistent-structure reason as the rest of the deep tier but
+located differently. The reader's *setup* is genuinely O(1): the structural-shared clone is ~37 ns
+regardless of length, where the deque copies its whole spine O(n). The cost is on *iteration* — because
+the source rope is still alive (the whole point of a non-destructive reader), the shared clone's spine
+`Arc`s have a refcount above 1, so each `pop_front` must copy-on-write the node it mutates instead of
+mutating in place. So the reader pays cheap-setup + COW-drain where the deque pays copy-everything-once +
+O(1)-drain, and at these sizes the COW-drain edges it out. A consumer that does *not* need the source
+afterward should drain the rope directly (`pop_front` / `advance`, ~15 µs deep, no COW) rather than take a
+reader; the reader earns its keep precisely when the source must stay intact, and there its O(1) setup is
+the win the table's single-read framing hides.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
