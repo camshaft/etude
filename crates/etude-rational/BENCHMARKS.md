@@ -112,11 +112,23 @@ push the gcd-bound `normalize`/`add_eqden`@≥1024b parity cells below 1.0.
 
 ## Rendering (`to_string` / `Display`)
 
-`to_string` (our alloc-lean `Display` via `Big::write_decimal`) at 64b: **0.66** — a WIN, after
-etude-bigint's single-limb `to_decimal` fast path (#82) combined with our one-allocation render. At
-256b/1024b it is ~1.6× (multi-limb `write_decimal` is still slower than num-bigint's `Display`);
-etude-bigint is extending the alloc-free render path to a few limbs, which will move these. Render is
-bignum-render-bound, not addressable locally.
+`to_string` is our alloc-lean `Display` (one `String` via `Big::write_decimal`). Current ratios
+(`etude / num-rational`):
+
+| tier  | etude    | num-rational | ratio    |
+|-------|----------|--------------|----------|
+| 64b   | 201 ns   | 293 ns       | **0.69** |
+| 256b  | 664 ns   | 682 ns       | **0.97** |
+| 1024b | 7.50 µs  | 4.66 µs      | 1.61     |
+| 2048b | 18.3 µs  | 18.1 µs      | 1.01     |
+| 4096b | 48.3 µs  | 42.4 µs      | 1.14     |
+
+**64b and 256b are now WINS** — the 256b crossing (1.36× → 0.97×) was banked by etude-bigint's
+reciprocal-`÷10^19` `to_decimal` peel (#115), which removed the per-chunk `u128` divide libcall. The
+1024b/4096b tiers remain ~1.1–1.6× losses because the peel is still **O(n²)** (each `÷10^19` chunk is an
+O(n) big-divide, repeated O(n) times); closing them needs a **subquadratic (divide-and-conquer)
+`to_decimal`** in etude-bigint (their next render slice), not a further constant-factor peel. Render is
+bignum-render-bound — not addressable locally; re-bench on each etude-bigint render land.
 
 ## History
 
@@ -159,3 +171,8 @@ bignum-render-bound, not addressable locally.
   **0.26×** num-rational (~3.8× faster), no regression on the Big tiers. Also wired etude-bigint's
   quotient-only `Big::div_exact` into `normalize`/`reduce_by` (drops the discarded divmod remainder on the
   shared-factor Big path; no random-bench delta since random gcd=1 hits the allocation-free skip).
+- **slice 15** — banked the **256b render crossing** (1.36× → 0.97×) that etude-bigint's reciprocal-`÷10^19`
+  `to_decimal` peel (#115) rippled straight into our `to_string` — no local change, scoreboard refresh only.
+  Recorded the remaining 1024b/4096b render losses as O(n²)-peel-bound, awaiting a subquadratic
+  divide-and-conquer `to_decimal` (coordination steer sent to etude-bigint; render is the higher-value
+  target over a ≥1024b gcd crossing, which is only ~parity/1.10×).
