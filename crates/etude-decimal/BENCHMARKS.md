@@ -36,7 +36,7 @@ cargo bench -p etude-decimal --bench arith
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 77.77 ns  | 70.16 ns  | 1.11 |
+| 64b   | 58.94 ns  | 71.39 ns  | **0.83** |
 | 256b  | 88.71 ns  | 109.08 ns | 0.81 |
 | 1024b | 122.12 ns | 133.57 ns | 0.91 |
 | 2048b | 241.55 ns | 169.86 ns | 1.42 |
@@ -49,7 +49,7 @@ of the operand — no intermediate negated value is allocated.
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 72.61 ns  | 56.73 ns  | 1.28 |
+| 64b   | 54.60 ns  | 55.27 ns  | **0.99** |
 | 256b  | 88.64 ns  | 69.95 ns  | 1.27 |
 | 1024b | 114.02 ns | 95.16 ns  | 1.20 |
 | 2048b | 222.58 ns | 122.51 ns | 1.82 |
@@ -71,6 +71,12 @@ When both coefficients fit an `i64` and the aligned sum / product stays within `
 natively (align by a native `10^k` multiply, `checked_add`/`checked_sub`/`checked_mul`), building one
 `Big` for the result — no `Big` power-of-ten, scale, or intermediate. Overflow falls back to the exact
 `Big` path (so the large tiers above are unchanged). Operands `12345.6789` and `9876.54321`:
+
+For `add`/`sub` there is also a second native tier in `i128`, between the `i64` path and the `Big` path:
+a full 64-bit coefficient exceeds `i64` but fits `i128`, so the `64b` add/sub tier above now reads both
+coefficients straight into an `i128` (`etude_bigint::Big::to_i128_checked`, direct limb read) and boxes the
+result (`Big::from_i128`) — the limb-level conversions, not a sign-magnitude byte round-trip (which cost
+more than `Big::add` itself). That flipped `add` 64b `1.11 → 0.83` and `sub` 64b `1.28 → 0.99`.
 
 | op | etude (before) | etude (now) | bigdecimal | ratio |
 |----|---------------:|------------:|-----------:|------:|
