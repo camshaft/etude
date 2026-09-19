@@ -17,5 +17,15 @@ repository.workspace = true
 # reference implementation). Kept out of the shipped crate so nothing but alloc is a build dependency.
 num-bigint = "0.4"
 num-traits = "0.2"
+# The reference gcd (num-bigint's Integer::gcd) for the head-to-head bench.
+num-integer = "0.1"
 # Coverage-guided property + shrinking engine for the differential harness.
 bolero = "0.13"
+# Benchmark scoreboard vs num-bigint across magnitude tiers.
+criterion = "0.5"
+# Match the host allocator so benchmarks reflect production allocation behavior.
+tikv-jemallocator = "0.6"
+
+[[bench]]
+name = "arith"
+harness = false

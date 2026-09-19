@@ -24,12 +24,17 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 /// An arbitrary-precision signed integer. See the module doc for the canonical-form invariant.
+///
+/// The internal representation is PRIVATE and not part of the stable API — the limb width, endianness,
+/// and any future small-value inlining may change without notice. Construct values through the
+/// constructors ([`Big::zero`], [`Big::from_i64`], the `from_*_bytes` parsers) and inspect them through
+/// the accessors ([`Big::is_zero`], [`Big::is_negative`], [`Big::cmp`], the `to_*` conversions).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Big {
     /// Sign: `true` = negative. Always `false` when `mag` is empty (zero is non-negative, canonical).
-    pub neg: bool,
+    neg: bool,
     /// Magnitude limbs, base 2³², little-endian, no trailing zero limbs (empty = zero).
-    pub mag: Vec<u32>,
+    mag: Vec<u32>,
 }
 
 impl Big {
@@ -44,6 +49,19 @@ impl Big {
     /// Whether this is zero (canonical: empty magnitude).
     pub fn is_zero(&self) -> bool {
         self.mag.is_empty()
+    }
+
+    /// Whether this is strictly negative. `false` for zero (zero is non-negative, canonical).
+    pub fn is_negative(&self) -> bool {
+        self.neg
+    }
+
+    /// The absolute value `|self|`.
+    pub fn abs(&self) -> Big {
+        Big {
+            neg: false,
+            mag: self.mag.clone(),
+        }
     }
 
     /// Strip trailing zero limbs and force a zero magnitude to non-negative — re-establishes the
