@@ -311,9 +311,21 @@ impl Rational {
     /// allocates only the result — no intermediate per-component `String`s. Equivalent to `self.to_string()`.
     pub fn to_decimal_string(&self) -> String {
         use core::fmt::Write;
-        let mut s = String::new();
-        // Writing into a String is infallible.
-        let _ = write!(s, "{self}");
+        // Pre-size the buffer so `write_decimal` never reallocates mid-render. A `b`-byte magnitude has at
+        // most `ceil(b * log10(256)) < b * 2.41` decimal digits; `b * 5 / 2` is a safe over-estimate. Add
+        // room for a leading `-` and the `/` separator. `byte_len` is O(1).
+        let integer = self.is_integer();
+        let mut cap = self.num.byte_len() * 5 / 2 + 2; // digits + sign
+        if !integer {
+            cap += self.den.byte_len() * 5 / 2 + 1; // digits + `/`
+        }
+        let mut s = String::with_capacity(cap);
+        // Write the components straight into the sized buffer (writing into a `String` is infallible).
+        let _ = self.num.write_decimal(&mut s);
+        if !integer {
+            let _ = s.write_str("/");
+            let _ = self.den.write_decimal(&mut s);
+        }
         s
     }
 }
