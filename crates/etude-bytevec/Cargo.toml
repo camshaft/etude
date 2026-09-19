@@ -4,22 +4,28 @@
 [package]
 name = "etude-bytevec"
 version = "0.1.0"
-description = "A chunked, reference-counted byte buffer"
+description = "A chunked byte buffer backed by a relaxed-radix (RRB) rope: O(log32) offset lookup, structural sharing, zero-copy slice/concat"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [features]
+default = ["std"]
+std = ["bytes/std", "etude-buffer/std"]
 # Derive a `bolero_generator::TypeGenerator` for `ByteVec` (property/fuzz testing).
 bolero-generator = ["dep:bolero-generator", "bolero-generator/alloc", "etude-buffer/generator"]
 testing = ["bolero-generator", "etude-buffer/testing"]
 
 [dependencies]
-etude-buffer = { version = "0.1", path = "../etude-buffer" }
-bytes = "1"
+bytes = { version = "1", default-features = false }
+etude-ensure = { version = "0.1", path = "../etude-ensure" }
+etude-buffer = { version = "0.1", path = "../etude-buffer", default-features = false }
 bolero-generator = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 bolero = "0.13"
 bolero-generator = "0.13"
+# Used by the `profile` example (perf sampling driver); matches the host allocator so profiling
+# reflects production allocation behavior.
+tikv-jemallocator = "0.6"

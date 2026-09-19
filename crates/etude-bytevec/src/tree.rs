@@ -5,7 +5,7 @@
 //!
 //! A leaf is a *block* of `1..=FANOUT` [`Bytes`] chunks; interior branches hold `1..=FANOUT`
 //! children. Every node sits behind an [`Arc`], so cloning the tree (and therefore a `Deep`
-//! [`crate::ByteRope`]) is O(1) and shares structure. Nodes are **relaxed**: each branch carries a
+//! [`crate::ByteVec`]) is O(1) and shares structure. Nodes are **relaxed**: each branch carries a
 //! per-child byte-size table plus cached `total` bytes and `count` chunks, and is keyed by child
 //! *count* rather than a strict left-full radix invariant.
 //!
@@ -83,7 +83,10 @@ impl InsertResult {
 fn finish_leaf(block: &mut Block, mut chunks: Vec<Bytes>, added: usize) -> InsertResult {
     if chunks.len() <= FANOUT {
         block.chunks = chunks.into_boxed_slice();
-        InsertResult { added, overflow: None }
+        InsertResult {
+            added,
+            overflow: None,
+        }
     } else {
         let right = chunks.split_off(FANOUT);
         block.bytes = chunks.iter().map(|c| c.len()).sum();
@@ -314,14 +317,19 @@ impl Node {
                     local -= chunks[k].len();
                     k += 1;
                 }
-                let edit = crate::cow_edit(core::mem::take(&mut chunks[k]), local, 1, |s| s[0] = value);
+                let edit =
+                    crate::cow_edit(core::mem::take(&mut chunks[k]), local, 1, |s| s[0] = value);
                 match edit {
                     crate::CowEdit::InPlace(c) => {
                         chunks[k] = c; // byte total unchanged
                         block.chunks = chunks.into_boxed_slice();
                         InsertResult::none()
                     }
-                    crate::CowEdit::Split { prefix, mid, suffix } => {
+                    crate::CowEdit::Split {
+                        prefix,
+                        mid,
+                        suffix,
+                    } => {
                         let mut pieces = Vec::with_capacity(3);
                         pieces.extend(prefix);
                         pieces.push(mid);
@@ -454,7 +462,10 @@ impl Node {
                     crate::FANOUT
                 );
                 let bytes: usize = b.chunks.iter().map(|c| c.len()).sum();
-                assert!(b.chunks.iter().all(|c| !c.is_empty()), "empty chunk in leaf");
+                assert!(
+                    b.chunks.iter().all(|c| !c.is_empty()),
+                    "empty chunk in leaf"
+                );
                 assert_eq!(bytes, b.bytes, "leaf cached bytes wrong");
                 (bytes, b.chunks.len())
             }
@@ -466,7 +477,11 @@ impl Node {
                     b.children.len(),
                     crate::FANOUT
                 );
-                assert_eq!(b.children.len(), b.sizes.len(), "sizes not parallel to children");
+                assert_eq!(
+                    b.children.len(),
+                    b.sizes.len(),
+                    "sizes not parallel to children"
+                );
                 let mut total = 0;
                 let mut count = 0;
                 for (child, &size) in b.children.iter().zip(b.sizes.iter()) {
@@ -715,7 +730,12 @@ impl Tree {
             return left;
         }
         let chunk_count = left.chunk_count + right.chunk_count;
-        let (nodes, h) = merge(left.root.unwrap(), left.height, right.root.unwrap(), right.height);
+        let (nodes, h) = merge(
+            left.root.unwrap(),
+            left.height,
+            right.root.unwrap(),
+            right.height,
+        );
         let (root, height) = if nodes.len() == 1 {
             (nodes.into_iter().next().unwrap(), h)
         } else {
@@ -740,7 +760,10 @@ impl Tree {
                     return (self.clone(), Tree::new());
                 }
                 let (l, r) = split_node(root, offset);
-                (Tree::from_root(l, self.height), Tree::from_root(r, self.height))
+                (
+                    Tree::from_root(l, self.height),
+                    Tree::from_root(r, self.height),
+                )
             }
         }
     }
@@ -828,7 +851,13 @@ enum End {
     Back,
 }
 
-fn push_inplace(node: &mut Node, height: u32, slot: &mut Option<Node>, lb: usize, lc: usize) -> Push {
+fn push_inplace(
+    node: &mut Node,
+    height: u32,
+    slot: &mut Option<Node>,
+    lb: usize,
+    lc: usize,
+) -> Push {
     let Node::Branch(arc) = node else {
         return Push::Shared;
     };

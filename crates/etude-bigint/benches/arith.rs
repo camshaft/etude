@@ -16,7 +16,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 // Match the host allocator; allocation of limb `Vec`s dominates bignum work, so this keeps the
-// numbers production-representative (as in the byterope benches).
+// numbers production-representative (as in the bytevec benches).
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
