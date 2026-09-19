@@ -721,6 +721,21 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
             den: big_from_i128(d / g),
         });
     }
+    // Native path for the u64-magnitude band (a component exceeds i64 but both magnitudes fit u64 — the
+    // `64b` construction tier): native sign fixup + `u64` hardware-divide gcd + box, bypassing the `Big`
+    // gcd and `div_exact`. Division only shrinks, so the reduced magnitudes still fit u64. `n, d` are
+    // nonzero (guarded above); `d`'s sign moves onto the numerator so the stored denominator is positive.
+    if let (Some(n), Some(d)) = (num.to_i128_checked(), den.to_i128_checked()) {
+        let max = u64::MAX as u128;
+        let (nm, dm) = (n.unsigned_abs(), d.unsigned_abs());
+        if nm <= max && dm <= max {
+            let g = gcd_u64(nm as u64, dm as u64) as u128; // g >= 1 divides both magnitudes
+            return Some(Rational {
+                num: big_from_u128(nm / g, (n < 0) != (d < 0)),
+                den: big_from_u128(dm / g, false),
+            });
+        }
+    }
     // Move the sign onto the numerator so the denominator is strictly positive.
     if den.is_negative() {
         num = num.neg();
