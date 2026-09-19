@@ -12,7 +12,7 @@
 //! is pinned by a differential test against `bigdecimal` (a dev-dependency) as the reference.
 //!
 //! A value is built either numerically from a [`etude_bigint::Big`] coefficient and an exponent via
-//! [`Decimal::new`] (and the [`Decimal::from_i64`] / [`Decimal::from_bigint`] conveniences), or PARSED
+//! [`Decimal::new`] (and the [`Decimal::from_i64`] / [`Decimal::from_bigint`] conveniences), or parsed
 //! from a decimal number literal via [`Decimal::parse`] / [`Decimal::from_str`]. Parsing owns exactly the
 //! decimal-number-literal grammar and consumes any `Iterator<Item = u8>`, so a rope- or chunk-backed
 //! (non-contiguous) byte source is parsed in place with no flattening; [`Decimal::parse_prefix`] parses a
@@ -22,17 +22,17 @@
 //! # Representation and the canonical-form invariant
 //! A [`Decimal`] is the exact value `coeff * 10^exp`, where `coeff` is an [`etude_bigint::Big`] signed
 //! integer (it carries the sign of the whole value) and `exp` is a base-10 point shift. It is kept in a
-//! SINGLE canonical form:
-//! - the coefficient has NO trailing zero digit (`coeff % 10 != 0`), with `exp` raised to compensate, so
+//! single canonical form:
+//! - the coefficient has no trailing zero digit (`coeff % 10 != 0`), with `exp` raised to compensate, so
 //!   `1.0`, `1`, and `1.00` all become the one value `coeff = 1, exp = 0`, and `100` becomes
 //!   `coeff = 1, exp = 2`;
 //! - zero is exactly `coeff = 0, exp = 0` (there is no `0 * 10^5`).
 //!
-//! Every constructor and operation renormalizes, so a value has exactly ONE in-memory form. This is
-//! required for `Eq`/`Ord` to mean numeric equality: `0.1` and `0.10` and `1e-1` are the SAME value and
-//! MUST have identical fields.
+//! Every constructor and operation renormalizes, so a value has exactly one in-memory form. This is
+//! required for `Eq`/`Ord` to mean numeric equality: `0.1` and `0.10` and `1e-1` are the same value and
+//! must have identical fields.
 //!
-//! The fields are PRIVATE and not part of the stable API — the coefficient repr and the exponent width
+//! The fields are private and not part of the stable API — the coefficient repr and the exponent width
 //! may change. Construct through [`Decimal::zero`], [`Decimal::from_i64`], [`Decimal::from_bigint`],
 //! [`Decimal::new`], or by parsing via [`Decimal::parse`]/[`Decimal::parse_prefix`]/[`Decimal::from_str`];
 //! inspect through
@@ -53,7 +53,7 @@ use etude_bigint::Big;
 /// An exact base-10 decimal number `coeff * 10^exp` in canonical form. See the module doc for the
 /// invariant.
 ///
-/// The internal `{ coeff, exp }` representation is PRIVATE and not part of the stable API. Construct
+/// The internal `{ coeff, exp }` representation is private and not part of the stable API. Construct
 /// values through the constructors and inspect them through the accessors.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Decimal {
@@ -67,8 +67,8 @@ pub struct Decimal {
 }
 
 /// How [`Decimal::div_round`] (and any rounding-capable operation) breaks a tie / discards a remainder.
-/// Mirrors the IEEE-754 / `bigdecimal` rounding modes. There is deliberately NO default — a
-/// rounding-capable operation takes the mode as an EXPLICIT argument so the caller always chooses.
+/// Mirrors the IEEE-754 / `bigdecimal` rounding modes. There is deliberately no default — a
+/// rounding-capable operation takes the mode as an explicit argument so the caller always chooses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RoundingMode {
     /// Away from zero (round the magnitude up whenever anything is discarded).
@@ -249,10 +249,10 @@ impl Decimal {
         Decimal::new(self.coeff.mul(&other.coeff), exp)
     }
 
-    /// EXACT division `self / other`, or `None` if the quotient does not terminate as a finite decimal
+    /// exact division `self / other`, or `None` if the quotient does not terminate as a finite decimal
     /// (or `other` is zero). A decimal quotient is exact exactly when the divisor's coefficient, reduced
     /// against the dividend's, has no prime factor other than 2 and 5 (`1/2`, `1/8`, `3/40` terminate;
-    /// `1/3`, `1/7` do not). Because it cannot round, this operation takes NO rounding arguments — use
+    /// `1/3`, `1/7` do not). Because it cannot round, this operation takes no rounding arguments — use
     /// [`Decimal::div_round`] for a rounded quotient to a chosen precision.
     pub fn div(&self, other: &Decimal) -> Option<Decimal> {
         if other.is_zero() {
@@ -302,7 +302,7 @@ impl Decimal {
         Some(Decimal::new(coeff, exp))
     }
 
-    /// Divide `self / other`, rounding the quotient to `precision` significant digits with the EXPLICIT
+    /// Divide `self / other`, rounding the quotient to `precision` significant digits with the explicit
     /// [`RoundingMode`] (there is no default rounding — the caller always chooses). Returns `None` if
     /// `other` is zero or `precision` is zero. Unlike [`Decimal::div`] this always yields a value, at the
     /// cost of rounding a non-terminating (or over-long) quotient.
@@ -358,7 +358,7 @@ impl Decimal {
     }
 
     /// Parse a decimal number literal from a byte stream into an exact `Decimal`, or `None` if the whole
-    /// stream is not a well-formed literal. The stream need NOT be contiguous — any `IntoIterator<Item =
+    /// stream is not a well-formed literal. The stream need not be contiguous — any `IntoIterator<Item =
     /// u8>` works, so a rope- or chunk-backed byte source is parsed in place with no flattening. The
     /// grammar is
     ///
@@ -367,8 +367,8 @@ impl Decimal {
     /// ```
     ///
     /// so a leading `+`, a redundant leading zero (`01`), a bare `.5`, a trailing `1.`, a lone `-`, an
-    /// empty exponent (`1e`), and any surrounding whitespace or trailing bytes are all REJECTED. The
-    /// decode is LOSSLESS. An exponent of more than 18 digits (beyond `i64`) is rejected rather than
+    /// empty exponent (`1e`), and any surrounding whitespace or trailing bytes are all rejected. The
+    /// decode is lossless. An exponent of more than 18 digits (beyond `i64`) is rejected rather than
     /// silently wrapping. To parse a number embedded in a larger stream — stopping at the first byte that
     /// is not part of the number — use [`Decimal::parse_prefix`].
     pub fn parse<I: IntoIterator<Item = u8>>(bytes: I) -> Option<Decimal> {
@@ -380,7 +380,7 @@ impl Decimal {
         Some(d)
     }
 
-    /// Parse the maximal decimal-number-literal PREFIX from a peekable byte iterator, stopping at (and NOT
+    /// Parse the maximal decimal-number-literal prefix from a peekable byte iterator, stopping at (and not
     /// consuming) the first byte that is not part of the number — leaving the iterator positioned right
     /// after the literal. This is the entry point for a decoder embedding a number in a larger chunked
     /// byte stream (e.g. a JSON tokenizer): it advances the shared cursor across chunk boundaries with no
@@ -484,7 +484,7 @@ impl Decimal {
     }
 
     /// Convert to the nearest `f64` — correctly rounded (round-to-nearest, ties-to-even), computed
-    /// DIRECTLY from the coefficient and exponent with no string round-trip. Magnitudes beyond `f64`
+    /// directly from the coefficient and exponent with no string round-trip. Magnitudes beyond `f64`
     /// range become `±∞`, and magnitudes below the smallest subnormal round to `±0.0`, matching
     /// IEEE-754 decimal-to-binary conversion.
     ///
@@ -504,7 +504,7 @@ impl Decimal {
             f64::INFINITY
         };
 
-        // Cheap magnitude estimate to short-circuit over/underflow WITHOUT materializing a huge power of
+        // Cheap magnitude estimate to short-circuit over/underflow without materializing a huge power of
         // ten: log2(value) ≈ (bit_len(|coeff|) - 1) + exp*log2(10). The estimate under-counts the true
         // log2 by < 1, so the generous margins never shortcut a value the exact path would keep finite.
         let m = self.coeff.abs();
@@ -628,7 +628,7 @@ impl Decimal {
 
     /// Compare `|self|` against `|other|` (both assumed nonzero). Exact and allocation-light.
     ///
-    /// When the exponents are EQUAL — the common case (same-scale decimals) — the magnitude order is
+    /// When the exponents are equal — the common case (same-scale decimals) — the magnitude order is
     /// exactly the coefficient magnitude order, so it compares the [`etude_bigint::Big`] coefficients
     /// directly (a limb-wise, top-limb-first compare) with no base-10 rendering. Otherwise it falls back
     /// to comparing the adjusted exponent (the base-10 order of magnitude of the most-significant digit),
@@ -665,7 +665,7 @@ impl Decimal {
         Ordering::Equal
     }
 
-    /// Write the canonical decimal rendering DIRECTLY into a [`core::fmt::Write`] sink — the
+    /// Write the canonical decimal rendering directly into a [`core::fmt::Write`] sink — the
     /// allocation-conscious rendering path that [`Display`](core::fmt::Display) uses (no intermediate `String` is built for
     /// the framing). The output is always a valid decimal literal and re-parses via [`Decimal::parse`]
     /// to the same value: a plain (point) form for modest exponents, and a bounded `<digits>e<exp>`

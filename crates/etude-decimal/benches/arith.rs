@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Head-to-head decimal-arithmetic benchmarks: `etude_decimal::Decimal` vs the `bigdecimal`
-//! reference (`BigDecimal`), across coefficient-magnitude tiers. `bigdecimal` is BOTH the
+//! reference (`BigDecimal`), across coefficient-magnitude tiers. `bigdecimal` is both the
 //! correctness oracle (see `src/tests.rs`) and the optimization target — the scoreboard measures the
-//! gap each optimization is meant to close and guards against regression. The north star is to BEAT it
+//! gap each optimization is meant to close and guards against regression. The north star is to beat it
 //! (ratios below 1.00).
 //!
-//! Every operand is built through the PUBLIC API only — a large `Big` coefficient comes from
+//! Every operand is built through the public API only — a large `Big` coefficient comes from
 //! `etude_bigint`'s byte parser, then `Decimal::new` canonicalizes it — never a private field, so a
 //! rebuild measures the same inputs. The equivalent `BigDecimal` is built from the identical
 //! coefficient and exponent (value-equal by construction; the oracle proves it). Tiers are named by
@@ -154,8 +154,8 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
-    // Exact comparison (adjusted-exponent fast path, then aligned digit-string compare) vs
-    // bigdecimal's cmp.
+    // Exact comparison (equal-exponent coefficient-compare fast path; unequal exponents fall back to an
+    // aligned digit-string compare) vs bigdecimal's cmp.
     {
         let mut g = group(c, "cmp");
         for &(label, nbytes) in TIERS {

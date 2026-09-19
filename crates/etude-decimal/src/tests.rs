@@ -3,18 +3,18 @@
 
 //! Correctness tests for [`Decimal`].
 //!
-//! The safety net is a DIFFERENTIAL ORACLE against `bigdecimal`'s `BigDecimal` (the arbitrary-precision
-//! reference): a single growing harness generates candidate byte-strings, parses them with BOTH our
+//! The safety net is a differential oracle against `bigdecimal`'s `BigDecimal` (the arbitrary-precision
+//! reference): a single growing harness generates candidate byte-strings, parses them with both our
 //! [`Decimal::parse`] and `BigDecimal`, and asserts they agree on the exact value (compared as the
 //! canonical `(sign, magnitude-digits, exponent)` triple), that our output re-parses to the same value
 //! (round-trip), and that our comparison sign matches the reference's on every pair. When a case can't
-//! be expressed here, GROW this harness rather than adding a one-off test.
+//! be expressed here, grow this harness rather than adding a one-off test.
 
 use super::*;
 use bigdecimal::BigDecimal;
 use std::str::FromStr;
 
-/// The canonical `(is_negative, magnitude-digits, exponent)` triple of one of OUR values.
+/// The canonical `(is_negative, magnitude-digits, exponent)` triple of one of our values.
 fn our_parts(d: &Decimal) -> (bool, String, i64) {
     (
         d.is_negative(),
@@ -23,8 +23,8 @@ fn our_parts(d: &Decimal) -> (bool, String, i64) {
     )
 }
 
-/// The same triple for the REFERENCE, from its normalized (trailing-zeros-stripped) form. `bigdecimal`'s
-/// `normalized()` also removes trailing zeros, so a matching triple means both the value AND our
+/// The same triple for the reference, from its normalized (trailing-zeros-stripped) form. `bigdecimal`'s
+/// `normalized()` also removes trailing zeros, so a matching triple means both the value and our
 /// canonical-form invariant agree with the reference.
 fn ref_parts(b: &BigDecimal) -> (bool, String, i64) {
     let bn = b.normalized();
@@ -139,7 +139,7 @@ fn rejects_malformed() {
 
 #[test]
 fn parse_over_non_contiguous_bytes() {
-    // The parser consumes any Iterator<Item = u8>, so a NON-CONTIGUOUS (chunk-backed) source parses in
+    // The parser consumes any Iterator<Item = u8>, so a non-contiguous (chunk-backed) source parses in
     // place with no flattening — the whole point of the API. Feed each literal as split chunks and check
     // it equals the contiguous parse.
     for s in [
@@ -162,7 +162,7 @@ fn parse_over_non_contiguous_bytes() {
 
 #[test]
 fn parse_prefix_stops_at_delimiter() {
-    // parse_prefix reads the maximal number and STOPS at (does not consume) the first non-number byte,
+    // parse_prefix reads the maximal number and stops at (does not consume) the first non-number byte,
     // leaving the cursor positioned there — the entry point for embedding a number in a larger stream.
     let mut it = b"12.5,rest".iter().copied().peekable();
     let d = Decimal::parse_prefix(&mut it).unwrap();
@@ -586,7 +586,7 @@ fn differential_structured_numbers() {
                     has_exp.then_some(exp as i64),
                 );
                 if let Some(pair) = check_parse(&s) {
-                    // Parsing the SAME literal over a non-contiguous (split) byte stream must match the
+                    // Parsing the same literal over a non-contiguous (split) byte stream must match the
                     // contiguous parse exactly — the chunk-cursor path a decoder feeds.
                     let bytes = s.as_bytes();
                     let mid = bytes.len() / 2;
@@ -638,7 +638,7 @@ fn apply_op(
 #[test]
 fn differential_arithmetic() {
     // Seeds are valid decimal literals (exponent bounded to i8 so exponent-alignment scaling stays modest);
-    // ops are (opcode, reg_a, reg_b) triples. add/sub/mul are all EXACT in bigdecimal too, so the
+    // ops are (opcode, reg_a, reg_b) triples. add/sub/mul are all exact in bigdecimal too, so the
     // oracle asserts exact agreement after every operation.
     bolero::check!()
         .with_type::<(

@@ -109,10 +109,11 @@ cached-length ~6 ns.
   scale-and-divide reaches the answer in one `divmod` at the chosen precision, where `bigdecimal` divides
   to its own default precision first and then re-rounds.
 - **`add`/`sub`/`mul` trail** by a fixed factor that *grows with magnitude*. The cause is the
-  canonical-form invariant: every result re-runs `normalize`, which strips trailing zero digits by
-  repeated `divmod(10)` — each an `O(limbs)` pass over the coefficient. `bigdecimal` keeps trailing zeros
-  and normalizes lazily. Closing this needs a cheap "count trailing base-10 zeros" on `Big` (or a
-  radix-`10^k` chunked strip) so canonicalization is not a full division chain.
+  canonical-form invariant: every result re-runs `normalize`, which must divide the coefficient to check
+  for (and strip) trailing zero digits, where `bigdecimal` keeps trailing zeros and normalizes lazily. The
+  strip itself is now base-`10^9` chunked, but the common case (a result with no trailing zero) still pays
+  one `divmod` to discover it is not divisible by ten — closing that needs a cheap divisibility/parity
+  primitive on `Big` (see the roadmap below).
 - **`cmp` was the worst offender — now largely closed.** `cmp_magnitude` used to convert *both*
   coefficients to decimal strings on every comparison (an `O(limbs²)` base-10 conversion). The
   equal-exponent path now compares the `Big` coefficients directly (a flat ~24–50 ns), a 30×–1000×
@@ -123,7 +124,7 @@ cached-length ~6 ns.
 
 ## Next optimizations (ranked by scoreboard leverage)
 
-1. ~~**`cmp` equal-exponent fast path**~~ — DONE: compares `Big` coefficients directly; 30×–1000× faster.
+1. ~~**`cmp` equal-exponent fast path**~~ — done: compares `Big` coefficients directly; 30×–1000× faster.
    Residual: a magnitude-only `Big` compare (no `abs()` clone) plus an unequal-exponent path that avoids
    decimal strings.
 2. **Cheaper `normalize`** — the strip is now base-`10^9` chunked (`O(zeros / 9)` divisions instead of
