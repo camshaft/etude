@@ -39,8 +39,8 @@ cargo bench -p etude-decimal --bench arith
 | 64b   | 58.94 ns  | 71.39 ns  | **0.83** |
 | 256b  | 88.71 ns  | 109.08 ns | 0.81 |
 | 1024b | 122.12 ns | 133.57 ns | 0.91 |
-| 2048b | 225.94 ns | 169.83 ns | 1.33 |
-| 4096b | 498.33 ns | 222.75 ns | 2.24 |
+| 2048b | 174.49 ns | 169.83 ns | 1.03 |
+| 4096b | 351.50 ns | 222.75 ns | 1.58 |
 
 ### `sub` — exact aligned difference
 
@@ -52,8 +52,8 @@ of the operand — no intermediate negated value is allocated.
 | 64b   | 54.60 ns  | 55.27 ns  | **0.99** |
 | 256b  | 88.64 ns  | 69.95 ns  | 1.27 |
 | 1024b | 114.02 ns | 95.16 ns  | 1.20 |
-| 2048b | 212.69 ns | 122.81 ns | 1.73 |
-| 4096b | 416.23 ns | 153.46 ns | 2.71 |
+| 2048b | 160.77 ns | 122.81 ns | 1.31 |
+| 4096b | 225.53 ns | 153.46 ns | 1.47 |
 
 ### `mul` — exact product
 
@@ -89,14 +89,14 @@ mid-size product (the common "large price × quantity") multiplies in `i128` and
 `Big::from_i128`, skipping the `Big` multiply. Operands `1234567890.12345678 × 9876543210.98765432`
 (each coefficient `< i64::MAX`, product `~1.2e35` — fits `i128`, not `i64`):
 
-| op | etude (Big path) | etude (i128 tier) | bigdecimal | ratio |
-|----|-----------------:|------------------:|-----------:|------:|
-| `mul_mid` | 63.8 ns | 54.9 ns | 30.3 ns | 1.81 |
+| op | etude | bigdecimal | ratio |
+|----|------:|-----------:|------:|
+| `mul_mid` | 28.8 ns | 30.3 ns | **0.95** |
 
-The tier shaves ~14% here, but `mul_mid` still trails `bigdecimal`: the residual is the same eager
-`normalize` divisibility check (plus the `Big::from_i128` box) that the large-tier arithmetic pays and
-`bigdecimal` skips — not the multiply. (The full-width `64b`/`256b` `mul` tiers above are unaffected: those
-coefficients' products overflow `i128`, so they stay on the `Big` path.)
+This crossed to a win once `normalize`'s divisibility check became cheap (see below): the `i128` tier
+removed the `Big` multiply, and the cheap last-digit check removed the rest of the per-result canonicalization
+overhead. (The full-width `64b`/`256b` `mul` tiers above are unaffected: those coefficients' products
+overflow `i128`, so they stay on the `Big` path.)
 
 ### `div_round` — rounded quotient, 34 sig-digits, HalfEven — we win every tier
 
@@ -248,8 +248,14 @@ strip). `iter_batched` clones the input in unmeasured setup so only `new` is tim
 | 64b   | 146.0 ns |
 | 256b  | 186.9 ns |
 | 1024b | 371.5 ns |
-| 2048b | 424.8 ns |
-| 4096b | 756.9 ns |
+| 2048b | 463.1 ns |
+| 4096b | 817.2 ns |
+
+The 2048b/4096b cells rose slightly (`+9%`/`+8%`) when the divisibility check moved to `last_decimal_digit`:
+this bench always strips (its coefficient is built with ≥6 trailing zeros), so on that path the strip now
+pays both the cheap last-digit check *and* the `rem_u64(10^9)` peek. It is a worst case — a real value ends
+in zero only ~10% of the time, and every non-stripping construction (and every `add`/`sub`/`mul` result)
+now takes the cheap check and gets faster (see the arithmetic tiers).
 
 ### Coverage
 
@@ -268,14 +274,15 @@ rejecting it, so there is no same-semantics comparison to run.
   to its own default precision first and then re-rounds.
 - **`add`/`sub`/`mul` closed most of their gap** after `normalize` was rewritten onto `etude-bigint`'s
   scalar primitives (`is_even`, `rem_u64`, `divmod_u64` — #133). Canonicalization used to divide the
-  coefficient by ten on every result; now an odd result is rejected in `O(1)` and only a result ending in
-  zero is divided, in a single `rem_u64(10^9)` peek plus one sized `divmod` (no throwaway divide). `add`
-  now wins at 256b–1024b. The residual at the large tiers is **not** `Big::add`/`sub` — those beat
-  `num-bigint` (measured: `Big::add` 1024b `0.51×`, 4096b `0.73×`) — it is `normalize` itself: the
-  `rem_u64(10)` divisibility check runs on every even result and is an `O(n)` limb pass that `bigdecimal`
-  skips entirely (it does not canonicalize). Cutting it further needs a cheaper `etude-bigint` divisibility
-  / last-digit primitive (a `mod 10` via a limb-sum reduction rather than a full reciprocal remainder),
-  flagged with data. `sub` subtracts coefficients directly (`Big::sub`) instead of `add(neg)`, so no
+  coefficient by ten on every result; now an odd result is rejected in `O(1)`, an even result tests its last
+  decimal digit with `etude_bigint::Big::last_decimal_digit` (a limb-sum `mod 10`, `2^64 ≡ 6 mod 10` — no
+  reciprocal, `3–7×` cheaper than `rem_u64(10)` and widening with size, #202), and only a result ending in
+  zero pays the `rem_u64(10^9)` peek + one sized `divmod`. This — not `Big::add`/`sub`, which beat
+  `num-bigint` (`Big::add` 1024b `0.51×`, 4096b `0.73×`) — was the whole large-tier gap: replacing the
+  per-result divisibility remainder with the cheap last-digit check took `add` 4096b `2.24 → 1.58×`, `sub`
+  4096b `2.71 → 1.47×`, and `add` 2048b to `~1.03×`. The residual is now the `Big` add/sub itself plus the
+  single `Big::from_i128`/box; `bigdecimal` still skips canonicalization entirely. `sub` subtracts
+  coefficients directly (`Big::sub`) instead of `add(neg)`, so no
   negated clone is allocated. For **i64-fitting values** — the common real decimal — `add`/`sub`/`mul` take
   a native fast path (`add_small`/`sub_small`/`mul_small` above): `add` and `sub` beat `bigdecimal` ~2×,
   `mul` is near parity. A full 64-bit coefficient (above `i64`) takes a second native `i128` tier for

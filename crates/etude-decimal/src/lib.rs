@@ -129,13 +129,14 @@ impl Decimal {
     ///
     /// The hot path is the reject: a coefficient not divisible by ten is already canonical, and
     /// divisibility by ten requires an even coefficient, so [`etude_bigint::Big::is_odd`] (`O(1)`) returns
-    /// half of all results with no division at all. The rest peek the low nine decimal digits with a single
-    /// allocation-free [`etude_bigint::Big::rem_u64`]`(10^9)` (no quotient built): the last of those digits
-    /// rejects an even-but-not-ten-multiple coefficient, and when the chunk is nonzero its own trailing-zero
-    /// count is exactly the coefficient's remaining one — so the strip is a single
-    /// [`etude_bigint::Big::divmod_u64`]`(10^tz)` rather than a divide-by-`10^9` whose quotient is discarded
-    /// whenever fewer than nine zeros are present. A run of nine or more zeros strips whole `10^9` chunks in
-    /// a loop, so trailing-zero removal is `O(zeros / 9)` divides.
+    /// half of all results with no work at all. The rest test the last decimal digit with
+    /// [`etude_bigint::Big::last_decimal_digit`] — a limb-sum reduction (`2^64 ≡ 6 mod 10`), several times
+    /// cheaper than a full reciprocal remainder — and an even coefficient whose last digit is nonzero is
+    /// already canonical and returns. Only a coefficient that actually ends in zero peeks the low nine
+    /// digits (a single allocation-free [`etude_bigint::Big::rem_u64`]`(10^9)`, now paid on just that
+    /// fraction) to size the strip: its trailing-zero count is the coefficient's remaining one, so the strip
+    /// is a single [`etude_bigint::Big::divmod_u64`]`(10^tz)`. A run of nine or more zeros strips whole
+    /// `10^9` chunks in a loop, so trailing-zero removal is `O(zeros / 9)` divides.
     fn normalize(&mut self) {
         if self.coeff.is_zero() {
             self.exp = 0;
@@ -148,19 +149,18 @@ impl Decimal {
             if self.coeff.is_odd() {
                 return;
             }
-            // Peek the low nine decimal digits with one allocation-free remainder (no quotient built). The
-            // last digit decides divisibility by ten, and when the chunk is nonzero its own trailing-zero
-            // count is exactly the coefficient's remaining one — so a single `rem_u64` both rejects an
-            // even-but-not-ten-multiple coefficient and sizes the strip. (The previous form probed with
-            // `rem_u64(10)` and then divided by `10^9` to re-derive those digits, discarding that quotient
-            // whenever fewer than nine zeros were stripped — one wasted `Big` divide per strip.)
-            let low = self.coeff.rem_u64(CHUNK).expect("divisor 10^9 is nonzero");
-            if !low.is_multiple_of(10) {
+            // Divisibility by ten from the last decimal digit alone — a cheap limb-sum reduction, not the
+            // O(n) reciprocal remainder the strip needs. An even coefficient not ending in zero (the common
+            // case among evens) returns here without that heavier peek.
+            if self.coeff.last_decimal_digit() != 0 {
                 return; // last digit nonzero → already canonical
             }
             if self.exp > i64::MAX - CHUNK_DIGITS {
                 return; // refuse to overflow exp; leaving it un-fully-stripped is still correct
             }
+            // Ends in zero, so it strips: now peek the low nine digits (a single allocation-free remainder,
+            // paid only on the fraction of results that reach here) to size a single divide.
+            let low = self.coeff.rem_u64(CHUNK).expect("divisor 10^9 is nonzero");
             if low == 0 {
                 // All nine low digits are zero — strip the whole chunk and continue.
                 self.coeff = self
