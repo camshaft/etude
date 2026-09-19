@@ -78,7 +78,7 @@ impl StrRope {
         if byte_idx == 0 || byte_idx == len {
             return true;
         }
-        // A boundary is any byte that is NOT a UTF-8 continuation byte (0b10xx_xxxx, i.e. 0x80..=0xBF).
+        // A boundary is any byte that is not a UTF-8 continuation byte (0b10xx_xxxx, i.e. 0x80..=0xBF).
         // Matches the stdlib check `(b as i8) >= -0x40`.
         match self.0.byte_at(byte_idx) {
             Some(b) => (b as i8) >= -0x40,
@@ -120,8 +120,9 @@ impl StrRope {
     pub fn chars(&self) -> Chars<'_> {
         Chars {
             chunks: self.0.chunks(),
-            cur: &[],
-            pos: 0,
+            cur: "".chars(),
+            carry: [0u8; 4],
+            carry_len: 0,
         }
     }
 
@@ -223,27 +224,92 @@ fn utf8_char_width(b: u8) -> usize {
     }
 }
 
+/// Length of the largest prefix of `bytes` that ends on a codepoint boundary — i.e. everything except a
+/// trailing codepoint that continues into the next chunk. Given the whole content is valid UTF-8, an
+/// incomplete tail is at most 3 bytes and its leading byte lies within the last 4 bytes.
+fn valid_prefix_len(bytes: &[u8]) -> usize {
+    let n = bytes.len();
+    let mut i = n;
+    while i > 0 && n - i < 4 {
+        i -= 1;
+        let b = bytes[i];
+        if b < 0x80 {
+            return n; // ASCII byte at/near the end: nothing is mid-codepoint
+        }
+        if b >= 0xC0 {
+            // Leading byte at `i`: the tail codepoint is complete iff its full width fits in the chunk.
+            let width = utf8_char_width(b);
+            return if i + width <= n { n } else { i };
+        }
+        // continuation byte: keep scanning back for its leading byte
+    }
+    n
+}
+
+/// Feed the content to `emit` as a sequence of valid `&str` pieces, stitching a codepoint that straddles a
+/// chunk boundary into a small stack buffer — so the bulk of the content is written in whole-chunk `&str`
+/// runs (fast, no allocation), and only the ≤3-byte seams are handled specially. The backbone of
+/// [`Display`](core::fmt::Display) / [`Debug`](core::fmt::Debug).
+fn for_each_str<F>(rope: &StrRope, mut emit: F) -> core::fmt::Result
+where
+    F: FnMut(&str) -> core::fmt::Result,
+{
+    let mut carry = [0u8; 4];
+    let mut carry_len = 0usize;
+    for chunk in rope.0.chunks() {
+        let mut bytes: &[u8] = chunk;
+        // 1. Complete a codepoint carried from the previous chunk, using the front of this one.
+        if carry_len > 0 {
+            let width = utf8_char_width(carry[0]);
+            let need = (width - carry_len).min(bytes.len());
+            carry[carry_len..carry_len + need].copy_from_slice(&bytes[..need]);
+            carry_len += need;
+            bytes = &bytes[need..];
+            if carry_len < width {
+                continue; // still incomplete; wait for the next chunk
+            }
+            if let Ok(s) = core::str::from_utf8(&carry[..width]) {
+                emit(s)?;
+            }
+            // carry_len is unconditionally reset by step 2's assignment below.
+        }
+        // 2. Emit the valid prefix in bulk; stash any trailing incomplete codepoint as the new carry.
+        let end = valid_prefix_len(bytes);
+        if let Ok(s) = core::str::from_utf8(&bytes[..end]) {
+            emit(s)?;
+        }
+        let tail = &bytes[end..];
+        carry[..tail.len()].copy_from_slice(tail);
+        carry_len = tail.len();
+    }
+    Ok(())
+}
+
 /// Iterator over the [`char`]s of a [`StrRope`] (see [`StrRope::chars`]). Reassembles a codepoint that
 /// spans a chunk boundary by pulling bytes across chunks.
 pub struct Chars<'a> {
     chunks: etude_bytevec::Chunks<'a>,
-    cur: &'a [u8],
-    pos: usize,
+    /// Bulk decoder over the valid `&str` prefix of the current chunk — the fast path (std's own
+    /// contiguous UTF-8 decoder), so only chunk seams need special handling.
+    cur: core::str::Chars<'a>,
+    /// Leading bytes of a codepoint that straddles into the next chunk(s). `carry[0]` is always a
+    /// leading byte, so its width is known; `carry_len == 0` in the common (no-seam) case.
+    carry: [u8; 4],
+    carry_len: usize,
 }
 
-impl Chars<'_> {
-    /// The next byte of the logical stream, advancing across chunks (skipping empty ones).
+impl<'a> Chars<'a> {
+    /// Point `cur` at the valid prefix of `bytes` (decoded in bulk via `str`), stashing any trailing
+    /// incomplete codepoint into `carry` for the next chunk to complete.
     #[inline]
-    fn next_byte(&mut self) -> Option<u8> {
-        loop {
-            if self.pos < self.cur.len() {
-                let b = self.cur[self.pos];
-                self.pos += 1;
-                return Some(b);
-            }
-            self.cur = &self.chunks.next()?[..];
-            self.pos = 0;
-        }
+    fn set_cur(&mut self, bytes: &'a [u8]) {
+        let end = valid_prefix_len(bytes);
+        self.cur = core::str::from_utf8(&bytes[..end])
+            .expect("StrRope invariant: content is valid UTF-8")
+            .chars();
+        let tail = &bytes[end..];
+        self.carry[..tail.len()].copy_from_slice(tail);
+        self.carry_len = tail.len();
     }
 }
 
@@ -251,18 +317,48 @@ impl Iterator for Chars<'_> {
     type Item = char;
 
     fn next(&mut self) -> Option<char> {
-        let b0 = self.next_byte()?;
-        let width = utf8_char_width(b0);
-        let mut buf = [b0, 0, 0, 0];
-        for slot in buf.iter_mut().take(width).skip(1) {
-            *slot = self
-                .next_byte()
-                .expect("StrRope invariant: content is valid UTF-8 (truncated codepoint)");
+        loop {
+            // Fast path: decode within the current chunk's contiguous `&str`.
+            if let Some(c) = self.cur.next() {
+                return Some(c);
+            }
+            // The current chunk is drained; pull the next non-empty chunk.
+            let bytes: &[u8] = loop {
+                match self.chunks.next() {
+                    None => {
+                        debug_assert_eq!(
+                            self.carry_len, 0,
+                            "StrRope invariant: content is valid UTF-8 (no truncated tail)"
+                        );
+                        return None;
+                    }
+                    Some(chunk) if chunk.is_empty() => continue,
+                    Some(chunk) => break &chunk[..],
+                }
+            };
+            // A codepoint carried from the previous chunk completes from the front of this one — and,
+            // for tiny chunks, may still span further, so consume leading bytes into `carry` until full.
+            if self.carry_len > 0 {
+                let width = utf8_char_width(self.carry[0]);
+                let need = (width - self.carry_len).min(bytes.len());
+                self.carry[self.carry_len..self.carry_len + need].copy_from_slice(&bytes[..need]);
+                self.carry_len += need;
+                if self.carry_len < width {
+                    continue; // still incomplete; wait for the next chunk
+                }
+                let c = core::str::from_utf8(&self.carry[..width])
+                    .expect("StrRope invariant: content is valid UTF-8")
+                    .chars()
+                    .next()
+                    .expect("one codepoint");
+                self.carry_len = 0;
+                // The rest of this chunk becomes `cur` for subsequent calls.
+                self.set_cur(&bytes[need..]);
+                return Some(c);
+            }
+            // No carry: this chunk's valid prefix becomes `cur`; loop to pull its first char.
+            self.set_cur(bytes);
         }
-        core::str::from_utf8(&buf[..width])
-            .expect("StrRope invariant: content is valid UTF-8")
-            .chars()
-            .next()
     }
 }
 
@@ -284,25 +380,69 @@ impl Iterator for CharIndices<'_> {
 }
 
 impl From<&str> for StrRope {
+    /// Wraps a `&str` with a single copy of its bytes and no validation scan (a `&str` is valid UTF-8
+    /// by type), via the typed [`Rope<Utf8>`](etude_bytevec::Rope) constructor.
+    #[inline]
     fn from(s: &str) -> Self {
-        let mut r = Self::new();
-        r.push_str(s);
-        r
+        Self(Rope::<Utf8>::from(s))
     }
 }
 
 impl From<String> for StrRope {
+    /// Wraps a `String` by *moving* its buffer — the allocation is reused, with no copy and no
+    /// validation scan (a `String` is valid UTF-8 by type). Prefer this over [`from`](Self::from)`(&str)`
+    /// when you own the `String`, to avoid the copy.
+    #[inline]
     fn from(s: String) -> Self {
-        Self::from(s.as_str())
+        Self(Rope::<Utf8>::from(s))
     }
 }
 
 // Content equality / ordering / hashing — by the concatenated bytes, so a StrRope compares and hashes like
 // its text regardless of how it is chunked internally. (Two StrRopes with the same content but different
 // chunk boundaries are equal.)
+/// Lexicographic byte-content comparison of two ropes, walking both chunk iterators with two cursors and
+/// comparing overlapping runs via slice `cmp` (a `memcmp`) — no per-byte iteration, no allocation, and it
+/// short-circuits on the first differing run. Byte order == char order for UTF-8, so this matches `str`.
+fn cmp_content(a: &StrRope, b: &StrRope) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    let (mut ai, mut bi) = (a.0.chunks(), b.0.chunks());
+    let (mut ca, mut cb): (&[u8], &[u8]) = (&[], &[]);
+    loop {
+        while ca.is_empty() {
+            match ai.next() {
+                Some(c) => ca = &c[..],
+                None => break,
+            }
+        }
+        while cb.is_empty() {
+            match bi.next() {
+                Some(c) => cb = &c[..],
+                None => break,
+            }
+        }
+        match (ca.is_empty(), cb.is_empty()) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less, // a is a proper prefix of b
+            (false, true) => return Ordering::Greater,
+            (false, false) => {
+                let n = ca.len().min(cb.len());
+                match ca[..n].cmp(&cb[..n]) {
+                    Ordering::Equal => {
+                        ca = &ca[n..];
+                        cb = &cb[n..];
+                    }
+                    ord => return ord,
+                }
+            }
+        }
+    }
+}
+
 impl PartialEq for StrRope {
     fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len() && self.bytes().eq(other.bytes())
+        // O(1) length reject, then a chunk-aligned memcmp (not per-byte).
+        self.len() == other.len() && cmp_content(self, other).is_eq()
     }
 }
 impl Eq for StrRope {}
@@ -313,22 +453,59 @@ impl PartialOrd for StrRope {
 }
 impl Ord for StrRope {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        // Lexicographic by bytes == lexicographic by chars for UTF-8, matching `str`'s ordering.
-        self.bytes().cmp(other.bytes())
+        cmp_content(self, other)
     }
 }
 impl core::hash::Hash for StrRope {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        for b in self.bytes() {
-            state.write_u8(b);
+        // The `Eq`->`Hash` contract requires equal ropes to hash equally, and two ropes are equal by
+        // content regardless of internal chunk layout — so the sequence of `Hasher::write` calls must be
+        // a pure function of the *content*, not the chunk boundaries. `write` is NOT concatenation-
+        // equivalent for boundary-sensitive hashers (aHash/fxhash mix per call), so feeding raw chunks
+        // would hash equal ropes differently under those hashers (SipHash happens to be concatenation-
+        // equivalent, which masks it). Re-block into fixed-size buffers: the write sequence then depends
+        // only on the bytes — full block writes plus a final partial — with no allocation and still bulk
+        // (not per-byte). The `0xff` terminator guards composite-key prefix collisions. NB this is not
+        // equal to `str`'s hash (str writes all bytes in one call), so `Borrow<str>` stays off the table.
+        const BLOCK: usize = 64;
+        let mut buf = [0u8; BLOCK];
+        let mut len = 0usize;
+        for chunk in self.0.chunks() {
+            let mut bytes: &[u8] = chunk;
+            while !bytes.is_empty() {
+                let take = (BLOCK - len).min(bytes.len());
+                buf[len..len + take].copy_from_slice(&bytes[..take]);
+                len += take;
+                bytes = &bytes[take..];
+                if len == BLOCK {
+                    state.write(&buf);
+                    len = 0;
+                }
+            }
         }
+        if len > 0 {
+            state.write(&buf[..len]);
+        }
+        state.write_u8(0xff);
     }
 }
 
 // Equality with the primitive string types (so tests + call sites read naturally).
 impl PartialEq<str> for StrRope {
     fn eq(&self, other: &str) -> bool {
-        self.len() == other.len() && self.bytes().eq(other.bytes())
+        if self.len() != other.len() {
+            return false;
+        }
+        // Chunk-aligned memcmp against the contiguous `str` bytes (not per-byte).
+        let mut rest = other.as_bytes();
+        for chunk in self.0.chunks() {
+            let c = &chunk[..];
+            if rest.len() < c.len() || rest[..c.len()] != *c {
+                return false;
+            }
+            rest = &rest[c.len()..];
+        }
+        rest.is_empty()
     }
 }
 impl PartialEq<&str> for StrRope {
@@ -339,21 +516,35 @@ impl PartialEq<&str> for StrRope {
 
 impl core::fmt::Display for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Linearize to one contiguous buffer, then view as &str (valid by the invariant). Individual
-        // chunks can't be written as &str — a codepoint may straddle a chunk boundary.
+        // Fast path: with no width or precision set, `Formatter::pad` would just write the content
+        // verbatim, so stream whole-chunk `&str` runs (stitching only the ≤3-byte codepoint seams) —
+        // no whole-content allocation, no per-char overhead.
+        if f.width().is_none() && f.precision().is_none() {
+            return for_each_str(self, |s| f.write_str(s));
+        }
+        // Formatted: width, fill, alignment, and precision (char-count truncation) are applied by
+        // `Formatter::pad`, which operates on a contiguous `&str` — as `str`'s own Display does — so
+        // linearize the content and delegate for exact parity.
         let contiguous = self.0.copy_to_bytes();
-        // The invariant guarantees valid UTF-8, but use the checked path (Display is already O(n) here)
-        // to avoid any unsafe. Route through `Formatter::pad` — as `str`'s own Display does — so the
-        // width, fill, alignment, and precision (char-count truncation) format parameters are honored.
         match core::str::from_utf8(&contiguous) {
             Ok(s) => f.pad(s),
-            Err(_) => Err(core::fmt::Error), // unreachable given the invariant
+            Err(_) => Err(core::fmt::Error), // unreachable given the UTF-8 invariant
         }
     }
 }
 
 impl core::fmt::Debug for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use core::fmt::Write as _;
+        // Fast path (no width/precision): stream whole-chunk `&str` runs, escaped per `<str as Debug>`
+        // (`str::escape_debug` is a bulk-writing Display adapter, so escaping stays out of the per-char
+        // path) — no whole-content allocation.
+        if f.width().is_none() && f.precision().is_none() {
+            f.write_char('"')?;
+            for_each_str(self, |s| write!(f, "{}", s.escape_debug()))?;
+            return f.write_char('"');
+        }
+        // Formatted: delegate to `str`'s own Debug over the linearized content for exact flag parity.
         let contiguous = self.0.copy_to_bytes();
         match core::str::from_utf8(&contiguous) {
             Ok(s) => core::fmt::Debug::fmt(s, f),
@@ -391,7 +582,7 @@ mod tests {
 
     /// Differential oracle vs `str`/`String`: arbitrary raw bytes, built into ropes under several
     /// chunk layouts (so multi-byte codepoints and invalid sequences STRADDLE leaf boundaries), must
-    /// agree with `core::str::from_utf8` on accept/reject AND `valid_up_to`; on accept, every
+    /// agree with `core::str::from_utf8` on accept/reject and `valid_up_to`; on accept, every
     /// str-facing query must match the flat `&str`. This is the fence for any future optimization of
     /// the linearize-then-validate path (e.g. per-chunk validation with boundary stitching).
     #[test]
@@ -880,6 +1071,32 @@ mod tests {
     }
 
     #[test]
+    fn chars_match_str_across_varied_chunkings() {
+        // The bulk chars() decoder emits each chunk's valid `&str` prefix and stitches only the seam
+        // codepoint. Exercise that seam at many fixed chunk sizes so a multi-byte codepoint lands at every
+        // possible offset within (and straddling) a chunk — std str is the oracle.
+        let text = "aé🦀z—ß本d\u{10FFFF}f";
+        let bytes = text.as_bytes();
+        for size in 1..=7 {
+            let mut bv = ByteVec::default();
+            for piece in bytes.chunks(size) {
+                bv.push_back(bytes::Bytes::copy_from_slice(piece));
+            }
+            let s = StrRope::from_utf8(bv).unwrap();
+            assert_eq!(
+                s.chars().collect::<String>(),
+                text,
+                "chars() mismatch at chunk size {size}"
+            );
+            assert_eq!(
+                s.char_indices().collect::<Vec<_>>(),
+                text.char_indices().collect::<Vec<_>>(),
+                "char_indices() mismatch at chunk size {size}"
+            );
+        }
+    }
+
+    #[test]
     fn insert_str_and_insert() {
         let mut s = StrRope::from("ad");
         s.insert_str(1, "bc");
@@ -947,5 +1164,45 @@ mod tests {
                 text.char_indices().collect::<Vec<_>>()
             );
         });
+    }
+
+    // Ord/Eq between DIFFERENT content (incl. prefix / empty / multi-byte), built one byte per chunk so
+    // the chunk-aligned `cmp_content` walk crosses many leaf boundaries — must match `str`'s ordering.
+    #[test]
+    fn ord_matches_str_across_chunk_boundaries() {
+        fn one_byte_per_chunk(text: &str) -> StrRope {
+            let mut bv = ByteVec::new();
+            for b in text.as_bytes() {
+                bv.push_back(bytes::Bytes::copy_from_slice(&[*b]));
+            }
+            StrRope::from_utf8(bv).unwrap()
+        }
+        let words = [
+            "", "a", "ab", "abc", "abd", "b", "apple", "applf", "é", "és", "🦀", "🦀s",
+        ];
+        for x in words {
+            for y in words {
+                let (rx, ry) = (one_byte_per_chunk(x), one_byte_per_chunk(y));
+                assert_eq!(rx.cmp(&ry), x.cmp(y), "cmp {x:?} vs {y:?}");
+                assert_eq!(rx == ry, x == y, "eq {x:?} vs {y:?}");
+            }
+        }
+    }
+
+    // Debug escaping must match `<str as Debug>` (quotes, control chars, unicode) — the alloc-free
+    // char-stream Debug uses `char::escape_debug`, the same as str.
+    #[test]
+    fn debug_matches_str() {
+        for text in [
+            "hi",
+            "a\"b",
+            "tab\there",
+            "new\nline",
+            "café 🦀",
+            "back\\slash",
+            "",
+        ] {
+            assert_eq!(format!("{:?}", StrRope::from(text)), format!("{text:?}"));
+        }
     }
 }

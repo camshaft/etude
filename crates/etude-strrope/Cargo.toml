@@ -22,3 +22,9 @@ bytes = "1"
 etude-bytevec = { version = "0.1", path = "../etude-bytevec", features = ["testing"] }
 bolero = "0.13"
 bolero-generator = "0.13"
+# `ops` bench: rope-shaped complexity at shallow (4-chunk) vs deep (1000-chunk) shapes.
+criterion = "0.5"
+
+[[bench]]
+name = "ops"
+harness = false
