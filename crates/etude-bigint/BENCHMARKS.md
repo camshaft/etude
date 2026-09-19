@@ -44,9 +44,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | div_small (n / 1-limb)    | 256b   | 66.5 ns   | 122 ns     | **0.54**  |
 | div_small (n / 1-limb)    | 1024b  | 128 ns    | 465 ns     | **0.27**  |
 | div_small (n / 1-limb)    | 4096b  | 377 ns    | 1.70 µs    | **0.22**  |
-| gcd                       | 64b    | 843 ns    | 1.13 µs    | **0.74**  |
-| gcd                       | 256b   | 4.09 µs   | 4.71 µs    | **0.87**  |
-| gcd                       | 1024b  | 23.5 µs   | 23.1 µs    | 1.02      |
+| gcd                       | 64b    | 841 ns    | 1.13 µs    | **0.74**  |
+| gcd                       | 256b   | 4.07 µs   | 4.73 µs    | **0.86**  |
+| gcd                       | 1024b  | 23.1 µs   | 23.2 µs    | **0.99**  |
+| gcd                       | 4096b  | 210 µs    | 192 µs     | 1.09      |
 | cmp                       | 64b    | 2.63 ns   | 3.23 ns    | **0.81**  |
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
@@ -90,9 +91,9 @@ of the gap is that scan. The win narrows at 4096b (0.49×) because the Horner is
 while num-bigint has a recursive combine; a subquadratic combine here is a future lever (low priority —
 already a win).
 
-(divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd is capped at 1024b because
-its Euclid cost is steep. sign_magnitude_roundtrip is the canonical map-key encode+decode; num-bigint
-has no matching operation.)
+(divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd (binary/Stein) is at parity
+through 1024b and trails num-bigint's subquadratic gcd only at 4096b (1.09×) — see the gaps list.
+sign_magnitude_roundtrip is the canonical map-key encode+decode; num-bigint has no matching operation.)
 
 ## Accessors, scalar ops, and codecs (every-function coverage)
 
@@ -312,9 +313,13 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
    kernels emit inline results directly — a larger change (below). The `neg`/`abs` backfill widens this
    item's payoff: etude-rational reports the same 64b loss at its `neg`/`abs` cells, so the one repr change
    closes those three rational cells as well.
-3. **mul at 4096b (1.03×), gcd at 1024b (1.02×), sub at 4096b (1.02×), to_decimal_string at 4096b (1.04×),
-   the 64b add/sub/mul tiers (~1.1–1.25×).** At or near parity; num-bigint's edge at the largest tiers is
-   Toom-3 mul and a Lehmer gcd.
+3. **gcd at 4096b (1.09×)** — the raw binary/Stein gcd trails num-bigint's subquadratic gcd only at the
+   widest tier (parity through 1024b). This is the raw-gcd cost behind etude-rational's `normalize`/`add_eqden`
+   at 4096b, so double-word Lehmer / HGCD is the lever; a single-word Lehmer was tried and reverted
+   (regressed 1024b), so the correct version is the double-word one — a self-contained but multi-step change.
+4. **mul at 4096b (1.03×), sub at 4096b (~1.03×), the 64b add/sub/mul tiers (~1.1–1.25×).** At or near
+   parity; num-bigint's edge at the largest mul tier is Toom-3, and the 64b arithmetic tiers share the
+   one-limb-`Vec` allocation root with clone/from_i64/neg/abs (the inline-repr item above).
 
 ## Roadmap
 

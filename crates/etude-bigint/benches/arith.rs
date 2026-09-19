@@ -22,9 +22,6 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// (label, magnitude byte count). 8 bytes ≈ 64 bits.
 const TIERS: &[(&str, usize)] = &[("64b", 8), ("256b", 32), ("1024b", 128), ("4096b", 512)];
-/// Tiers for the super-linear ops (gcd, decimal render) whose bit-at-a-time cost is steep — capped so
-/// a single sample stays sub-millisecond at the baseline.
-const HEAVY_TIERS: &[(&str, usize)] = &[("64b", 8), ("256b", 32), ("1024b", 128)];
 
 struct Rng(u64);
 impl Rng {
@@ -177,7 +174,7 @@ fn bench_div_small(c: &mut Criterion) {
 
 fn bench_gcd(c: &mut Criterion) {
     use num_integer::Integer;
-    binop(c, "gcd", HEAVY_TIERS, |a, b| a.gcd(b), |a, b| a.gcd(b));
+    binop(c, "gcd", TIERS, |a, b| a.gcd(b), |a, b| a.gcd(b));
 }
 
 fn bench_cmp(c: &mut Criterion) {
