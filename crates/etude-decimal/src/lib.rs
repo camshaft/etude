@@ -434,6 +434,16 @@ impl Decimal {
         if self.is_zero() {
             return Some(Decimal::zero());
         }
+        // Native fast path: when both coefficients fit `i128`, reduce and factor-strip in native `u128`
+        // (gcd, trailing-zero 2-strip, 5-strip) rather than a chain of `Big` divmods. Falls back only when
+        // the terminating quotient's coefficient overflows native width.
+        if let (Some(n), Some(d)) = (self.coeff.to_i128_checked(), other.coeff.to_i128_checked()) {
+            match div_exact_i128(n, self.exp, d, other.exp) {
+                ExactDivI128::Terminates(dec) => return Some(dec),
+                ExactDivI128::NonTerminating => return None,
+                ExactDivI128::TooWide => {} // fall through to the exact Big path
+            }
+        }
         let neg = self.coeff.is_negative() ^ other.coeff.is_negative();
         // Reduce |num| / |den| to lowest terms, then strip all 2s and 5s from the denominator.
         let g = self.coeff.gcd(&other.coeff); // gcd ignores sign (magnitude gcd)
@@ -1019,6 +1029,81 @@ fn big_from_u128(mag: u128, negative: bool) -> Big {
     buf[0] = negative as u8;
     buf[1..].copy_from_slice(&mag.to_le_bytes());
     Big::from_sign_magnitude_bytes(&buf)
+}
+
+/// Greatest common divisor of two `u128`s by the binary (Stein) algorithm — native shifts and subtracts,
+/// no division. `gcd(x, 0) == x`. Used by the native small-value exact-division fast path.
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    if a == 0 {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    let shift = (a | b).trailing_zeros();
+    a >>= a.trailing_zeros();
+    loop {
+        b >>= b.trailing_zeros();
+        if a > b {
+            core::mem::swap(&mut a, &mut b);
+        }
+        b -= a;
+        if b == 0 {
+            return a << shift;
+        }
+    }
+}
+
+/// Outcome of the native `i128` exact-division fast path ([`Decimal::div`]).
+enum ExactDivI128 {
+    /// The quotient terminates and fit native arithmetic: the finished value.
+    Terminates(Decimal),
+    /// A prime factor other than 2 or 5 remains in the reduced divisor — no finite decimal quotient.
+    NonTerminating,
+    /// The reduced numerator times the compensating power of ten overflows `i128`/`u128` (or the exponent
+    /// overflows `i64`): the caller must fall back to the exact `Big` path.
+    TooWide,
+}
+
+/// Exact `n·10^ne / (d·10^de)` in native integer arithmetic, or a signal to defer. Mirrors the `Big` body
+/// of [`Decimal::div`]: reduce `|n|/|d|` by their gcd, strip 2s and 5s from the divisor, and — if nothing
+/// else remains — scale the numerator by the complementary power so the result is `coeff·10^exp`. All in
+/// `u128` with checked widening; any overflow yields [`ExactDivI128::TooWide`]. `n` and `d` are nonzero.
+fn div_exact_i128(n: i128, ne: i64, d: i128, de: i64) -> ExactDivI128 {
+    let negative = (n < 0) ^ (d < 0);
+    let mut num = n.unsigned_abs();
+    let mut den = d.unsigned_abs();
+    let g = gcd_u128(num, den);
+    num /= g;
+    den /= g;
+    // Strip every factor of two (a native trailing-zero count), then every factor of five.
+    let a2 = den.trailing_zeros();
+    den >>= a2;
+    let mut a5 = 0u32;
+    while den.is_multiple_of(5) {
+        den /= 5;
+        a5 += 1;
+    }
+    if den != 1 {
+        return ExactDivI128::NonTerminating; // a factor other than 2 or 5 remains
+    }
+    // 1/(2^a2·5^a5) = (2^(m-a2)·5^(m-a5)) / 10^m, m = max(a2,a5); one of the two powers is 1.
+    let m = a2.max(a5);
+    let extra = if a2 >= a5 {
+        5u128.checked_pow(a2 - a5)
+    } else {
+        2u128.checked_pow(a5 - a2)
+    };
+    let Some(extra) = extra else {
+        return ExactDivI128::TooWide;
+    };
+    let Some(mag) = num.checked_mul(extra) else {
+        return ExactDivI128::TooWide;
+    };
+    let Some(exp) = (ne - de).checked_sub(m as i64) else {
+        return ExactDivI128::TooWide;
+    };
+    ExactDivI128::Terminates(Decimal::new(big_from_u128(mag, negative), exp))
 }
 
 /// `10^k` as a nonnegative [`Big`], by binary exponentiation (base-10, squaring). `10^0 == 1`.
