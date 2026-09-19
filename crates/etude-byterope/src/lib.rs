@@ -312,8 +312,10 @@ impl ByteRope {
                 if let Some(c) = d.head.pop_front() {
                     c
                 } else if let Some(block) = d.tree.pop_front_block() {
-                    // refill the head buffer from the tree's leftmost block
-                    d.head.extend(block);
+                    // refill the head buffer from the tree's leftmost block. `d.head` is empty here
+                    // (its `pop_front` just returned `None`), so adopt the block's buffer wholesale:
+                    // `VecDeque::from(Vec)` is O(1) and reuses the allocation (no per-`Bytes` move).
+                    d.head = VecDeque::from(block);
                     d.head.pop_front().expect("a block is never empty")
                 } else {
                     d.tail.pop_front()?
@@ -343,7 +345,10 @@ impl ByteRope {
                 if let Some(c) = d.tail.pop_back() {
                     c
                 } else if let Some(block) = d.tree.pop_back_block() {
-                    d.tail.extend(block);
+                    // `d.tail` is empty here (its `pop_back` just returned `None`), so adopt the
+                    // block's buffer wholesale: `VecDeque::from(Vec)` is O(1) and reuses the
+                    // allocation, avoiding a per-`Bytes` move of the whole block into the deque.
+                    d.tail = VecDeque::from(block);
                     d.tail.pop_back().expect("a block is never empty")
                 } else {
                     d.head.pop_back()?
@@ -403,7 +408,8 @@ impl ByteRope {
                 while n > 0 {
                     if d.head.is_empty() {
                         if let Some(block) = d.tree.pop_front_block() {
-                            d.head.extend(block);
+                            // head is empty (guarded above) — adopt the block's buffer in O(1).
+                            d.head = VecDeque::from(block);
                         } else if !d.tail.is_empty() {
                             core::mem::swap(&mut d.head, &mut d.tail);
                         } else {
