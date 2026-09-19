@@ -3,11 +3,11 @@
 
 //! Arbitrary-precision signed integers — a small, hand-written `no_std` limb library. Pure over
 //! `alloc::vec::Vec`, no I/O, no dependency. The surface is small (add/sub/mul/divmod/gcd/cmp +
-//! from/to i64 + two byte encodings) over `Vec<u32>` limbs — schoolbook algorithms. Independently
+//! from/to i64 + two byte encodings) over `Vec<u64>` limbs — schoolbook algorithms. Independently
 //! unit-testable, with a differential test against `num-bigint` (a dev-dependency) as the safety net.
 //!
 //! # Representation
-//! [`Big`] is `{ neg: bool, mag: Vec<u32> }` — base-2³² limbs, LITTLE-ENDIAN (`mag[0]` is the
+//! [`Big`] is `{ neg: bool, mag: Vec<u64> }` — base-2⁶⁴ limbs, LITTLE-ENDIAN (`mag[0]` is the
 //! least-significant limb), with NO trailing zero limbs. Zero is the canonical `{ neg: false, mag: [] }`.
 //! Every operation `normalize`s its result (strips trailing zero limbs; forces `neg = false` when the
 //! magnitude is zero), so a value has exactly ONE in-memory form. This canonical form is required when a
@@ -33,8 +33,8 @@ use core::cmp::Ordering;
 pub struct Big {
     /// Sign: `true` = negative. Always `false` when `mag` is empty (zero is non-negative, canonical).
     neg: bool,
-    /// Magnitude limbs, base 2³², little-endian, no trailing zero limbs (empty = zero).
-    mag: Vec<u32>,
+    /// Magnitude limbs, base 2⁶⁴, little-endian, no trailing zero limbs (empty = zero).
+    mag: Vec<u64>,
 }
 
 impl Big {
@@ -78,7 +78,7 @@ impl Big {
     // ─── magnitude helpers (unsigned, operate on limb slices) ─────────────────────────────────
 
     /// Compare two magnitudes (limb slices, little-endian, normalized) by value.
-    fn cmp_mag(a: &[u32], b: &[u32]) -> Ordering {
+    fn cmp_mag(a: &[u64], b: &[u64]) -> Ordering {
         if a.len() != b.len() {
             return a.len().cmp(&b.len());
         }
@@ -92,63 +92,66 @@ impl Big {
         Ordering::Equal
     }
 
-    /// `a + b` over magnitudes (little-endian limbs), returning a normalized magnitude.
-    fn add_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
+    /// `a + b` over magnitudes (little-endian limbs), returning a normalized magnitude. A `u128`
+    /// accumulator holds a limb sum plus carry without overflow (the carry is always 0 or 1).
+    fn add_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
         let mut out = Vec::with_capacity(a.len().max(b.len()) + 1);
-        let mut carry = 0u64;
+        let mut carry = 0u128;
         for i in 0..a.len().max(b.len()) {
-            let av = *a.get(i).unwrap_or(&0) as u64;
-            let bv = *b.get(i).unwrap_or(&0) as u64;
+            let av = *a.get(i).unwrap_or(&0) as u128;
+            let bv = *b.get(i).unwrap_or(&0) as u128;
             let s = av + bv + carry;
-            out.push((s & 0xffff_ffff) as u32);
-            carry = s >> 32;
+            out.push(s as u64);
+            carry = s >> 64;
         }
         if carry != 0 {
-            out.push(carry as u32);
+            out.push(carry as u64);
         }
         strip(&mut out);
         out
     }
 
     /// `a - b` over magnitudes, REQUIRING `a >= b` (caller ensures via `cmp_mag`). Returns normalized.
-    fn sub_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
+    /// An `i128` difference holds a full `u64` limb minus another minus the borrow without overflow.
+    fn sub_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
         let mut out = Vec::with_capacity(a.len());
-        let mut borrow = 0i64;
+        let mut borrow = 0i128;
         for (i, &limb) in a.iter().enumerate() {
-            let av = limb as i64;
-            let bv = *b.get(i).unwrap_or(&0) as i64;
+            let av = limb as i128;
+            let bv = *b.get(i).unwrap_or(&0) as i128;
             let mut d = av - bv - borrow;
             if d < 0 {
-                d += 1i64 << 32;
+                d += 1i128 << 64;
                 borrow = 1;
             } else {
                 borrow = 0;
             }
-            out.push(d as u32);
+            out.push(d as u64);
         }
         strip(&mut out);
         out
     }
 
-    /// `a * b` over magnitudes (O(n·m) schoolbook), returning a normalized magnitude.
-    fn mul_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
+    /// `a * b` over magnitudes (O(n·m) schoolbook), returning a normalized magnitude. Each limb product
+    /// is a native `u64 * u64 -> u128`, and a `u128` accumulator carries the high half forward.
+    fn mul_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
         if a.is_empty() || b.is_empty() {
             return Vec::new();
         }
-        let mut out = alloc::vec![0u32; a.len() + b.len()];
+        let mut out = alloc::vec![0u64; a.len() + b.len()];
         for (i, &av) in a.iter().enumerate() {
-            let mut carry = 0u64;
+            let mut carry = 0u128;
             for (j, &bv) in b.iter().enumerate() {
-                let cur = out[i + j] as u64 + (av as u64) * (bv as u64) + carry;
-                out[i + j] = (cur & 0xffff_ffff) as u32;
-                carry = cur >> 32;
+                let cur = out[i + j] as u128 + (av as u128) * (bv as u128) + carry;
+                out[i + j] = cur as u64;
+                carry = cur >> 64;
             }
             // Propagate the final carry into the next limb (and beyond, if it cascades).
             let mut k = i + b.len();
             while carry != 0 {
-                let cur = out[k] as u64 + carry;
-                out[k] = (cur & 0xffff_ffff) as u32;
-                carry = cur >> 32;
+                let cur = out[k] as u128 + carry;
+                out[k] = cur as u64;
+                carry = cur >> 64;
                 k += 1;
             }
         }
@@ -334,24 +337,19 @@ impl Big {
             return Big::zero();
         }
         let neg = v < 0;
-        let m = v.unsigned_abs(); // handles i64::MIN without overflow
-        let mut mag = Vec::new();
-        mag.push((m & 0xffff_ffff) as u32);
-        let hi = (m >> 32) as u32;
-        if hi != 0 {
-            mag.push(hi);
+        let m = v.unsigned_abs(); // u64; handles i64::MIN without overflow, fits one limb
+        Big {
+            neg,
+            mag: alloc::vec![m],
         }
-        Big { neg, mag }
     }
 
     /// Narrow to `i64` if it fits, else `None`.
     pub fn to_i64_checked(&self) -> Option<i64> {
-        if self.mag.len() > 2 {
-            return None;
+        if self.mag.len() > 1 {
+            return None; // needs >64 bits — cannot fit i64
         }
-        let lo = *self.mag.first().unwrap_or(&0) as u64;
-        let hi = *self.mag.get(1).unwrap_or(&0) as u64;
-        let m = lo | (hi << 32); // magnitude as u64
+        let m = *self.mag.first().unwrap_or(&0); // magnitude as u64
         if self.neg {
             // Negative: fits iff m <= 2^63 (that boundary is exactly i64::MIN).
             if m <= (i64::MAX as u64) + 1 {
@@ -464,7 +462,7 @@ impl Big {
     pub fn to_sign_magnitude_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(self.neg as u8);
-        // Limbs (LE u32) → LE bytes, then strip trailing zero bytes for canonicality.
+        // Limbs (LE u64) → LE bytes, then strip trailing zero bytes for canonicality.
         for &limb in &self.mag {
             out.extend_from_slice(&limb.to_le_bytes());
         }
@@ -476,18 +474,18 @@ impl Big {
 
     /// Serialize the sign-magnitude bytes DIRECTLY into `buf` (no heap Vec), returning the byte length —
     /// or `None` if they don't fit (`buf` too small). A small-value fast path: a single-limb value is
-    /// `[sign] + ≤4 magnitude bytes` = ≤5 bytes, so it serializes into a caller-provided buffer without
+    /// `[sign] + ≤8 magnitude bytes` = ≤9 bytes, so it serializes into a caller-provided buffer without
     /// a transient `Vec`. Byte-IDENTICAL to [`Big::to_sign_magnitude_bytes`].
     pub fn to_sign_magnitude_bytes_into(&self, buf: &mut [u8]) -> Option<usize> {
-        let need = 1 + self.mag.len() * 4; // upper bound before the trailing-zero strip
+        let need = 1 + self.mag.len() * 8; // upper bound before the trailing-zero strip
         if need > buf.len() {
             return None; // caller falls back to the heap `to_sign_magnitude_bytes`
         }
         buf[0] = self.neg as u8;
         let mut n = 1;
         for &limb in &self.mag {
-            buf[n..n + 4].copy_from_slice(&limb.to_le_bytes());
-            n += 4;
+            buf[n..n + 8].copy_from_slice(&limb.to_le_bytes());
+            n += 8;
         }
         // Strip trailing zero bytes (keep at least the sign byte), matching the canonical form.
         while n > 1 && buf[n - 1] == 0 {
@@ -502,14 +500,14 @@ impl Big {
         let Some((&sign, mag_bytes)) = bytes.split_first() else {
             return Big::zero();
         };
-        let mut mag = Vec::with_capacity(mag_bytes.len().div_ceil(4));
+        let mut mag = Vec::with_capacity(mag_bytes.len().div_ceil(8));
         let mut i = 0;
         while i < mag_bytes.len() {
-            let mut limb = [0u8; 4];
-            let k = (mag_bytes.len() - i).min(4);
+            let mut limb = [0u8; 8];
+            let k = (mag_bytes.len() - i).min(8);
             limb[..k].copy_from_slice(&mag_bytes[i..i + k]);
-            mag.push(u32::from_le_bytes(limb));
-            i += 4;
+            mag.push(u64::from_le_bytes(limb));
+            i += 8;
         }
         let mut b = Big {
             neg: sign != 0,
@@ -584,15 +582,15 @@ impl Big {
                 carry = v >> 8;
             }
         }
-        // LE bytes → LE u32 limbs.
-        let mut mag = Vec::with_capacity(mbytes.len().div_ceil(4));
+        // LE bytes → LE u64 limbs.
+        let mut mag = Vec::with_capacity(mbytes.len().div_ceil(8));
         let mut i = 0;
         while i < mbytes.len() {
-            let mut limb = [0u8; 4];
-            let k = (mbytes.len() - i).min(4);
+            let mut limb = [0u8; 8];
+            let k = (mbytes.len() - i).min(8);
             limb[..k].copy_from_slice(&mbytes[i..i + k]);
-            mag.push(u32::from_le_bytes(limb));
-            i += 4;
+            mag.push(u64::from_le_bytes(limb));
+            i += 8;
         }
         let mut b = Big { neg, mag };
         b.normalize();
@@ -601,7 +599,7 @@ impl Big {
 }
 
 /// Strip trailing zero limbs from a magnitude (little-endian).
-fn strip(v: &mut Vec<u32>) {
+fn strip(v: &mut Vec<u64>) {
     while v.last() == Some(&0) {
         v.pop();
     }
@@ -610,20 +608,20 @@ fn strip(v: &mut Vec<u32>) {
 /// Unsigned long division of magnitudes: `(quotient, remainder)` with `a = quotient * b + remainder`,
 /// `0 <= remainder < b`. `b` MUST be non-empty (nonzero — the caller checks). Bit-at-a-time long
 /// division (simple + obviously-correct). Both results normalized.
-fn divmod_mag(a: &[u32], b: &[u32]) -> (Vec<u32>, Vec<u32>) {
+fn divmod_mag(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
     // a < b → quotient 0, remainder a.
     if Big::cmp_mag(a, b) == Ordering::Less {
         return (Vec::new(), a.to_vec());
     }
-    let nbits = a.len() * 32;
-    let mut q = alloc::vec![0u32; a.len()];
-    let mut r: Vec<u32> = Vec::new(); // running remainder, normalized (no trailing zeros)
+    let nbits = a.len() * 64;
+    let mut q = alloc::vec![0u64; a.len()];
+    let mut r: Vec<u64> = Vec::new(); // running remainder, normalized (no trailing zeros)
     // Process dividend bits from most-significant to least.
     for i in (0..nbits).rev() {
         // r <<= 1
         shl1(&mut r);
         // bring down bit i of a into r's bit 0
-        let bit = (a[i / 32] >> (i % 32)) & 1;
+        let bit = (a[i / 64] >> (i % 64)) & 1;
         if bit != 0 {
             if r.is_empty() {
                 r.push(1);
@@ -634,7 +632,7 @@ fn divmod_mag(a: &[u32], b: &[u32]) -> (Vec<u32>, Vec<u32>) {
         // if r >= b { r -= b; set quotient bit i }
         if Big::cmp_mag(&r, b) != Ordering::Less {
             r = Big::sub_mag(&r, b);
-            q[i / 32] |= 1 << (i % 32);
+            q[i / 64] |= 1u64 << (i % 64);
         }
     }
     strip(&mut q);
@@ -643,10 +641,10 @@ fn divmod_mag(a: &[u32], b: &[u32]) -> (Vec<u32>, Vec<u32>) {
 }
 
 /// `r <<= 1` over a little-endian limb magnitude (normalized in/out).
-fn shl1(r: &mut Vec<u32>) {
-    let mut carry = 0u32;
+fn shl1(r: &mut Vec<u64>) {
+    let mut carry = 0u64;
     for limb in r.iter_mut() {
-        let hi = *limb >> 31;
+        let hi = *limb >> 63;
         *limb = (*limb << 1) | carry;
         carry = hi;
     }

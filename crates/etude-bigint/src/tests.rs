@@ -36,8 +36,8 @@ fn from_i128(v: i128) -> Big {
     let mut m = v.unsigned_abs();
     let mut mag = Vec::new();
     while m != 0 {
-        mag.push((m & 0xffff_ffff) as u32);
-        m >>= 32;
+        mag.push(m as u64);
+        m >>= 64;
     }
     let mut b = Big { neg, mag };
     b.normalize();
@@ -185,7 +185,7 @@ impl Rng {
         let limbs = (self.next() % max_limbs) as usize;
         let mut mag = Vec::new();
         for _ in 0..limbs {
-            mag.push(self.next() as u32);
+            mag.push(self.next());
         }
         let neg = self.next() & 1 == 1;
         let mut b = Big { neg, mag };
@@ -441,9 +441,9 @@ fn divmod_edge_cases_and_wide_operands() {
     // (2) Structural corners.
     let pow2 = |bits: u32| -> Big {
         // 2^bits as a Big (a single set bit — exercises the shift/carry path).
-        let limb = (bits / 32) as usize;
-        let mut mag = alloc::vec![0u32; limb + 1];
-        mag[limb] = 1 << (bits % 32);
+        let limb = (bits / 64) as usize;
+        let mut mag = alloc::vec![0u64; limb + 1];
+        mag[limb] = 1u64 << (bits % 64);
         let mut b = Big { neg: false, mag };
         b.normalize();
         b
@@ -493,10 +493,10 @@ fn divmod_edge_cases_and_wide_operands() {
         "a=d+1 → (1, 1)"
     );
 
-    // All-0xffffffff limbs (max limb values — carry propagation stress).
+    // All-ones limbs (max limb values — carry propagation stress).
     let maxes = Big {
         neg: false,
-        mag: alloc::vec![0xffff_ffff; 8],
+        mag: alloc::vec![u64::MAX; 8],
     };
     let mref = to_ref(&maxes);
     for div in [Big::from_i64(3), pow2(32), pow2(100), maxes.clone()] {
