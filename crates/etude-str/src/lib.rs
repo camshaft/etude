@@ -246,6 +246,30 @@ mod tests {
     }
 
     #[test]
+    fn from_utf8_unchecked_view_and_clone_alias_are_sound() {
+        // The crate's only public `unsafe` entry point was untested, so miri validated only the
+        // safe constructors. Exercise it under the conditions Stacked Borrows scrutinizes: build a
+        // `Str` via `from_utf8_unchecked`, take the unchecked `as_str` view, then clone (an O(1)
+        // refcount bump that ALIASES the same backing allocation) and view both — a use-after or
+        // provenance error in `as_str`'s `from_utf8_unchecked` surfaces here under `cargo miri`.
+        let bytes = Bytes::from_static("héllo wörld".as_bytes());
+        // SAFETY: the source is a `&str`'s bytes, so the UTF-8 invariant holds.
+        let s = unsafe { Str::from_utf8_unchecked(bytes) };
+        assert_eq!(s.as_str(), "héllo wörld");
+        let alias = s.clone();
+        assert_eq!(s.as_str(), alias.as_str());
+        assert_eq!(alias.as_bytes(), "héllo wörld".as_bytes());
+        // Drop one aliased handle, then the other's view must still be valid (refcount, not move).
+        drop(s);
+        assert_eq!(alias.as_str(), "héllo wörld");
+        // Round-trip back to Bytes with no copy.
+        assert_eq!(
+            alias.into_bytes(),
+            Bytes::from_static("héllo wörld".as_bytes())
+        );
+    }
+
+    #[test]
     fn from_and_views_round_trip() {
         let s = Str::from("cadenza");
         assert_eq!(s.as_str(), "cadenza");
