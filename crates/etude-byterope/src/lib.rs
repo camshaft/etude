@@ -635,7 +635,29 @@ impl ByteRope {
         if at == self.len {
             return Ok(core::mem::take(self));
         }
-        // Deep: fold to a tree and split it in O(log₃₂), sharing subtrees on both sides.
+        // Deep fast path: the split point is in the TREE body, so split the tree once and keep each
+        // buffered end on its side (self.head → front, self.tail → self) — no fold-into-tree round
+        // trip. Common case for a split in the middle of a large rope.
+        let fast_head_bytes = if let Repr::Deep(d) = &self.repr {
+            let head_bytes: usize = d.head.iter().map(|c| c.len()).sum();
+            let tree_bytes = d.tree.byte_len();
+            (at >= head_bytes && at <= head_bytes + tree_bytes).then_some(head_bytes)
+        } else {
+            None
+        };
+        if let Some(head_bytes) = fast_head_bytes {
+            let taken = core::mem::take(self);
+            let Repr::Deep(d) = taken.repr else { unreachable!() };
+            let Deep { head, tree, tail } = *d;
+            let (ltree, rtree) = tree.split(at - head_bytes);
+            let front = Self::from_deep_parts(head, ltree, VecDeque::new());
+            *self = Self::from_deep_parts(VecDeque::new(), rtree, tail);
+            self.check_invariants();
+            front.check_invariants();
+            return Ok(front);
+        }
+        // Deep general path: the split point is inside a buffered end — fold to one tree and split it
+        // in O(log₃₂), sharing subtrees on both sides.
         if matches!(self.repr, Repr::Deep(_)) {
             let (left, right) = core::mem::take(self).into_tree().split(at);
             *self = Self::from_tree(right);
@@ -1134,13 +1156,18 @@ impl ByteRope {
 
     /// Wraps a tree as a `Deep` rope (empty buffered ends), demoting to `Small` if it is small.
     fn from_tree(tree: Tree) -> Self {
+        Self::from_deep_parts(VecDeque::new(), tree, VecDeque::new())
+    }
+
+    /// Wraps `(head, tree, tail)` as a `Deep` rope, computing its length and demoting to `Small` if it
+    /// is small. The buffered ends may be empty (allowed); their chunks must be non-empty.
+    fn from_deep_parts(head: VecDeque<Bytes>, tree: Tree, tail: VecDeque<Bytes>) -> Self {
+        let len = head.iter().map(|c| c.len()).sum::<usize>()
+            + tree.byte_len()
+            + tail.iter().map(|c| c.len()).sum::<usize>();
         let mut rope = ByteRope {
-            len: tree.byte_len(),
-            repr: Repr::Deep(Box::new(Deep {
-                head: VecDeque::new(),
-                tree,
-                tail: VecDeque::new(),
-            })),
+            len,
+            repr: Repr::Deep(Box::new(Deep { head, tree, tail })),
         };
         rope.maybe_demote();
         rope
