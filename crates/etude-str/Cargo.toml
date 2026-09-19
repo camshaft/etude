@@ -15,6 +15,11 @@ repository.workspace = true
 # stays serde-free; only a crate that wants derive-based ser/de on `Str`-bearing structs opts in with
 # `features = ["serde"]`.
 serde = ["dep:serde"]
+# Derive-free `bolero_generator::TypeGenerator` for `Str` (property/fuzz testing), so a downstream crate
+# can generate arbitrary `Str` values — e.g. a struct with a `Str` field deriving `TypeGenerator`. The
+# generator produces valid UTF-8 by construction (generates a `String`, then `Str::from`), so it never
+# violates the wrapped-bytes-are-UTF-8 invariant.
+bolero-generator = ["dep:bolero-generator", "bolero-generator/alloc"]
 
 [dependencies]
 # `Str` is a newtype over `bytes::Bytes` — a clone is an O(1) refcount bump, and text/bytes share ONE
@@ -22,6 +27,9 @@ serde = ["dep:serde"]
 bytes = "1"
 # OPTIONAL — only pulled in by the `serde` feature (off by default). `Str` serializes as a string.
 serde = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+# OPTIONAL — only pulled in by the `bolero-generator` feature (off by default).
+bolero-generator = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 bolero = "0.13"
+bolero-generator = "0.13"
