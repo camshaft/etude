@@ -1355,6 +1355,7 @@ fn differential_against_model() {
         AsContiguousCheck,
         IoReadWrite(usize, Vec<u8>),
         CopyToBytesMutCheck,
+        ReaderDrain(usize),
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1660,6 +1661,29 @@ fn differential_against_model() {
                 Op::CopyToBytesMutCheck => {
                     let flat = rope.clone().copy_to_bytes_mut();
                     assert_eq!(&flat[..], &model[..], "copy_to_bytes_mut content");
+                }
+                Op::ReaderDrain(w) => {
+                    // The non-consuming reader::Buffer surface (distinct from ByteVec's own
+                    // consuming impl): a full read_chunk drain at a fuzz-chosen watermark must
+                    // reconstruct the content in order, each chunk must respect the watermark, and
+                    // the source rope must be left untouched (it reads an O(1)-shared clone). The
+                    // global asserts below re-check the source content + any alias.
+                    use etude_buffer::reader::Buffer as _;
+                    let watermark = (w % 40) + 1;
+                    let mut reader = rope.reader();
+                    let mut got: Vec<u8> = Vec::new();
+                    loop {
+                        let chunk = reader.read_chunk(watermark).unwrap();
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        assert!(chunk.len() <= watermark, "read_chunk over watermark");
+                        got.extend_from_slice(&chunk);
+                    }
+                    assert_eq!(
+                        got, model,
+                        "reader full drain reconstructs content (w={watermark})"
+                    );
                 }
                 Op::AsContiguousCheck => {
                     // The only soundness face of as_contiguous: a Some view must be the ENTIRE
