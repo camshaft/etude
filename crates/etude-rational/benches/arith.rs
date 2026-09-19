@@ -1,0 +1,182 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Head-to-head rational-arithmetic benchmarks: `etude_rational::Rational` vs the `num-rational`
+//! reference (`BigRational`), across component-magnitude tiers. num-rational is BOTH the correctness
+//! oracle (see `src/tests.rs`) and the optimization target — the scoreboard measures the gap each
+//! optimization is meant to close and guards against regression. The north star is to BEAT it
+//! (ratios below 1.00).
+//!
+//! Every operand is built through the PUBLIC API only — large `Big` components come from
+//! `etude_bigint`'s byte parser, never `Rational`'s private fields — so a rebuild measures the same
+//! inputs. Tiers are named by the component bit width (`bytes * 8`). Rational arithmetic is dominated
+//! by a handful of `Big` multiplies plus a gcd-normalize, so the `normalize` (via `new`) cell is the
+//! most load-bearing one. Run with `cargo bench -p etude-rational`.
+
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use etude_bigint::Big;
+use etude_rational::Rational;
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use std::hint::black_box;
+use std::time::Duration;
+
+// Match the host allocator; allocation of limb `Vec`s dominates bignum work, so this keeps the
+// numbers production-representative (as in the bigint/byterope benches).
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// (label, per-component magnitude byte count). Rational ops cost ~2-3x the underlying bignum op, so the
+/// tiers are capped a notch below the bigint bench to keep a single sample sub-millisecond at baseline.
+const TIERS: &[(&str, usize)] = &[("64b", 8), ("256b", 32), ("1024b", 128)];
+
+struct Rng(u64);
+impl Rng {
+    fn byte(&mut self) -> u8 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        (x >> 24) as u8
+    }
+    /// A non-negative `Big` of exactly `nbytes` magnitude bytes (top bit forced set for an exact width),
+    /// built via the public sign-magnitude parser.
+    fn big(&mut self, nbytes: usize) -> Big {
+        let mut sm: Vec<u8> = Vec::with_capacity(1 + nbytes);
+        sm.push(0); // sign byte: non-negative
+        for _ in 0..nbytes {
+            sm.push(self.byte());
+        }
+        if let Some(top) = sm.last_mut() {
+            *top |= 0x80;
+        }
+        Big::from_sign_magnitude_bytes(&sm)
+    }
+    /// A `Rational` with `nbytes`-wide numerator and denominator (normalized on construction).
+    fn rat(&mut self, nbytes: usize) -> Rational {
+        let num = self.big(nbytes);
+        let den = self.big(nbytes);
+        Rational::new(num, den).expect("denominator is nonzero")
+    }
+}
+
+/// The `num-bigint` value equal to `b` (via the public two's-complement encoding).
+fn to_bigint(b: &Big) -> BigInt {
+    BigInt::from_signed_bytes_le(&b.to_le_twos_complement_bytes())
+}
+
+/// The `num-rational` value equal to `r` (built from its canonical components; `new` re-reduces, a
+/// no-op here since `r` is already in lowest terms).
+fn to_ref(r: &Rational) -> BigRational {
+    BigRational::new(to_bigint(r.numer()), to_bigint(r.denom()))
+}
+
+fn group<'a>(
+    c: &'a mut Criterion,
+    name: &str,
+) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
+    let mut g = c.benchmark_group(name);
+    g.warm_up_time(Duration::from_millis(300));
+    g.measurement_time(Duration::from_millis(1500));
+    g
+}
+
+/// Bench a binary op on both implementations across `TIERS`, with same-width operands.
+fn binop(
+    c: &mut Criterion,
+    name: &str,
+    ours: impl Fn(&Rational, &Rational) -> Rational,
+    theirs: impl Fn(&BigRational, &BigRational) -> BigRational,
+) {
+    let mut g = group(c, name);
+    for &(label, nbytes) in TIERS {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (nbytes as u64));
+        let a = rng.rat(nbytes);
+        let b = rng.rat(nbytes);
+        let (ra, rb) = (to_ref(&a), to_ref(&b));
+        g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
+            be.iter(|| black_box(ours(black_box(a), black_box(b))))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-rational", label),
+            &(&ra, &rb),
+            |be, (a, b)| be.iter(|| black_box(theirs(black_box(a), black_box(b)))),
+        );
+    }
+    g.finish();
+}
+
+fn bench(c: &mut Criterion) {
+    binop(c, "add", |a, b| a.add(b), |a, b| a + b);
+    binop(c, "sub", |a, b| a.sub(b), |a, b| a - b);
+    binop(c, "mul", |a, b| a.mul(b), |a, b| a * b);
+    binop(c, "div", |a, b| a.div(b).expect("nonzero"), |a, b| a / b);
+
+    // Comparison: exact cross-multiplication vs num-rational's cmp.
+    {
+        let mut g = group(c, "cmp");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x1234_5678 ^ (nbytes as u64));
+            let a = rng.rat(nbytes);
+            let b = rng.rat(nbytes);
+            let (ra, rb) = (to_ref(&a), to_ref(&b));
+            g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
+                be.iter(|| black_box(a.cmp(black_box(b))))
+            });
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", label),
+                &(&ra, &rb),
+                |be, (a, b)| be.iter(|| black_box(a.cmp(black_box(b)))),
+            );
+        }
+        g.finish();
+    }
+
+    // Reciprocal: den/num renormalized.
+    {
+        let mut g = group(c, "recip");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0xdead_beef ^ (nbytes as u64));
+            let a = rng.rat(nbytes);
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter(|| black_box(a.recip().expect("nonzero")))
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
+                be.iter(|| black_box(a.recip()))
+            });
+        }
+        g.finish();
+    }
+
+    // Normalize (via construction): the gcd-normalize hot path — the single most load-bearing cell,
+    // since every arithmetic result renormalizes. Operands are raw (unreduced) num/den pairs.
+    {
+        let mut g = group(c, "normalize");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0xcafe_f00d ^ (nbytes as u64));
+            let num = rng.big(nbytes);
+            let den = rng.big(nbytes);
+            let (bn, bd) = (to_bigint(&num), to_bigint(&den));
+            g.bench_with_input(
+                BenchmarkId::new("etude", label),
+                &(&num, &den),
+                |be, (n, d)| {
+                    be.iter(|| {
+                        black_box(Rational::new((*n).clone(), (*d).clone()).expect("nonzero"))
+                    })
+                },
+            );
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", label),
+                &(&bn, &bd),
+                |be, (n, d)| be.iter(|| black_box(BigRational::new((*n).clone(), (*d).clone()))),
+            );
+        }
+        g.finish();
+    }
+}
+
+criterion_group!(benches, bench);
+criterion_main!(benches);
