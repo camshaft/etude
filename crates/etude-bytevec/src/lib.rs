@@ -118,6 +118,15 @@ pub mod kind {
     pub struct Bytes;
 
     impl Kind for Bytes {}
+
+    /// The UTF-8 kind: the rope's *concatenated* byte content is guaranteed valid UTF-8. Individual
+    /// chunk boundaries may fall inside a multi-byte codepoint (chunks arrive from arbitrary
+    /// syscall/network splits), so the invariant is over the logical byte stream, not per chunk.
+    /// `Rope<Utf8>` is the representation behind a `StrRope`.
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct Utf8;
+
+    impl Kind for Utf8 {}
 }
 
 /// A tiered byte rope, generic over a zero-sized content-[`kind`] marker `K` (defaulting to
@@ -134,6 +143,10 @@ pub struct Rope<K = kind::Bytes> {
 /// The unvalidated byte rope — the primary type of this crate. An alias of [`Rope`] at its default
 /// [`kind::Bytes`], so every `Rope<Bytes>` inherent method and trait impl is a `ByteVec` one.
 pub type ByteVec = Rope<kind::Bytes>;
+
+// The UTF-8 kind marker is re-exported for `Rope<Utf8>` spelling; the byte kind stays `kind::Bytes`
+// (its bare name would clash with the re-exported `bytes::Bytes` at the crate root).
+pub use kind::Utf8;
 
 impl<K> Clone for Rope<K> {
     #[inline]
@@ -154,6 +167,78 @@ impl<K> Default for Rope<K> {
             repr: Repr::default(),
             _kind: PhantomData,
         }
+    }
+}
+
+/// The UTF-8 rope: conversions to/from [`ByteVec`] and the caller-trusted mutation entry points.
+///
+/// The kind-agnostic reads and raw byte-offset structural ops (`len`/`is_empty`/`byte_at`/`chunks`/
+/// `slice`/`split_to`/`append`) come from [`impl<K> Rope<K>`](Rope). A `Rope<Utf8>` upholds the
+/// invariant "the concatenated content is valid UTF-8"; callers of the raw split/slice ops are
+/// responsible for choosing char-boundary offsets (a `StrRope` wrapper enforces that).
+impl Rope<kind::Utf8> {
+    /// Validates that `bytes`' concatenated content is valid UTF-8 and wraps it as a UTF-8 rope.
+    ///
+    /// **O(n)** — the logical byte stream is scanned once. Validation is over the *concatenation*,
+    /// not per chunk (a codepoint may span a chunk boundary), so it linearizes the content to check
+    /// it. Returns the [`Utf8Error`](core::str::Utf8Error) on the first invalid sequence.
+    pub fn try_from_bytes(bytes: ByteVec) -> Result<Self, core::str::Utf8Error> {
+        // A codepoint may straddle chunk boundaries, so per-chunk validation would be wrong; check
+        // the contiguous logical content. (This is the documented O(n) validated path.)
+        let contiguous = bytes.copy_to_bytes();
+        core::str::from_utf8(&contiguous)?;
+        let ByteVec { len, repr, .. } = bytes;
+        Ok(Rope {
+            len,
+            repr,
+            _kind: PhantomData,
+        })
+    }
+
+    /// Converts back to an unvalidated [`ByteVec`] — **free**: only the zero-sized kind marker is
+    /// dropped, the representation moves as-is with no copy or re-validation.
+    #[inline]
+    pub fn into_bytes(self) -> ByteVec {
+        Rope {
+            len: self.len,
+            repr: self.repr,
+            _kind: PhantomData,
+        }
+    }
+
+    /// Appends `bytes` at the end. **Infallible and caller-trusted**: `bytes` must be valid UTF-8
+    /// (e.g. `&str::as_bytes()`). A valid-UTF-8 fragment appended after valid-UTF-8 content meets it
+    /// on a codepoint boundary, so the rope's invariant is preserved. Empty input is a no-op.
+    #[inline]
+    pub fn append_bytes(&mut self, bytes: &[u8]) {
+        debug_assert!(
+            core::str::from_utf8(bytes).is_ok(),
+            "append_bytes requires valid UTF-8"
+        );
+        if bytes.is_empty() {
+            return;
+        }
+        self.push_back(Bytes::copy_from_slice(bytes));
+    }
+
+    /// Inserts `bytes` at byte offset `at`. **Infallible and caller-trusted**: `bytes` must be valid
+    /// UTF-8 and `at` must be a char boundary of the current content (a `StrRope` guarantees both).
+    /// O(log n) — one split + two concatenations. Panics if `at` is past the end.
+    pub fn insert_bytes(&mut self, at: usize, bytes: &[u8]) {
+        debug_assert!(
+            core::str::from_utf8(bytes).is_ok(),
+            "insert_bytes requires valid UTF-8"
+        );
+        if bytes.is_empty() {
+            return;
+        }
+        // front = [0, at); self keeps [at, len). Stitch: front ++ bytes ++ [at, len).
+        let mut front = self
+            .split_to(at)
+            .expect("insert_bytes offset past the end of the rope");
+        front.append_bytes(bytes);
+        front.append(self);
+        *self = front;
     }
 }
 
@@ -190,7 +275,29 @@ impl Default for Repr {
     }
 }
 
+/// Surface specific to the unvalidated byte rope ([`ByteVec`]): the [`Builder`] entry point and
+/// ownership [`tag`](ByteVec::tag)ging, both of which name `ByteVec` concretely.
 impl ByteVec {
+    /// Creates a [`Builder`] for efficiently constructing a rope by buffering writes into a head
+    /// buffer of the given chunk capacity.
+    #[inline]
+    pub fn builder(chunk_capacity: usize) -> builder::Builder {
+        builder::Builder::new(chunk_capacity)
+    }
+
+    /// Wraps this rope in a [`Tagged`] owned by `owner`, tracking its bytes against the owner's
+    /// running budget.
+    #[inline]
+    pub fn tag<O: tagged::Owner>(self, owner: &O) -> tagged::Tagged<O> {
+        tagged::Tagged::new(self, owner)
+    }
+}
+
+/// Kind-agnostic surface shared by every [`Rope`] regardless of content kind: constructors, reads,
+/// and the raw byte-offset structural ops (`slice`, `split_to`, `append`). See also [`ByteVec`]'s
+/// byte-specific mutators (`push_back`/`set_byte`/…). Gating those mutators behind the content kind
+/// (so a validated kind cannot be corrupted by an unchecked write) is a planned follow-up.
+impl<K> Rope<K> {
     /// Creates an empty rope. Allocation-free. `const` to match the flat buffer's `const fn new`, so
     /// a rope can initialize a `const`/`static`.
     ///
@@ -204,7 +311,7 @@ impl ByteVec {
     /// ```
     #[inline]
     pub const fn new() -> Self {
-        ByteVec {
+        Self {
             len: 0,
             repr: Repr::Small {
                 head: Bytes::new(),
@@ -212,13 +319,6 @@ impl ByteVec {
             },
             _kind: PhantomData,
         }
-    }
-
-    /// Creates a [`Builder`] for efficiently constructing a rope by buffering writes into a head
-    /// buffer of the given chunk capacity.
-    #[inline]
-    pub fn builder(chunk_capacity: usize) -> builder::Builder {
-        builder::Builder::new(chunk_capacity)
     }
 
     /// Total number of bytes in the rope.
@@ -1194,13 +1294,6 @@ impl ByteVec {
         out.freeze()
     }
 
-    /// Wraps this rope in a [`Tagged`] owned by `owner`, tracking its bytes against the owner's
-    /// running budget.
-    #[inline]
-    pub fn tag<O: tagged::Owner>(self, owner: &O) -> tagged::Tagged<O> {
-        tagged::Tagged::new(self, owner)
-    }
-
     // --- internal helpers -------------------------------------------------
 
     /// Appends every byte of the rope to `out`, in order, via a direct traversal of the underlying
@@ -1317,7 +1410,7 @@ impl ByteVec {
         let len = head.iter().map(|c| c.len()).sum::<usize>()
             + tree.byte_len()
             + tail.iter().map(|c| c.len()).sum::<usize>();
-        let mut rope = ByteVec {
+        let mut rope = Self {
             len,
             repr: Repr::Deep(Box::new(Deep { head, tree, tail })),
             _kind: PhantomData,
