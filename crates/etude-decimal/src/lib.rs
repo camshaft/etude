@@ -129,11 +129,13 @@ impl Decimal {
     ///
     /// The hot path is the reject: a coefficient not divisible by ten is already canonical, and
     /// divisibility by ten requires an even coefficient, so [`etude_bigint::Big::is_odd`] (`O(1)`) returns
-    /// half of all results with no division at all; the rest check the last decimal digit with the
-    /// allocation-free [`etude_bigint::Big::rem_u64`]. Only a coefficient that actually ends in zero is
-    /// divided, and then in base-`10^9` chunks via [`etude_bigint::Big::divmod_u64`] (a single-limb divide
-    /// with a native remainder, no `Big` divisor or remainder allocated), clearing up to nine zeros each —
-    /// `O(zeros / 9)` divides.
+    /// half of all results with no division at all. The rest peek the low nine decimal digits with a single
+    /// allocation-free [`etude_bigint::Big::rem_u64`]`(10^9)` (no quotient built): the last of those digits
+    /// rejects an even-but-not-ten-multiple coefficient, and when the chunk is nonzero its own trailing-zero
+    /// count is exactly the coefficient's remaining one — so the strip is a single
+    /// [`etude_bigint::Big::divmod_u64`]`(10^tz)` rather than a divide-by-`10^9` whose quotient is discarded
+    /// whenever fewer than nine zeros are present. A run of nine or more zeros strips whole `10^9` chunks in
+    /// a loop, so trailing-zero removal is `O(zeros / 9)` divides.
     fn normalize(&mut self) {
         if self.coeff.is_zero() {
             self.exp = 0;
@@ -146,35 +148,37 @@ impl Decimal {
             if self.coeff.is_odd() {
                 return;
             }
-            // Even, but divisible by 10 only if the last decimal digit is zero. rem_u64 is
-            // allocation-free (no quotient built), so an even-but-not-ten-multiple coefficient returns
-            // without dividing anything out.
-            if self.coeff.rem_u64(10).expect("divisor 10 is nonzero") != 0 {
-                return;
+            // Peek the low nine decimal digits with one allocation-free remainder (no quotient built). The
+            // last digit decides divisibility by ten, and when the chunk is nonzero its own trailing-zero
+            // count is exactly the coefficient's remaining one — so a single `rem_u64` both rejects an
+            // even-but-not-ten-multiple coefficient and sizes the strip. (The previous form probed with
+            // `rem_u64(10)` and then divided by `10^9` to re-derive those digits, discarding that quotient
+            // whenever fewer than nine zeros were stripped — one wasted `Big` divide per strip.)
+            let low = self.coeff.rem_u64(CHUNK).expect("divisor 10^9 is nonzero");
+            if !low.is_multiple_of(10) {
+                return; // last digit nonzero → already canonical
             }
             if self.exp > i64::MAX - CHUNK_DIGITS {
                 return; // refuse to overflow exp; leaving it un-fully-stripped is still correct
             }
-            // Divisible by 10: divide out a base-10^9 chunk with a native remainder.
-            let (q, r) = self
-                .coeff
-                .divmod_u64(CHUNK)
-                .expect("divisor 10^9 is nonzero");
-            if r == 0 {
+            if low == 0 {
                 // All nine low digits are zero — strip the whole chunk and continue.
-                self.coeff = q;
+                self.coeff = self
+                    .coeff
+                    .divmod_u64(CHUNK)
+                    .expect("divisor 10^9 is nonzero")
+                    .0;
                 self.exp += CHUNK_DIGITS;
                 continue;
             }
-            // `r` holds the low ≤9 digits (nonzero, and — since the value is divisible by ten — ending in
-            // zero); its trailing zeros are the coefficient's remaining ones, counted on the native int.
-            let mut v = r;
+            // `low` is nonzero and ends in zero, so the coefficient has exactly `tz ∈ 1..=8` trailing
+            // zeros; strip them with a single divide (`10^tz` fits a `u64`) and stop.
+            let mut v = low;
             let mut tz = 0u32;
-            while v % 10 == 0 {
+            while v.is_multiple_of(10) {
                 v /= 10;
                 tz += 1;
             }
-            // tz ∈ 1..=8, so 10^tz fits a u64; strip exactly those zeros.
             self.coeff = self
                 .coeff
                 .divmod_u64(10u64.pow(tz))

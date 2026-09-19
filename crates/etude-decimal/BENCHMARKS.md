@@ -39,8 +39,8 @@ cargo bench -p etude-decimal --bench arith
 | 64b   | 58.94 ns  | 71.39 ns  | **0.83** |
 | 256b  | 88.71 ns  | 109.08 ns | 0.81 |
 | 1024b | 122.12 ns | 133.57 ns | 0.91 |
-| 2048b | 241.55 ns | 169.86 ns | 1.42 |
-| 4096b | 569.46 ns | 223.72 ns | 2.55 |
+| 2048b | 225.94 ns | 169.83 ns | 1.33 |
+| 4096b | 498.33 ns | 222.75 ns | 2.24 |
 
 ### `sub` — exact aligned difference
 
@@ -52,8 +52,8 @@ of the operand — no intermediate negated value is allocated.
 | 64b   | 54.60 ns  | 55.27 ns  | **0.99** |
 | 256b  | 88.64 ns  | 69.95 ns  | 1.27 |
 | 1024b | 114.02 ns | 95.16 ns  | 1.20 |
-| 2048b | 222.58 ns | 122.51 ns | 1.82 |
-| 4096b | 438.18 ns | 151.13 ns | 2.90 |
+| 2048b | 212.69 ns | 122.81 ns | 1.73 |
+| 4096b | 416.23 ns | 153.46 ns | 2.71 |
 
 ### `mul` — exact product
 
@@ -232,8 +232,8 @@ strip). `iter_batched` clones the input in unmeasured setup so only `new` is tim
 | 64b   | 146.0 ns |
 | 256b  | 186.9 ns |
 | 1024b | 371.5 ns |
-| 2048b | 623.3 ns |
-| 4096b | 1.125 µs |
+| 2048b | 424.8 ns |
+| 4096b | 756.9 ns |
 
 ### Coverage
 
@@ -253,11 +253,17 @@ rejecting it, so there is no same-semantics comparison to run.
 - **`add`/`sub`/`mul` closed most of their gap** after `normalize` was rewritten onto `etude-bigint`'s
   scalar primitives (`is_even`, `rem_u64`, `divmod_u64` — #133). Canonicalization used to divide the
   coefficient by ten on every result; now an odd result is rejected in `O(1)` and only a result ending in
-  zero is divided. `add` now wins at 256b–1024b; the residual at large tiers is the underlying `Big`
-  add/mul cost, which is `etude-bigint`'s to shave. `sub` subtracts coefficients directly (`Big::sub`)
-  instead of `add(neg)`, so no negated clone is allocated. For **i64-fitting values** — the common real
-  decimal — `add`/`sub`/`mul` take a native fast path (`add_small`/`sub_small`/`mul_small` above): `add`
-  and `sub` beat `bigdecimal` ~2×, `mul` is near parity.
+  zero is divided, in a single `rem_u64(10^9)` peek plus one sized `divmod` (no throwaway divide). `add`
+  now wins at 256b–1024b. The residual at the large tiers is **not** `Big::add`/`sub` — those beat
+  `num-bigint` (measured: `Big::add` 1024b `0.51×`, 4096b `0.73×`) — it is `normalize` itself: the
+  `rem_u64(10)` divisibility check runs on every even result and is an `O(n)` limb pass that `bigdecimal`
+  skips entirely (it does not canonicalize). Cutting it further needs a cheaper `etude-bigint` divisibility
+  / last-digit primitive (a `mod 10` via a limb-sum reduction rather than a full reciprocal remainder),
+  flagged with data. `sub` subtracts coefficients directly (`Big::sub`) instead of `add(neg)`, so no
+  negated clone is allocated. For **i64-fitting values** — the common real decimal — `add`/`sub`/`mul` take
+  a native fast path (`add_small`/`sub_small`/`mul_small` above): `add` and `sub` beat `bigdecimal` ~2×,
+  `mul` is near parity. A full 64-bit coefficient (above `i64`) takes a second native `i128` tier for
+  `add`/`sub`, so the `64b` add/sub tier now beats `bigdecimal` too.
 - **`cmp`** (equal exponents) is a flat ~6 ns at every width — near parity with `bigdecimal` — now that
   the magnitude compare is a signed `Big` compare with no `abs()` clone. The **`cmp_uneq`** (unequal
   exponent) path bounds the adjusted exponent from `bit_len` (`O(1)`) and decides disjoint magnitudes with
