@@ -150,6 +150,20 @@ Scalar codecs are flat: `i64_checked_from_sign_magnitude_bytes` 5.43 ns, `i128_f
 6.32 ns, `i128_to_sign_magnitude_bytes_into` 3.89 ns. The O(1) predicates confirm constant time at 1024b:
 `is_zero` 1.44 ns, `is_negative` 1.33 ns, `is_odd` 2.09 ns, `byte_len` 2.49 ns, and `zero()` 4.60 ns.
 
+`decimal_digit_count` counts base-10 digits without rendering — a caller that only needs the digit count
+(e.g. a decimal comparing adjusted exponents) would otherwise render to decimal and take the length. vs
+that render-and-count baseline:
+
+| op                  | 64b     | 256b    | 1024b   | 4096b   |
+|---------------------|---------|---------|---------|---------|
+| decimal_digit_count | 6.5 ns  | 190 ns  | 438 ns  | 2.64 µs |
+| via render + len    | 64.4 ns | 366 ns  | 3.60 µs | 22.2 µs |
+| ratio               | **0.10**| **0.52**| **0.12**| **0.12**|
+
+8–10× faster except at 256b (0.52×, where the multi-limb estimate builds a `10^d` threshold that the
+tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also returns a `u64` with no
+`String` allocation, so the caller's real saving is larger still.
+
 ## Landed optimizations
 
 - **base-2⁶⁴ u64 limbs** (u128 intermediates) — halved the limb count; improved every op over the

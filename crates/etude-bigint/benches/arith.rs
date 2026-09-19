@@ -566,6 +566,25 @@ fn bench_from_base_10_pow_k(c: &mut Criterion) {
     g.finish();
 }
 
+/// `decimal_digit_count` vs the render-and-measure baseline it replaces (rendering the value to decimal
+/// just to read the length — what a decimal's adjusted-exponent compare did before this helper). Both
+/// sides on etude, so the comparison is like-for-like: the estimate-and-threshold count vs the full
+/// base conversion.
+fn bench_decimal_digit_count(c: &mut Criterion) {
+    let mut g = group(c, "decimal_digit_count");
+    let mut rng = Rng(0x3243_f6a8_885a_308d);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).decimal_digit_count()))
+        });
+        g.bench_with_input(BenchmarkId::new("via-render", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).to_decimal_string().len()))
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -591,6 +610,7 @@ criterion_group!(
     bench_sign_magnitude_codecs,
     bench_to_sign_magnitude_into,
     bench_o1_accessors,
-    bench_from_base_10_pow_k
+    bench_from_base_10_pow_k,
+    bench_decimal_digit_count
 );
 criterion_main!(benches);

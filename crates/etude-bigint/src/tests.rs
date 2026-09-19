@@ -792,6 +792,43 @@ fn mul_wide_operands_vs_num_bigint() {
     }
 }
 
+/// `decimal_digit_count` must equal the digit length of the rendered decimal (which is itself checked
+/// against num-bigint), ignoring the sign. Sweeps the powers of ten and their ±1 neighbours across the
+/// single/multi-limb boundary and into the recursive-render width, both signs, plus random and wide
+/// magnitudes — the estimate-and-correct path must land exactly on every 10ᵏ boundary.
+#[test]
+fn decimal_digit_count_matches_render() {
+    let check = |b: &Big| {
+        let expected = b.to_decimal_string().trim_start_matches('-').len() as u64;
+        assert_eq!(b.decimal_digit_count(), expected, "digit count of {b:?}");
+    };
+    check(&Big::zero());
+    // 1, 10, 100, …, 10^79 (~266 bits, well into the multi-limb / recursive path) with ±1 and negation.
+    let ten = Big::from_i64(10);
+    let one = Big::from_i64(1);
+    let mut p = one.clone();
+    for _ in 0..80 {
+        check(&p);
+        check(&p.sub(&one)); // 10^k − 1 (all-nines, one fewer digit at the boundary)
+        check(&p.add(&one)); // 10^k + 1
+        check(&p.neg());
+        p = p.mul(&ten);
+    }
+    // Random magnitudes up to 11 limbs (crosses the recursive threshold), both signs.
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    for _ in 0..2000 {
+        check(&rng.big_upto(12));
+    }
+    // A few very wide values (top limb forced set so the width is exact).
+    for &n in &[16usize, 32, 64] {
+        let mut mag: Vec<u64> = (0..n).map(|_| rng.next()).collect();
+        *mag.last_mut().unwrap() |= 0x8000_0000_0000_0000;
+        let mut b = Big { neg: false, mag };
+        b.normalize();
+        check(&b);
+    }
+}
+
 /// `from_base_10_pow_k_limbs` must build exactly the value its base-`10ᵏ` limbs denote — checked against
 /// num-bigint parsing the equivalent decimal string (each chunk zero-padded to `k`). Sweeps `k` across
 /// its whole `1..=19` range and chunk counts from empty (zero) up through the recursive-render width,
