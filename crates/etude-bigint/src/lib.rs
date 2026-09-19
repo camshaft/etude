@@ -351,13 +351,13 @@ impl Big {
         const CHUNK: u64 = 10_000_000_000_000_000_000; // 10^19 < 2^64
         const CHUNK_DIGITS: usize = 19;
 
-        // Peel chunks (each the value mod 10^19) off the magnitude, least-significant first.
+        // Peel chunks (each the value mod 10^19) off the magnitude, least-significant first. The
+        // division is IN PLACE (`cur` shrinks to the quotient each step), so no per-chunk quotient
+        // `Vec` is allocated.
         let mut cur = self.mag.clone();
         let mut chunks: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
         while !cur.is_empty() {
-            let (q, r) = divmod_by_limb(&cur, CHUNK);
-            chunks.push(r.first().copied().unwrap_or(0));
-            cur = q;
+            chunks.push(div_rem_limb_inplace(&mut cur, CHUNK));
         }
 
         let mut digits: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
@@ -877,21 +877,29 @@ fn divmod_mag(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
 /// Divide a magnitude by a single nonzero limb: `(quotient, remainder)`. One `u128` division per limb,
 /// most-significant first, carrying the running remainder (always `< d`, so it fits a single limb).
 fn divmod_by_limb(a: &[u64], d: u64) -> (Vec<u64>, Vec<u64>) {
-    let mut q = alloc::vec![0u64; a.len()];
-    let mut rem = 0u128;
-    let d = d as u128;
-    for i in (0..a.len()).rev() {
-        let cur = (rem << 64) | a[i] as u128; // rem < d ≤ 2^64, so this fits u128
-        q[i] = (cur / d) as u64;
-        rem = cur % d;
-    }
-    strip(&mut q);
+    let mut q = a.to_vec();
+    let rem = div_rem_limb_inplace(&mut q, d);
     let r = if rem == 0 {
         Vec::new()
     } else {
-        alloc::vec![rem as u64]
+        alloc::vec![rem]
     };
     (q, r)
+}
+
+/// Divide `m` by a single nonzero limb IN PLACE — `m` becomes the quotient (normalized) — returning the
+/// remainder (`< d`, so it fits one limb). One `u128` division per limb, most-significant first. Used by
+/// the decimal render's chunk loop to avoid a fresh quotient `Vec` per step.
+fn div_rem_limb_inplace(m: &mut Vec<u64>, d: u64) -> u64 {
+    let d = d as u128;
+    let mut rem = 0u128;
+    for limb in m.iter_mut().rev() {
+        let cur = (rem << 64) | *limb as u128; // rem < d ≤ 2^64, so this fits u128
+        *limb = (cur / d) as u64;
+        rem = cur % d;
+    }
+    strip(m);
+    rem as u64
 }
 
 /// Knuth's Algorithm D (TAOCP Vol. 2, §4.3.1) over base-2⁶⁴ limbs, for a divisor of ≥2 limbs. Requires

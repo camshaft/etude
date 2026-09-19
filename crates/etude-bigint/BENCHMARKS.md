@@ -43,9 +43,9 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
-| to_decimal_string         | 64b    | 207 ns    | 71.8 ns    | 2.9       |
-| to_decimal_string         | 256b   | 675 ns    | 249 ns     | 2.7       |
-| to_decimal_string         | 1024b  | 4.84 µs   | 2.25 µs    | 2.2       |
+| to_decimal_string         | 64b    | 181 ns    | 71.6 ns    | 2.5       |
+| to_decimal_string         | 256b   | 603 ns    | 249 ns     | 2.4       |
+| to_decimal_string         | 1024b  | 4.37 µs   | 2.24 µs    | 1.95      |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
