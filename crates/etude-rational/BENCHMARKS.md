@@ -89,10 +89,10 @@ num-rational always uses `BigInt`, so this is a large win:
 |---------|----------|----------|--------------|-----------|
 | mul_i64 | 48-bit   | 0.21 µs  | 4.13 µs      | **0.050** |
 | div_i64 | 48-bit   | 0.25 µs  | 4.26 µs      | **0.058** |
-| add_i64 | 48-bit   | 0.40 µs  | 3.14 µs      | **0.126** |
-| sub_i64 | 48-bit   | ~0.40 µs | ~3.1 µs      | **~0.13** |
+| add_i64 | 48-bit   | 0.16 µs  | 3.14 µs      | **0.050** |
+| sub_i64 | 48-bit   | 0.16 µs  | 3.18 µs      | **0.049** |
 | cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
-| add_eqden_i64 | 48-bit | 0.12 µs | 0.47 µs   | **0.26**  |
+| add_eqden_i64 | 48-bit | 0.10 µs | 0.47 µs   | **0.21**  |
 | from_ratio_i64 | 48-bit | 0.12 µs | 1.14 µs  | **0.103** |
 
 **~6–9× faster than num-rational on small operands** — all four arithmetic ops AND `cmp` now take the
@@ -258,6 +258,12 @@ re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 27** — native `addsub_small` reduces over `gcd(b, d)` on the denominators (a `u64` hardware-divide
+  gcd) instead of `gcd_u128` over the ~127-bit `(a*d ± c*b, b*d)` product: coprime denominators (common) ⇒
+  already lowest-terms, skip the wide gcd (canonicalizing zero to 0/1); shared factor ⇒ the previous
+  `gcd_u128` fallback. `add_i64`/`sub_i64` 0.40 µs → **0.16 µs (0.126× → 0.050×)**, `add_eqden_i64` 0.26× →
+  0.21×. The native analog of slice 23; completes the "gcd on the small denominators, not the wide product"
+  treatment across mul/div (slice 26) and add/sub.
 - **slice 26** — native `mul_small`/`div_small` cross-reduce on the i64 originals (`gcd(a,d)`, `gcd(c,b)`)
   instead of one `gcd_u128` over the ~126-bit products. Since the operands are canonical, the cross-reduced
   result is already lowest-terms (no final gcd), and the two gcds run on `u64` (hardware divide) rather than

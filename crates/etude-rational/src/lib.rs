@@ -194,19 +194,31 @@ impl Rational {
     /// numerator `a*d ± c*b` (two terms up to `2^126`) can overflow `i128`, so it is checked — on overflow
     /// (or any component exceeding `i64`) return `None` to fall back to the `Big` path.
     fn addsub_small(&self, other: &Rational, subtract: bool) -> Option<Rational> {
-        let a = self.num.to_i64_checked()? as i128;
-        let b = self.den.to_i64_checked()? as i128;
-        let c = other.num.to_i64_checked()? as i128;
-        let d = other.den.to_i64_checked()? as i128;
-        let ad = a * d; // fits i128 (|a*d| <= 2^126)
-        let cb = c * b; // fits i128
+        let a = self.num.to_i64_checked()?;
+        let b = self.den.to_i64_checked()?;
+        let c = other.num.to_i64_checked()?;
+        let d = other.den.to_i64_checked()?;
+        let ad = a as i128 * d as i128; // fits i128 (|a*d| <= 2^126)
+        let cb = c as i128 * b as i128; // fits i128
         let num = if subtract {
             ad.checked_sub(cb)?
         } else {
             ad.checked_add(cb)?
         };
-        let den = b * d; // b, d > 0 ⇒ den > 0
-        // gcd(0, den) = den, so a zero numerator correctly normalizes to 0/1.
+        let den = b as i128 * d as i128; // b, d > 0 ⇒ den > 0
+        // Reduce over gcd(b, d) on the DENOMINATORS (a u64 hardware-divide gcd), as in the Big `add`/`sub`
+        // path: when the denominators are coprime (the common case) `(a*d ± c*b)/(b*d)` is already in lowest
+        // terms, so skip the wide gcd over the ~127-bit product entirely (canonicalizing zero to 0/1).
+        if gcd_u64(b.unsigned_abs(), d.unsigned_abs()) == 1 {
+            if num == 0 {
+                return Some(Rational::zero());
+            }
+            return Some(Rational {
+                num: big_from_i128(num),
+                den: big_from_i128(den),
+            });
+        }
+        // Shared denominator factor (rare): reduce by gcd(num, den). gcd(0, den) = den ⇒ zero → 0/1.
         let g = gcd_u128(num.unsigned_abs(), den as u128) as i128; // g >= 1
         Some(Rational {
             num: big_from_i128(num / g),
