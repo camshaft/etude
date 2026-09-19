@@ -23,7 +23,7 @@ ops. Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4
 | copy_to_bytes | 63.7 µs | 64.6 µs | 0.99 |
 | split_to_copy | 63.1 µs | 59.8 µs | 1.06 |
 | from_iter | 19.5 µs | 17.5 µs | 1.11 |
-| extend | 22.4 µs | 18.8 µs | 1.19 |
+| extend | 19.3 µs | 18.6 µs | 1.04 |
 | clear | 10.3 µs | 7.89 µs | 1.30 |
 | push_back | 22.6 µs | 17.4 µs | 1.30 |
 | advance (drain) | 16.9 µs | 11.5 µs | 1.47 |
@@ -38,7 +38,11 @@ build/drain — the irreducible per-node `Arc` allocation + O(log₃₂) navigat
 pay. The two _copy_ ops (`copy_to_bytes`, `split_to_copy`) are at parity (~0.99–1.06): both materialise
 the same contiguous bytes, so the shared memcpy dominates and the rope's per-chunk drain overhead is in
 the noise. `clear` (1.30) sits with the per-chunk build/drain group — it drops the tree's per-node
-`Arc`s one level at a time where the deque drops a single contiguous buffer. `pop_back`/`pop_front` drain already use O(1) block-buffer adoption (the leading refill cost was
+`Arc`s one level at a time where the deque drops a single contiguous buffer. `extend` into an empty rope
+from a known-large source now routes through the same bulk bottom-up build as `from_iter` (folding whole
+`FANOUT` blocks into the tree) instead of a `push_back`-per-chunk loop — that took `extend/deep` 1.19 →
+1.04 (~15%); the gate matches `from_iter`'s size threshold so the shallow path stays on the plain loop
+(within ~1 ns). `pop_back`/`pop_front` drain already use O(1) block-buffer adoption (the leading refill cost was
 removed); the residual is the tree's per-block `pop`/`Arc::get_mut` descent. `chunks_iter` is the one
 accepted exception (cache locality — see below). The levers that could shrink the deep build/drain
 gaps (a node arena, a single-allocation/DST leaf) each break a core guarantee (O(1) structural-sharing
