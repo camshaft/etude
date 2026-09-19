@@ -105,6 +105,178 @@ impl StrRope {
     pub fn bytes(&self) -> impl Iterator<Item = u8> + '_ {
         self.0.chunks().flat_map(|chunk| chunk.iter().copied())
     }
+
+    /// Iterates the raw byte chunks of the rope, in order (double-ended). Chunk boundaries are arbitrary
+    /// — a codepoint may straddle two chunks — so this is for byte-level plumbing; use
+    /// [`chars`](Self::chars) for text.
+    #[inline]
+    pub fn chunks(&self) -> impl DoubleEndedIterator<Item = bytes::Bytes> + '_ {
+        self.0.chunks().cloned()
+    }
+
+    /// Iterates the [`char`]s of the content, reassembling any codepoint that spans a chunk boundary.
+    #[inline]
+    #[must_use]
+    pub fn chars(&self) -> Chars<'_> {
+        Chars {
+            chunks: self.0.chunks(),
+            cur: &[],
+            pos: 0,
+        }
+    }
+
+    /// Like [`chars`](Self::chars), but also yields each char's starting byte offset.
+    #[inline]
+    #[must_use]
+    pub fn char_indices(&self) -> CharIndices<'_> {
+        CharIndices {
+            chars: self.chars(),
+            offset: 0,
+        }
+    }
+
+    /// Inserts a string slice at byte offset `byte_idx`. O(log n).
+    ///
+    /// # Panics
+    /// Panics if `byte_idx` is not a char boundary, or is past the end.
+    pub fn insert_str(&mut self, byte_idx: usize, s: &str) {
+        assert!(
+            self.is_char_boundary(byte_idx),
+            "insert_str at a non-char-boundary index {byte_idx}"
+        );
+        self.0.insert_bytes(byte_idx, s.as_bytes());
+    }
+
+    /// Inserts a single [`char`] at byte offset `byte_idx`.
+    ///
+    /// # Panics
+    /// Panics if `byte_idx` is not a char boundary, or is past the end.
+    pub fn insert(&mut self, byte_idx: usize, c: char) {
+        let mut buf = [0u8; 4];
+        self.insert_str(byte_idx, c.encode_utf8(&mut buf));
+    }
+
+    /// Splits the rope in two at byte offset `byte_idx`: `self` keeps `[0, byte_idx)` and the returned
+    /// `StrRope` holds `[byte_idx, len)` (like [`String::split_off`]). O(log n); shares structure.
+    ///
+    /// # Panics
+    /// Panics if `byte_idx` is not a char boundary, or is past the end.
+    #[must_use = "the split-off tail is returned; use it or the split is pointless"]
+    pub fn split_off(&mut self, byte_idx: usize) -> StrRope {
+        assert!(
+            self.is_char_boundary(byte_idx),
+            "split_off at a non-char-boundary index {byte_idx}"
+        );
+        // `split_to(byte_idx)` returns [0, byte_idx) and leaves `self` = [byte_idx, len). Swap so `self`
+        // keeps the head and we return the tail — `String::split_off` semantics.
+        let head = self
+            .0
+            .split_to(byte_idx)
+            .expect("split_off index past the end of the rope");
+        let tail = core::mem::replace(&mut self.0, head);
+        StrRope(tail)
+    }
+
+    /// Returns the sub-rope over the byte `range`. O(log n); shares structure with `self` (no copy).
+    ///
+    /// # Panics
+    /// Panics if either bound is not a char boundary.
+    #[must_use]
+    pub fn slice<R: core::ops::RangeBounds<usize>>(&self, range: R) -> StrRope {
+        use core::ops::Bound;
+        let start = match range.start_bound() {
+            Bound::Included(&s) => s,
+            Bound::Excluded(&s) => s + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&e) => e + 1,
+            Bound::Excluded(&e) => e,
+            Bound::Unbounded => self.len(),
+        };
+        assert!(
+            self.is_char_boundary(start),
+            "slice start {start} is not a char boundary"
+        );
+        assert!(
+            self.is_char_boundary(end),
+            "slice end {end} is not a char boundary"
+        );
+        StrRope(self.0.slice(start..end))
+    }
+}
+
+/// The width in bytes of the UTF-8 codepoint whose leading byte is `b` (1..=4). For a valid leading byte
+/// (guaranteed by the rope's UTF-8 invariant) this is exact; a stray continuation byte falls back to 1.
+#[inline]
+fn utf8_char_width(b: u8) -> usize {
+    match b {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
+}
+
+/// Iterator over the [`char`]s of a [`StrRope`] (see [`StrRope::chars`]). Reassembles a codepoint that
+/// spans a chunk boundary by pulling bytes across chunks.
+pub struct Chars<'a> {
+    chunks: etude_bytevec::Chunks<'a>,
+    cur: &'a [u8],
+    pos: usize,
+}
+
+impl Chars<'_> {
+    /// The next byte of the logical stream, advancing across chunks (skipping empty ones).
+    #[inline]
+    fn next_byte(&mut self) -> Option<u8> {
+        loop {
+            if self.pos < self.cur.len() {
+                let b = self.cur[self.pos];
+                self.pos += 1;
+                return Some(b);
+            }
+            self.cur = &self.chunks.next()?[..];
+            self.pos = 0;
+        }
+    }
+}
+
+impl Iterator for Chars<'_> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        let b0 = self.next_byte()?;
+        let width = utf8_char_width(b0);
+        let mut buf = [b0, 0, 0, 0];
+        for slot in buf.iter_mut().take(width).skip(1) {
+            *slot = self
+                .next_byte()
+                .expect("StrRope invariant: content is valid UTF-8 (truncated codepoint)");
+        }
+        core::str::from_utf8(&buf[..width])
+            .expect("StrRope invariant: content is valid UTF-8")
+            .chars()
+            .next()
+    }
+}
+
+/// Iterator over `(byte_offset, char)` pairs of a [`StrRope`] (see [`StrRope::char_indices`]).
+pub struct CharIndices<'a> {
+    chars: Chars<'a>,
+    offset: usize,
+}
+
+impl Iterator for CharIndices<'_> {
+    type Item = (usize, char);
+
+    fn next(&mut self) -> Option<(usize, char)> {
+        let start = self.offset;
+        let c = self.chars.next()?;
+        self.offset += c.len_utf8();
+        Some((start, c))
+    }
 }
 
 impl From<&str> for StrRope {
@@ -350,5 +522,106 @@ mod tests {
         assert_eq!(split, StrRope::from("aéb"));
         assert_eq!(split, "aéb");
         assert_eq!(split.len(), 4);
+    }
+
+    #[test]
+    fn chars_and_char_indices_match_str() {
+        let text = "héllo wörld 🦀!";
+        let s = StrRope::from(text);
+        assert_eq!(s.chars().collect::<String>(), text);
+        assert_eq!(
+            s.chars().collect::<Vec<_>>(),
+            text.chars().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            s.char_indices().collect::<Vec<_>>(),
+            text.char_indices().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn chars_reassembles_codepoint_split_across_chunks() {
+        // Build a rope where 'é' (2 bytes) and '🦀' (4 bytes) are each split one byte per chunk.
+        let mut bv = ByteVec::default();
+        bv.push_back(bytes::Bytes::from_static(b"a"));
+        for byte in "é🦀".as_bytes() {
+            bv.push_back(bytes::Bytes::copy_from_slice(&[*byte]));
+        }
+        bv.push_back(bytes::Bytes::from_static(b"z"));
+        let s = StrRope::from_utf8(bv).unwrap();
+        assert_eq!(s.chars().collect::<String>(), "aé🦀z");
+        assert_eq!(
+            s.char_indices().collect::<Vec<_>>(),
+            "aé🦀z".char_indices().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn insert_str_and_insert() {
+        let mut s = StrRope::from("ad");
+        s.insert_str(1, "bc");
+        assert_eq!(s, "abcd");
+        s.insert(0, 'é');
+        assert_eq!(s, "éabcd");
+    }
+
+    #[test]
+    #[should_panic(expected = "non-char-boundary")]
+    fn insert_str_non_char_boundary_panics() {
+        let mut s = StrRope::from("é"); // 2 bytes; index 1 is mid-codepoint
+        s.insert_str(1, "x");
+    }
+
+    #[test]
+    fn split_off_matches_string_semantics() {
+        let mut s = StrRope::from("hello wörld");
+        let tail = s.split_off(6); // char boundary before 'w'
+        assert_eq!(s, "hello ");
+        assert_eq!(tail, "wörld");
+        // mirror std::string::String::split_off
+        let mut std_s = String::from("hello wörld");
+        let std_tail = std_s.split_off(6);
+        assert_eq!(s, std_s.as_str());
+        assert_eq!(tail, std_tail.as_str());
+        // edge cases
+        let mut a = StrRope::from("xy");
+        assert_eq!(a.split_off(0), "xy");
+        assert!(a.is_empty());
+        let mut b = StrRope::from("xy");
+        assert!(b.split_off(2).is_empty());
+        assert_eq!(b, "xy");
+    }
+
+    #[test]
+    fn slice_ranges() {
+        let s = StrRope::from("héllo");
+        assert_eq!(s.slice(0..3), "hé"); // 'h'(1) + 'é'(2)
+        assert_eq!(s.slice(3..), "llo");
+        assert_eq!(s.slice(..), "héllo");
+        assert_eq!(s.slice(..1), "h");
+    }
+
+    #[test]
+    #[should_panic(expected = "char boundary")]
+    fn slice_non_char_boundary_panics() {
+        let s = StrRope::from("é");
+        let _ = s.slice(0..1);
+    }
+
+    // Property: StrRope built from any String reproduces its bytes, chars, char_indices, and length —
+    // std String is the oracle.
+    #[test]
+    fn prop_matches_str_oracle() {
+        bolero::check!().with_type::<String>().for_each(|text| {
+            let s = StrRope::from(text.as_str());
+            assert_eq!(s.len(), text.len());
+            assert!(s == text.as_str());
+            assert_eq!(s.bytes().collect::<Vec<_>>(), text.as_bytes());
+            assert_eq!(s.chars().collect::<String>(), *text);
+            assert_eq!(
+                s.char_indices().collect::<Vec<_>>(),
+                text.char_indices().collect::<Vec<_>>()
+            );
+        });
     }
 }

@@ -18,3 +18,4 @@ bytes = "1"
 
 [dev-dependencies]
 bolero = "0.13"
+bolero-generator = "0.13"
