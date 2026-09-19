@@ -2,7 +2,7 @@
 
 Head-to-head against [`bigdecimal`](https://crates.io/crates/bigdecimal) — the arbitrary-precision
 decimal crate that is also `etude-decimal`'s correctness oracle (`src/tests.rs`). `bigdecimal` is the
-yardstick; the goal is to **beat it** (ratio `< 1.00`).
+yardstick; the goal is to beat it (ratio `< 1.00`).
 
 Run it yourself:
 
@@ -17,120 +17,115 @@ cargo bench -p etude-decimal --bench arith
 - **Operands:** built through the public API only — an `nbytes`-wide non-negative coefficient from
   `etude_bigint::Big`'s sign-magnitude byte parser (top bit forced set for an exact width), placed at a
   fixed scale (`exp = -12`) so every value carries a fractional part. The value-equal `bigdecimal`
-  operand is built from the *identical* coefficient and exponent, so both crates measure the same inputs.
+  operand is built from the identical coefficient and exponent, so both crates measure the same inputs.
+- **Arithmetic cells rotate over a batch of 16 operand pairs.** Canonicalization cost is parity-sensitive
+  (a result not ending in zero normalizes in `O(1)`; one ending in zero divides), so a single pair would
+  over- or under-state the true cost depending on that pair's luck. Rotating over a batch whose results
+  span the parity mix makes the median representative; the rotation is a `Cell` index bump, identical on
+  both sides, so the ratio stays fair.
 - **Tiers** are named by the coefficient bit width (`64b` = 8 bytes … `4096b` = 512 bytes).
 - **`div_round`** targets a fixed working precision of 34 significant digits with `HalfEven`, matched on
   both sides (ours via `div_round(_, 34, HalfEven)`, `bigdecimal` via
   `(a / b).with_precision_round(34, HalfEven)`), so both do the same rounding work.
-- **Ratio = etude median / bigdecimal median.** `< 1.00` means `etude-decimal` is faster; `> 1.00` means
-  it is slower. Medians below are from a single run on an aarch64 host (`Linux 6.12 aarch64`); treat them
-  as directional, not absolute.
+- **Ratio = etude median / bigdecimal median.** `< 1.00` means `etude-decimal` is faster. Medians below
+  are from a single run on an aarch64 host (`Linux 6.12 aarch64`); treat them as directional.
 
-## Scoreboard (2026-09-19, baseline)
+## Scoreboard (2026-09-19)
 
 ### `add` — exact aligned sum
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 148.30 ns | 73.26 ns  | 2.02 |
-| 256b  | 137.30 ns | 100.39 ns | 1.37 |
-| 1024b | 329.84 ns | 119.53 ns | 2.76 |
-| 2048b | 698.00 ns | 150.81 ns | 4.63 |
-| 4096b | 1.315 µs  | 212.47 ns | 6.19 |
+| 64b   | 77.77 ns  | 70.16 ns  | 1.11 |
+| 256b  | 88.71 ns  | 109.08 ns | 0.81 |
+| 1024b | 122.12 ns | 133.57 ns | 0.91 |
+| 2048b | 241.55 ns | 169.86 ns | 1.42 |
+| 4096b | 569.46 ns | 223.72 ns | 2.55 |
 
 ### `sub` — exact aligned difference
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 150.95 ns | 59.57 ns  | 2.53 |
-| 256b  | 133.68 ns | 59.84 ns  | 2.23 |
-| 1024b | 307.49 ns | 76.28 ns  | 4.03 |
-| 2048b | 652.15 ns | 98.50 ns  | 6.62 |
-| 4096b | 1.307 µs  | 136.26 ns | 9.59 |
+| 64b   | 80.98 ns  | 64.87 ns  | 1.25 |
+| 256b  | 98.88 ns  | 77.57 ns  | 1.27 |
+| 1024b | 131.38 ns | 99.97 ns  | 1.31 |
+| 2048b | 243.74 ns | 129.19 ns | 1.89 |
+| 4096b | 460.00 ns | 156.54 ns | 2.94 |
 
 ### `mul` — exact product
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 88.25 ns | 35.05 ns  | 2.52 |
-| 256b  | 180.11 ns | 64.93 ns  | 2.77 |
-| 1024b | 985.02 ns | 403.37 ns | 2.44 |
-| 2048b | 2.586 µs  | 1.504 µs  | 1.72 |
-| 4096b | 7.432 µs  | 5.006 µs  | 1.48 |
+| 64b   | 63.77 ns  | 36.29 ns  | 1.76 |
+| 256b  | 122.23 ns | 65.07 ns  | 1.88 |
+| 1024b | 580.61 ns | 402.67 ns | 1.44 |
+| 2048b | 1.695 µs  | 1.511 µs  | 1.12 |
+| 4096b | 5.743 µs  | 5.010 µs  | 1.15 |
 
-### `div_round` — rounded quotient, 34 sig-digits, HalfEven ✅ **we win every tier**
+### `div_round` — rounded quotient, 34 sig-digits, HalfEven — we win every tier
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 775.95 ns | 7.994 µs  | **0.10** |
-| 256b  | 1.746 µs  | 12.095 µs | **0.14** |
-| 1024b | 9.396 µs  | 17.152 µs | **0.55** |
-| 2048b | 20.41 µs  | 25.17 µs  | **0.81** |
-| 4096b | 51.14 µs  | 59.79 µs  | **0.86** |
+| 64b   | 701.25 ns | 8.095 µs  | **0.09** |
+| 256b  | 1.443 µs  | 12.069 µs | **0.12** |
+| 1024b | 9.138 µs  | 17.138 µs | **0.53** |
+| 2048b | 19.23 µs  | 25.11 µs  | **0.77** |
+| 4096b | 47.43 µs  | 59.78 µs  | **0.79** |
 
 ### `cmp` — three-way ordering (equal-exponent `Big::cmp` fast path)
 
-Now a direct coefficient compare when the exponents match (the common case), instead of rendering both
-operands to decimal strings. This collapsed the worst column from hundreds-to-thousands× down to a flat
-~24–50 ns — a 30×–1000× speedup — leaving only the two `abs()` clones between us and `bigdecimal`'s
-cached-length ~6 ns.
-
-| tier | etude (before) | etude (now) | bigdecimal | ratio |
-|------|---------------:|------------:|-----------:|------:|
-| 64b   | 151.55 ns | 24.10 ns | 5.56 ns | 4.33 |
-| 256b  | 1.025 µs  | 24.06 ns | 5.56 ns | 4.33 |
-| 1024b | 7.573 µs  | 26.12 ns | 5.59 ns | 4.67 |
-| 2048b | 18.32 µs  | 31.05 ns | 5.72 ns | 5.43 |
-| 4096b | 48.43 µs  | 49.81 ns | 5.99 ns | 8.32 |
+| tier | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 64b   | 24.71 ns | 5.63 ns | 4.39 |
+| 256b  | 24.18 ns | 5.62 ns | 4.30 |
+| 1024b | 25.91 ns | 5.61 ns | 4.62 |
+| 2048b | 30.77 ns | 5.67 ns | 5.43 |
+| 4096b | 39.43 ns | 5.78 ns | 6.82 |
 
 ### `to_string` — render to a decimal literal
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 194.87 ns | 150.02 ns | 1.30 |
-| 256b  | 611.83 ns | 285.16 ns | 2.15 |
-| 1024b | 3.929 µs  | 2.342 µs  | 1.68 |
-| 2048b | 9.261 µs  | 8.921 µs  | 1.04 |
-| 4096b | 24.09 µs  | 21.02 µs  | 1.15 |
+| 64b   | 191.59 ns | 146.06 ns | 1.31 |
+| 256b  | 463.31 ns | 281.83 ns | 1.64 |
+| 1024b | 3.814 µs  | 2.324 µs  | 1.64 |
+| 2048b | 8.707 µs  | 8.976 µs  | 0.97 |
+| 4096b | 22.31 µs  | 21.09 µs  | 1.06 |
 
 ### `from_str` — parse a decimal literal
 
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 449.69 ns | 143.67 ns | 3.13 |
-| 256b  | 1.398 µs  | 365.46 ns | 3.83 |
-| 1024b | 5.737 µs  | 1.112 µs  | 5.16 |
-| 2048b | 12.88 µs  | 2.469 µs  | 5.21 |
-| 4096b | 30.97 µs  | 6.132 µs  | 5.05 |
+| 64b   | 407.81 ns | 145.64 ns | 2.80 |
+| 256b  | 1.319 µs  | 375.84 ns | 3.51 |
+| 1024b | 5.480 µs  | 1.111 µs  | 4.93 |
+| 2048b | 12.32 µs  | 2.482 µs  | 4.96 |
+| 4096b | 31.90 µs  | 6.449 µs  | 4.95 |
 
 ## Reading the board
 
 - **`div_round` is a clean sweep** — 10× faster at small magnitudes, still ahead at 4096b. Our exact
   scale-and-divide reaches the answer in one `divmod` at the chosen precision, where `bigdecimal` divides
   to its own default precision first and then re-rounds.
-- **`add`/`sub`/`mul` trail** by a fixed factor that *grows with magnitude*. The cause is the
-  canonical-form invariant: every result re-runs `normalize`, which must divide the coefficient to check
-  for (and strip) trailing zero digits, where `bigdecimal` keeps trailing zeros and normalizes lazily. The
-  strip itself is now base-`10^9` chunked, but the common case (a result with no trailing zero) still pays
-  one `divmod` to discover it is not divisible by ten — closing that needs a cheap divisibility/parity
-  primitive on `Big` (see the roadmap below).
-- **`cmp` was the worst offender — now largely closed.** `cmp_magnitude` used to convert *both*
-  coefficients to decimal strings on every comparison (an `O(limbs²)` base-10 conversion). The
-  equal-exponent path now compares the `Big` coefficients directly (a flat ~24–50 ns), a 30×–1000×
-  speedup; the residual ~4–8× is the two `abs()` clones. A magnitude-only compare on `Big` (no clone)
-  would close the rest. The unequal-exponent path still renders decimal strings (see below).
-- **`from_str`/`to_string`** trail on the base-10 ↔ binary conversion; both improve once `etude-bigint`
-  exposes chunked base-`10^k` digit emit/absorb (the same primitive the rational crate is adopting).
+- **`add`/`sub`/`mul` closed most of their gap** after `normalize` was rewritten onto `etude-bigint`'s
+  scalar primitives (`is_even`, `rem_u64`, `divmod_u64` — #133). Canonicalization used to divide the
+  coefficient by ten on every result; now an odd result is rejected in `O(1)` and only a result ending in
+  zero is divided. `add` now wins at 256b–1024b; the residual at large tiers is the underlying `Big`
+  add/mul cost, which is `etude-bigint`'s to shave. `sub` trails `add` because `sub` is `add(neg)` and the
+  `neg` allocates a negated coefficient clone — a direct `sub` would remove that (next).
+- **`cmp`** is a flat ~24–40 ns via the equal-exponent coefficient compare; the residual ~4–7× over
+  `bigdecimal`'s cached-length ~6 ns is the two `abs()` clones plus the unequal-exponent path (which still
+  renders decimal strings). A magnitude-only `Big` compare and an exact `decimal_digit_count()` (requested
+  from `etude-bigint`) would close it.
+- **`from_str`/`to_string`** trail on the base-10 ↔ binary conversion; both improve once we adopt
+  `etude-bigint`'s chunked base-`10^k` digit emit/absorb (the absorb helper is a requested follow-up).
 
 ## Next optimizations (ranked by scoreboard leverage)
 
-1. ~~**`cmp` equal-exponent fast path**~~ — done: compares `Big` coefficients directly; 30×–1000× faster.
-   Residual: a magnitude-only `Big` compare (no `abs()` clone) plus an unequal-exponent path that avoids
-   decimal strings.
-2. **Cheaper `normalize`** — the strip is now base-`10^9` chunked (`O(zeros / 9)` divisions instead of
-   `O(zeros)`), but the *common* case (a result with no trailing zero) still pays one `divmod(10^9)` to
-   discover it is not divisible by ten — that is the residual `add`/`sub`/`mul` tax. Removing it needs a
-   cheap divisibility/parity primitive on `Big` (an `is_even` / `rem_u64`), requested from `etude-bigint`;
-   `coeff` divisible by 10 iff even *and* divisible by 5, and the even check is `O(1)`.
-3. **Chunked base-`10^k` parse/render** — push the digit loop down into `etude-bigint` for
-   `from_str`/`to_string`.
+1. **Direct `sub`** — subtract coefficients in place instead of `add(neg)`, dropping the `neg` clone that
+   makes `sub` trail `add`.
+2. **`from_str` via chunked base-`10^k` absorb** — the biggest remaining multi-tier gap (≈5×); consume
+   `etude-bigint`'s forthcoming base-`10^k` build helper instead of the 18-digit-chunk `i64` loop.
+3. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) and an exact
+   `decimal_digit_count()` so the unequal-exponent path drops its decimal-string render.
+4. **`to_string`** — adopt a chunked base-`10^k` digit emitter to match `bigdecimal` at the small tiers.

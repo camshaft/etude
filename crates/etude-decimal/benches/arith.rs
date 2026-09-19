@@ -95,27 +95,51 @@ fn group<'a>(
     g
 }
 
-/// Bench a binary op on both implementations across `TIERS`, with same-width operands.
+/// How many operand pairs each arithmetic cell rotates through per measurement. Canonicalization cost is
+/// now parity-sensitive (an odd result normalizes in `O(1)`; one ending in zero divides), so a single
+/// pair would over- or under-state the true cost depending on that pair's luck. Rotating over a batch
+/// whose results span the parity mix makes the median representative. The rotation is a `Cell` index
+/// bump — identical overhead on both implementations, so the etude/bigdecimal ratio stays fair.
+const BATCH: usize = 16;
+
+/// Bench a binary op on both implementations across `TIERS`, with same-width operands, rotating over a
+/// `BATCH` of pairs so the measured median reflects the result-parity mix (see [`BATCH`]).
 fn binop(
     c: &mut Criterion,
     name: &str,
     ours: impl Fn(&Decimal, &Decimal) -> Decimal,
     theirs: impl Fn(&BigDecimal, &BigDecimal) -> BigDecimal,
 ) {
+    use std::cell::Cell;
     let mut g = group(c, name);
     for &(label, nbytes) in TIERS {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (nbytes as u64));
-        let a = rng.dec(nbytes);
-        let b = rng.dec(nbytes);
-        let (ra, rb) = (to_ref(&a), to_ref(&b));
-        g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
-            be.iter(|| black_box(ours(black_box(a), black_box(b))))
+        let ours_pairs: Vec<(Decimal, Decimal)> = (0..BATCH)
+            .map(|_| (rng.dec(nbytes), rng.dec(nbytes)))
+            .collect();
+        let ref_pairs: Vec<(BigDecimal, BigDecimal)> = ours_pairs
+            .iter()
+            .map(|(a, b)| (to_ref(a), to_ref(b)))
+            .collect();
+
+        let oi = Cell::new(0usize);
+        g.bench_function(BenchmarkId::new("etude", label), |be| {
+            be.iter(|| {
+                let k = oi.get();
+                oi.set((k + 1) % BATCH);
+                let (a, b) = &ours_pairs[k];
+                black_box(ours(black_box(a), black_box(b)))
+            })
         });
-        g.bench_with_input(
-            BenchmarkId::new("bigdecimal", label),
-            &(&ra, &rb),
-            |be, (a, b)| be.iter(|| black_box(theirs(black_box(a), black_box(b)))),
-        );
+        let ri = Cell::new(0usize);
+        g.bench_function(BenchmarkId::new("bigdecimal", label), |be| {
+            be.iter(|| {
+                let k = ri.get();
+                ri.set((k + 1) % BATCH);
+                let (a, b) = &ref_pairs[k];
+                black_box(theirs(black_box(a), black_box(b)))
+            })
+        });
     }
     g.finish();
 }
