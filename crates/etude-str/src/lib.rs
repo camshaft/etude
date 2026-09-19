@@ -195,12 +195,9 @@ impl PartialEq<&str> for Str {
     }
 }
 
-// Integration with the `etude-buffer` copy-avoiding reader (the `buffer` feature): read UTF-8 text OUT
-// of any byte reader. Reading a `Str` IN as a byte source needs no wiring — `into_bytes()` is O(1) and
-// `bytes::Bytes` already implements `etude_buffer::reader::Buffer`, so a `Str` is consumed by the reader
-// framework for free. (Draining a `Str` IN PLACE as a reader would be unsound: `read_chunk` can split a
-// multi-byte UTF-8 char, leaving the remaining `Str` non-UTF-8 and making `as_str` undefined behaviour —
-// so we deliberately do NOT implement `reader::Buffer` for `Str`; go through `into_bytes()` instead.)
+// Integration with the `etude-buffer` copy-avoiding reader (the `buffer` feature). `Str` is a readable
+// byte source (`impl reader::Buffer for Str`, below), and `Str::from_reader` reads UTF-8 text back out of
+// any reader.
 #[cfg(feature = "buffer")]
 impl Str {
     /// Drain every buffered byte out of `reader` and validate the result as UTF-8, producing a `Str`.
@@ -252,6 +249,49 @@ impl Str {
             }
         }
         Str::from_utf8(out.freeze()).map_err(FromReaderError::Utf8)
+    }
+}
+
+// `Str` is a readable byte source: its bytes flow through the copy-avoiding reader like a `bytes::Bytes`
+// (which is exactly what backs it), so `Str` drops straight into anything that consumes a `reader::Buffer`.
+// The read delegates to the inner `Bytes`, but clamps each read down to a UTF-8 char boundary so the bytes
+// left in `self` remain valid UTF-8 — the wrapped-bytes invariant is never broken, so `as_str` (a
+// zero-cost `from_utf8_unchecked`) stays sound even on a partially-drained `Str`. (A bounded destination
+// narrower than the next char therefore takes that char on a later read; an unbounded destination — the
+// common case — drains it all in one go.)
+#[cfg(feature = "buffer")]
+impl etude_buffer::reader::Buffer for Str {
+    type Error = core::convert::Infallible;
+
+    #[inline]
+    fn buffered_len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    fn read_chunk(
+        &mut self,
+        watermark: usize,
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error> {
+        // Largest char-boundary offset within the watermark, so the remaining `Str` stays valid UTF-8.
+        let mut len = self.0.len().min(watermark);
+        let s = self.as_str();
+        while len > 0 && !s.is_char_boundary(len) {
+            len -= 1;
+        }
+        // Delegate the actual split to the inner `Bytes` reader.
+        self.0.read_chunk(len)
+    }
+
+    #[inline]
+    fn partial_copy_into<Dest>(
+        &mut self,
+        dest: &mut Dest,
+    ) -> Result<etude_buffer::reader::Chunk<'_>, Self::Error>
+    where
+        Dest: etude_buffer::writer::Buffer + ?Sized,
+    {
+        self.read_chunk(dest.remaining_capacity())
     }
 }
 
@@ -482,5 +522,38 @@ mod buffer_tests {
         // wrongly reject each half).
         let mut r = Bytes::from_static(&[0xC3]).chain(Bytes::from_static(&[0xA9]));
         assert_eq!(Str::from_reader(&mut r).unwrap(), "é");
+    }
+
+    #[test]
+    fn str_is_a_reader_source_drained_into_a_writer() {
+        // `Str` is a `reader::Buffer`: drain it (into an unbounded Vec<u8> dest) — bytes match and the
+        // Str is left empty. Then round-trip through from_reader back to the same Str.
+        let mut s = Str::from("héllo world");
+        let mut out: Vec<u8> = Vec::new();
+        while !s.buffer_is_empty() {
+            s.copy_into(&mut out).unwrap();
+        }
+        assert_eq!(out, "héllo world".as_bytes());
+        assert!(s.buffer_is_empty());
+
+        let mut src = Str::from("round trip");
+        assert_eq!(Str::from_reader(&mut src).unwrap(), "round trip");
+    }
+
+    #[test]
+    fn reader_clamps_to_char_boundary_so_remainder_stays_valid_utf8() {
+        // "aé" = 'a'(1 byte) + 'é'(0xC3 0xA9, 2 bytes) = 3 bytes. A watermark of 2 would split 'é' at
+        // its first byte; the reader clamps DOWN to the 'a' boundary, so the remaining `Str` is the valid
+        // "é" — never a partial-UTF-8 Str (as_str on the remainder is sound, no UB).
+        let mut s = Str::from("aé");
+        let chunk = s.read_chunk(2).unwrap();
+        assert_eq!(&chunk[..], b"a");
+        assert_eq!(s.as_str(), "é"); // remainder is valid UTF-8
+        assert_eq!(s.buffered_len(), 2);
+
+        // Next read takes the whole 'é'.
+        let chunk = s.read_chunk(usize::MAX).unwrap();
+        assert_eq!(&chunk[..], "é".as_bytes());
+        assert!(s.buffer_is_empty());
     }
 }
