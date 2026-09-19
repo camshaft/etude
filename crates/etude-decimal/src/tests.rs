@@ -117,6 +117,58 @@ fn rejects_malformed() {
 }
 
 #[test]
+fn from_parts_and_components() {
+    // Component construction matches the equivalent literal parse (the decoder path == the string path).
+    // value = (-1)^neg * (int ++ frac) * 10^(exp - frac.len())
+    assert_eq!(
+        Decimal::from_parts(false, b"1", b"5", 0).unwrap(),
+        Decimal::from_str("1.5").unwrap()
+    );
+    assert_eq!(
+        Decimal::from_parts(true, b"3", b"14", 0).unwrap(),
+        Decimal::from_str("-3.14").unwrap()
+    );
+    // Explicit exponent folds with the fractional shift: 1.5e3 = 1500, and 15 with exp -1 = 1.5.
+    assert_eq!(
+        Decimal::from_parts(false, b"1", b"5", 3).unwrap(),
+        Decimal::from_str("1500").unwrap()
+    );
+    assert_eq!(
+        Decimal::from_parts(false, b"15", b"", -1).unwrap(),
+        Decimal::from_str("1.5").unwrap()
+    );
+    // Empty coefficient is zero; sign on zero is dropped (canonical).
+    assert_eq!(
+        Decimal::from_parts(true, b"", b"", 5).unwrap(),
+        Decimal::zero()
+    );
+    assert_eq!(
+        Decimal::from_parts(true, b"0", b"", 0).unwrap(),
+        Decimal::zero()
+    );
+    // from_components: (-1)^neg * digits * 10^exp (no fractional part).
+    assert_eq!(
+        Decimal::from_components(false, b"123", 4).unwrap(),
+        Decimal::from_str("123e4").unwrap()
+    );
+    assert_eq!(
+        Decimal::from_components(true, b"7", 0).unwrap(),
+        Decimal::from_str("-7").unwrap()
+    );
+    // A big coefficient survives exactly.
+    assert_eq!(
+        Decimal::from_components(false, b"123456789012345678901234567890", 0)
+            .unwrap()
+            .to_string(),
+        "123456789012345678901234567890"
+    );
+    // Non-digit bytes are rejected (defensive — the caller is expected to pass validated digits).
+    assert!(Decimal::from_parts(false, b"1a", b"", 0).is_none());
+    assert!(Decimal::from_parts(false, b"1", b"2.3", 0).is_none());
+    assert!(Decimal::from_components(false, b"-5", 0).is_none()); // sign belongs in the flag, not digits
+}
+
+#[test]
 fn comparison_is_exact() {
     use core::cmp::Ordering::{Equal, Greater, Less};
     let d = |s: &str| Decimal::from_str(s).unwrap();
@@ -373,6 +425,15 @@ fn differential_structured_numbers() {
                     has_exp.then_some(exp as i64),
                 );
                 if let Some(pair) = check_parse(&s) {
+                    // The component path (what a decoder feeds) must match the string parse exactly:
+                    // from_parts(neg, int_digits, frac_digits, raw eE exp).
+                    let int_s = int.to_string();
+                    let frac_s = frac.to_string();
+                    let frac_bytes: &[u8] = if has_frac { frac_s.as_bytes() } else { b"" };
+                    let raw_exp = if has_exp { exp as i64 } else { 0 };
+                    let via_parts = Decimal::from_parts(neg, int_s.as_bytes(), frac_bytes, raw_exp)
+                        .expect("valid components");
+                    assert_eq!(via_parts, pair.0, "from_parts != from_ascii for {s}");
                     parsed.push(pair);
                 }
             }
