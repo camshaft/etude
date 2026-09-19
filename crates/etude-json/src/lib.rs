@@ -105,14 +105,18 @@ pub struct NumberParts {
 /// The fields are private and not part of the stable API — construct tokens only by iterating a
 /// [`Tokenizer`], and read them through the accessors so the representation stays free to change.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Token {
+pub struct Token<'a> {
     kind: TokenKind,
     span: Span,
     string: Option<StringInfo>,
     number: Option<NumberParts>,
+    /// The token's full lexeme bytes as a direct leaf slice, when the token lies within a single rope
+    /// leaf (the common case) — `None` when it straddles a leaf boundary. Lets a consumer read a
+    /// token's bytes in O(1) instead of an O(log n) `ByteVec::slice` re-descent for its span.
+    head: Option<&'a [u8]>,
 }
 
-impl Token {
+impl<'a> Token<'a> {
     /// The token's lexical class.
     pub fn kind(&self) -> TokenKind {
         self.kind
@@ -148,7 +152,23 @@ impl Token {
     /// it. The token's content was validated during tokenization, so decoding does not fail.
     pub fn decode_string(&self, input: &ByteVec) -> Option<String> {
         let info = self.string?;
-        Some(decode_content(input, info.content))
+        if let Some(full) = self.head {
+            // Single-leaf token: the content lies between the quotes of the leaf slice — decode it
+            // directly in O(1), no `ByteVec::slice` tree descent.
+            Some(decode_bytes(&full[1..full.len() - 1]))
+        } else {
+            let buf = input.slice(info.content.range()).copy_to_bytes();
+            Some(decode_bytes(&buf))
+        }
+    }
+
+    /// The token's full lexeme bytes as a direct rope-leaf slice, in O(1) — `Some` when the token
+    /// lies within a single rope leaf (the common case), `None` when it straddles a leaf boundary
+    /// (resolve [`Token::span`] against the rope for those). For a string this includes the quotes;
+    /// its content is `bytes()[1..len-1]`. This is the copy-avoiding fast path that lets a consumer
+    /// read a token's bytes without an O(log n) span re-descent.
+    pub fn bytes(&self) -> Option<&'a [u8]> {
+        self.head
     }
 
     /// For a [`TokenKind::Number`] token, whether the literal is an integer — no fraction and no
@@ -263,7 +283,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Emit a one-byte structural token of `kind` starting at the current position.
-    fn structural(&mut self, kind: TokenKind) -> Token {
+    fn structural(&mut self, kind: TokenKind) -> Token<'a> {
         let start = self.cursor.offset();
         self.cursor.bump();
         Token {
@@ -271,11 +291,12 @@ impl<'a> Tokenizer<'a> {
             span: Span::new(start, self.cursor.offset()),
             string: None,
             number: None,
+            head: None,
         }
     }
 
     /// Scan a `"..."` string beginning at the opening quote (the current position).
-    fn scan_string(&mut self) -> Result<Token, Error> {
+    fn scan_string(&mut self) -> Result<Token<'a>, Error> {
         let start = self.cursor.offset();
         self.cursor.bump(); // past the opening quote
         let mut has_escapes = false;
@@ -318,6 +339,7 @@ impl<'a> Tokenizer<'a> {
                             has_escapes,
                         }),
                         number: None,
+                        head: None,
                     });
                 }
                 b'\\' => {
@@ -367,7 +389,7 @@ impl<'a> Tokenizer<'a> {
 
     /// Scan a numeric literal beginning at `self.pos`, validating the JSON number grammar
     /// `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
-    fn scan_number(&mut self) -> Result<Token, Error> {
+    fn scan_number(&mut self) -> Result<Token<'a>, Error> {
         let start = self.cursor.offset();
 
         let negative = self.cursor.peek() == Some(b'-');
@@ -450,12 +472,13 @@ impl<'a> Tokenizer<'a> {
                 exponent,
                 exponent_negative,
             }),
+            head: None,
         })
     }
 
     /// Scan a bare-word keyword (`word`) beginning at the current position, emitting `kind` on an
     /// exact match.
-    fn scan_keyword(&mut self, word: &[u8], kind: TokenKind) -> Result<Token, Error> {
+    fn scan_keyword(&mut self, word: &[u8], kind: TokenKind) -> Result<Token<'a>, Error> {
         let start = self.cursor.offset();
         for &expected in word {
             if self.cursor.peek() != Some(expected) {
@@ -471,12 +494,13 @@ impl<'a> Tokenizer<'a> {
             span: Span::new(start, self.cursor.offset()),
             string: None,
             number: None,
+            head: None,
         })
     }
 }
 
-impl Iterator for Tokenizer<'_> {
-    type Item = Result<Token, Error>;
+impl<'a> Iterator for Tokenizer<'a> {
+    type Item = Result<Token<'a>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -490,7 +514,11 @@ impl Iterator for Tokenizer<'_> {
                 return None;
             }
         };
-        let result = match b {
+        // The token starts at the current byte; capture the current leaf so that if the whole token
+        // fits within it (the common case) we can hand the consumer O(1) `Token::bytes` instead of an
+        // O(log n) span re-descent.
+        let leaf = self.cursor.chunk_tail();
+        let mut result = match b {
             b'{' => Ok(self.structural(TokenKind::BeginObject)),
             b'}' => Ok(self.structural(TokenKind::EndObject)),
             b'[' => Ok(self.structural(TokenKind::BeginArray)),
@@ -507,8 +535,13 @@ impl Iterator for Tokenizer<'_> {
                 kind: ErrorKind::UnexpectedByte,
             }),
         };
-        if result.is_err() {
-            self.done = true;
+        match &mut result {
+            Ok(token) => {
+                // Single-leaf token ⇒ its bytes are the leading `len` bytes of the captured leaf.
+                let len = token.span.len();
+                token.head = (len <= leaf.len()).then(|| &leaf[..len]);
+            }
+            Err(_) => self.done = true,
         }
         Some(result)
     }
@@ -516,18 +549,12 @@ impl Iterator for Tokenizer<'_> {
 
 impl core::iter::FusedIterator for Tokenizer<'_> {}
 
-/// Decode the (validated) content of a string token into an owned `String`, applying JSON escapes.
+/// Decode a string token's (validated) content bytes into an owned `String`, applying JSON escapes.
 ///
-/// `content` is the span BETWEEN the quotes. The bytes were validated during tokenization, so every
-/// escape is well-formed here; a `\u` value that is not a scalar (a lone surrogate) is replaced with
-/// U+FFFD rather than failing, since decoding is infallible by contract.
-fn decode_content(input: &ByteVec, content: Span) -> String {
-    // Materialize the content span once into a contiguous buffer, then decode with plain indexing.
-    // `copy_to_bytes` is zero-copy when the content lies within a single rope leaf (its fast path);
-    // otherwise it is one O(len) copy. Either way decoding is O(len), versus O(len·log n) for a
-    // per-byte `byte_at` tree descent on a deep rope.
-    let buf = input.slice(content.range()).copy_to_bytes();
-    let src: &[u8] = &buf;
+/// `src` is the bytes between the quotes. They were validated during tokenization, so every escape is
+/// well-formed here; a `\u` value that is not a scalar (a lone surrogate) is replaced with U+FFFD
+/// rather than failing, since decoding is infallible by contract.
+fn decode_bytes(src: &[u8]) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(src.len());
     let mut pos = 0;
     while pos < src.len() {

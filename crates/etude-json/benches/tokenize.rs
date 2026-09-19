@@ -211,7 +211,7 @@ fn decode_corpus() -> Vec<(&'static str, String)> {
 
 /// Collect the `String`-kind tokens of `input` (done outside the measured region so a decode
 /// benchmark times only `Token::decode_string`, not the tokenize scan).
-fn string_tokens(input: &ByteVec) -> Vec<Token> {
+fn string_tokens(input: &ByteVec) -> Vec<Token<'_>> {
     Tokenizer::new(input)
         .map(|t| t.expect("valid json"))
         .filter(|t| t.kind() == TokenKind::String)
@@ -220,7 +220,7 @@ fn string_tokens(input: &ByteVec) -> Vec<Token> {
 
 /// Decode every collected string token's content to an owned `String` — the on-demand
 /// unescape/materialize cost of `Token::decode_string`, in isolation.
-fn decode_all(tokens: &[Token], input: &ByteVec) {
+fn decode_all(tokens: &[Token<'_>], input: &ByteVec) {
     for t in tokens {
         black_box(t.decode_string(input).expect("string token decodes"));
     }
@@ -265,6 +265,21 @@ fn tokenize_and_read(input: &ByteVec) {
     for tok in Tokenizer::new(input) {
         let t = tok.expect("valid json");
         black_box(input.slice(t.span().range()));
+    }
+}
+
+/// Tokenize and read every token's bytes via the O(1) `Token::bytes` fast path — a direct rope-leaf
+/// slice when the token fits within one leaf (the common case on a rope of realistic 8 KiB leaves),
+/// falling back to the O(log n) span slice only when a token straddles a leaf boundary. The delta
+/// against [`tokenize_and_read`] is the copy-avoiding read win: on token-dense docs almost every
+/// token is single-leaf, so this drives per-token read toward O(1) instead of an O(log n) re-descent.
+fn tokenize_and_read_bytes(input: &ByteVec) {
+    for tok in Tokenizer::new(input) {
+        let t = tok.expect("valid json");
+        match t.bytes() {
+            Some(b) => black_box(b.len()),
+            None => black_box(input.slice(t.span().range()).len()),
+        };
     }
 }
 
@@ -335,6 +350,9 @@ fn bench(c: &mut Criterion) {
         });
         group.bench_function("etude_json_tokenize_and_read", |b| {
             b.iter(|| tokenize_and_read(black_box(&input)))
+        });
+        group.bench_function("etude_json_tokenize_and_read_bytes", |b| {
+            b.iter(|| tokenize_and_read_bytes(black_box(&input)))
         });
         group.bench_function("serde_json_parse", |b| {
             b.iter(|| serde_json::from_slice::<serde_json::Value>(black_box(bytes)).unwrap())

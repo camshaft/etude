@@ -124,3 +124,34 @@ allocation counts; the suspects are per-token `copy_to_bytes` setup and the two 
 copy), a no-escape fast path keyed off `string_has_escapes` that skips the escape machinery entirely,
 and (once chunk-ref tokens land, PR #124) decoding from the token's leaf slice to drop `copy_to_bytes`.
 A win here is the new baseline, not a stopping point.
+
+## Chunk-ref token read fast path (`Token::bytes`) — the O(1) read (`tokenize_and_read_bytes`)
+
+A `Token` now also carries the leaf slice of its full lexeme **when the token lies within a single
+rope leaf** (the common case on a rope of realistic leaves — here 8 KiB): `Token::bytes()` returns
+that `&[u8]` in O(1), `None` only when the token straddles a leaf boundary (fall back to the span
+slice for those). `tokenize_and_read_bytes` reads every token's bytes through this fast path; compare
+it against `tokenize_and_read` (the O(log n)-per-token span descent above) — same work, different
+read primitive (aarch64, jemalloc, release, 1.0 s):
+
+| shape             | read via span (O(log n)) | read via `bytes()` (O(1)) | serde_json | bytes/span | bytes/serde |
+|-------------------|-------------------------:|--------------------------:|-----------:|-----------:|------------:|
+| array_10k_ints    | 1063 µs                  | 233 µs                    | 251 µs     | **0.22×**  | 0.93× |
+| array_10k_floats  | 1159 µs                  | 271 µs                    | 338 µs     | **0.23×**  | 0.80× |
+| array_5k_strings  | 603 µs                   | 152 µs                    | 259 µs     | **0.25×**  | 0.59× |
+| nested_100        | 11.74 µs                 | 2.02 µs                   | 5.52 µs    | **0.17×**  | 0.37× |
+| objects_1k        | 1729 µs                  | 297 µs                    | 643 µs     | **0.17×**  | 0.46× |
+| big_string_100k   | 77.7 µs                  | 77.7 µs                   | 23.9 µs    | 1.00×      | 3.25× |
+
+**Finding:** reading a token's bytes through the O(1) `bytes()` fast path is **4–6× faster than the
+O(log n) span descent** on token-dense documents, and — critically — it **restores etude_json to
+faster-than-serde_json (0.37–0.93×) even when a consumer reads every token's bytes**, exactly the
+workload where span resolution had made it 2–4× slower. The 0-alloc invariant is unchanged (the leaf
+slice is a borrow, not a copy). `big_string_100k` is unaffected: it is one 100 KB token that straddles
+many 8 KiB leaves, so `bytes()` is `None` and the read falls back to the span slice (still the SIMD
+closing-quote-scan gap noted above, not a read-path cost).
+
+So the chunk-ref token turns the earlier read regression into a win on every multi-token shape; the
+only residual loss is the single huge string, whose lexeme cannot fit one leaf. A future refinement
+for straddling tokens (a cursor bookmark, or copying the few straddling lexemes into a small scratch)
+would close that last case, but the measured payoff there is limited to giant single tokens.

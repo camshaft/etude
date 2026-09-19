@@ -31,10 +31,54 @@ fn rope(bytes: &[u8], chunk: usize) -> ByteVec {
     r
 }
 
-/// Tokenize `bytes` from a single-chunk rope, collecting into a `Result`.
-fn tokenize_all(bytes: &[u8]) -> Result<Vec<Token>, Error> {
+/// A rope-independent summary of a token: the cheap, `Copy` metadata a token carries, lifted out of
+/// the borrow so it can outlive the input rope. `Token<'a>` now borrows the rope (it holds the
+/// single-leaf lexeme bytes for O(1) `bytes()` access), so a helper cannot build a local rope and
+/// return the tokens borrowing it. These summaries capture exactly what the concrete unit tests
+/// assert on (kind / span / string flags / number flag) and expose the same accessor names, so call
+/// sites read identically to inspecting a `Token`.
+#[derive(Debug, PartialEq, Eq)]
+struct TokSummary {
+    kind: TokenKind,
+    span: Span,
+    string_span: Option<Span>,
+    string_has_escapes: Option<bool>,
+    number_is_integer: Option<bool>,
+}
+
+impl TokSummary {
+    fn of(t: &Token<'_>) -> Self {
+        TokSummary {
+            kind: t.kind(),
+            span: t.span(),
+            string_span: t.string_span(),
+            string_has_escapes: t.string_has_escapes(),
+            number_is_integer: t.number_is_integer(),
+        }
+    }
+    fn kind(&self) -> TokenKind {
+        self.kind
+    }
+    fn span(&self) -> Span {
+        self.span
+    }
+    fn string_span(&self) -> Option<Span> {
+        self.string_span
+    }
+    fn string_has_escapes(&self) -> Option<bool> {
+        self.string_has_escapes
+    }
+    fn number_is_integer(&self) -> Option<bool> {
+        self.number_is_integer
+    }
+}
+
+/// Tokenize `bytes` from a single-chunk rope, collecting rope-independent summaries into a `Result`.
+fn tokenize_all(bytes: &[u8]) -> Result<Vec<TokSummary>, Error> {
     let r = rope(bytes, bytes.len().max(1));
-    Tokenizer::new(&r).collect()
+    Tokenizer::new(&r)
+        .map(|res| res.map(|t| TokSummary::of(&t)))
+        .collect()
 }
 
 /// The bytes of `span` read back out of `input`.
@@ -90,7 +134,7 @@ fn expected(v: &serde_json::Value, out: &mut Vec<Expect>) {
 }
 
 /// The normalized expectation for the tokens the tokenizer actually produced.
-fn actual(tokens: &[Token], input: &ByteVec) -> Vec<Expect> {
+fn actual(tokens: &[Token<'_>], input: &ByteVec) -> Vec<Expect> {
     tokens
         .iter()
         .map(|t| match t.kind() {
@@ -123,14 +167,15 @@ fn check_valid(bytes: &[u8]) {
 
     for chunk in [1usize, 2, 3, 5, 13, canon.len().max(1)] {
         let r = rope(&canon, chunk);
-        let toks: Vec<Token> = Tokenizer::new(&r)
-            .collect::<Result<_, _>>()
-            .unwrap_or_else(|e| {
-                panic!(
-                    "tokenizer rejected valid json {:?} at chunk={chunk}: {e}",
-                    String::from_utf8_lossy(&canon)
-                )
-            });
+        let toks: Vec<Token<'_>> =
+            Tokenizer::new(&r)
+                .collect::<Result<_, _>>()
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "tokenizer rejected valid json {:?} at chunk={chunk}: {e}",
+                        String::from_utf8_lossy(&canon)
+                    )
+                });
         assert_eq!(
             actual(&toks, &r),
             exp,
@@ -144,7 +189,10 @@ fn check_valid(bytes: &[u8]) {
 
 /// A structural fingerprint of a token stream: each token's kind, span, and (for strings) decoded
 /// content. Two ropes holding the same bytes must yield identical fingerprints regardless of chunking.
-fn token_repr(toks: &[Token], input: &ByteVec) -> Vec<(TokenKind, usize, usize, Option<String>)> {
+fn token_repr(
+    toks: &[Token<'_>],
+    input: &ByteVec,
+) -> Vec<(TokenKind, usize, usize, Option<String>)> {
     toks.iter()
         .map(|t| {
             let decoded = if t.kind() == TokenKind::String {
@@ -162,10 +210,10 @@ fn token_repr(toks: &[Token], input: &ByteVec) -> Vec<(TokenKind, usize, usize, 
 /// must be correct when a token straddles a rope-leaf boundary.
 fn assert_chunk_invariant(bytes: &[u8]) {
     let base_rope = rope(bytes, bytes.len().max(1));
-    let base: Result<Vec<Token>, Error> = Tokenizer::new(&base_rope).collect();
+    let base: Result<Vec<Token<'_>>, Error> = Tokenizer::new(&base_rope).collect();
     for chunk in [1usize, 2, 3, 5, 7, 11] {
         let r = rope(bytes, chunk);
-        let got: Result<Vec<Token>, Error> = Tokenizer::new(&r).collect();
+        let got: Result<Vec<Token<'_>>, Error> = Tokenizer::new(&r).collect();
         match (&base, &got) {
             (Ok(a), Ok(b)) => assert_eq!(
                 token_repr(a, &base_rope),
@@ -278,6 +326,45 @@ fn string_span_is_zero_copy_when_unescaped() {
 }
 
 #[test]
+fn bytes_is_single_leaf_lexeme_or_none_on_straddle() {
+    // When a token lies within a single rope leaf, `bytes()` hands back its full lexeme as a direct
+    // O(1) leaf slice equal to resolving `span()` against the rope; when it straddles a leaf boundary
+    // it is `None` (the consumer must resolve the span). This is the copy-avoiding read fast path.
+    let doc = br#"[123,"hi",true]"#;
+
+    // Single-chunk rope: every token fits in the one leaf, so `bytes()` is always `Some` and equals
+    // the span bytes. For the string, the content is the lexeme minus its surrounding quotes.
+    let whole = rope(doc, doc.len());
+    for tok in Tokenizer::new(&whole) {
+        let tok = tok.unwrap();
+        let bytes = tok.bytes().expect("single-leaf token has direct bytes");
+        assert_eq!(bytes, span_bytes(&whole, tok.span()).as_slice());
+        if tok.kind() == TokenKind::String {
+            let content = &bytes[1..bytes.len() - 1];
+            assert_eq!(
+                content,
+                span_bytes(&whole, tok.string_span().unwrap()).as_slice()
+            );
+        }
+    }
+
+    // 1-byte chunks: every multi-byte token straddles leaf boundaries, so `bytes()` is `None` for
+    // them (single-byte structural tokens still fit their leaf). Whatever `bytes()` returns must
+    // still equal the span bytes.
+    let split = rope(doc, 1);
+    for tok in Tokenizer::new(&split) {
+        let tok = tok.unwrap();
+        match tok.bytes() {
+            Some(bytes) => assert_eq!(bytes, span_bytes(&split, tok.span()).as_slice()),
+            None => assert!(
+                tok.span().len() > 1,
+                "only multi-byte tokens straddle a 1-byte chunk"
+            ),
+        }
+    }
+}
+
+#[test]
 fn decodes_string_escapes() {
     let cases: &[(&[u8], &str)] = &[
         (b"\"\"", ""),
@@ -293,7 +380,7 @@ fn decodes_string_escapes() {
     ];
     for (bytes, want) in cases {
         let r = rope(bytes, 1); // 1-byte chunks: every escape straddles a leaf boundary.
-        let toks: Vec<Token> = Tokenizer::new(&r).collect::<Result<_, _>>().unwrap();
+        let toks: Vec<Token<'_>> = Tokenizer::new(&r).collect::<Result<_, _>>().unwrap();
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].kind(), TokenKind::String);
         assert_eq!(
