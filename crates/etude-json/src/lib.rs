@@ -4,9 +4,9 @@
 //! Copy-avoiding JSON over the etude byte-rope.
 //!
 //! The point of this crate is to read JSON WITHOUT copying its bytes. [`Tokenizer`] walks a
-//! [`ByteRope`] and yields [`Token`]s that each reference a byte RANGE of that input rope (a
+//! [`ByteVec`] and yields [`Token`]s that each reference a byte RANGE of that input rope (a
 //! [`Span`]) rather than owning a copy of the bytes. A caller that wants the bytes takes an O(1)
-//! structural-sharing [`ByteRope::slice`] of the span; only a caller that needs a transformed value
+//! structural-sharing [`ByteVec::slice`] of the span; only a caller that needs a transformed value
 //! — an unescaped string, a parsed number — pays for materialization, and only then.
 //!
 //! # What the tokenizer does and does not do
@@ -35,11 +35,11 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use etude_byterope::ByteRope;
+use etude_bytevec::ByteVec;
 
 /// A half-open byte range `[start, end)` into the input rope a [`Token`] was produced from.
 ///
-/// A span carries no bytes; resolve it against the originating rope (e.g. [`ByteRope::slice`]) to
+/// A span carries no bytes; resolve it against the originating rope (e.g. [`ByteVec::slice`]) to
 /// read them. Resolving it against a different rope is meaningless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
@@ -163,7 +163,7 @@ impl Token {
     ///
     /// `input` MUST be the rope this token was tokenized from; the content span is resolved against
     /// it. The token's content was validated during tokenization, so decoding does not fail.
-    pub fn decode_string(&self, input: &ByteRope) -> Option<String> {
+    pub fn decode_string(&self, input: &ByteVec) -> Option<String> {
         let info = self.string?;
         Some(decode_content(input, info.content))
     }
@@ -234,7 +234,7 @@ impl fmt::Display for Error {
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
-/// An iterator of [`Token`]s over a [`ByteRope`].
+/// An iterator of [`Token`]s over a [`ByteVec`].
 ///
 /// Create one with [`Tokenizer::new`] and iterate it. Each step yields `Ok(token)` for a well-formed
 /// token or `Err(error)` for malformed input; after an `Err` the iterator is exhausted (it will only
@@ -245,14 +245,14 @@ impl std::error::Error for Error {}
 /// regardless of how the rope is chunked — a token whose bytes straddle a rope-leaf boundary is read
 /// the same as one within a single chunk.
 pub struct Tokenizer<'a> {
-    input: &'a ByteRope,
+    input: &'a ByteVec,
     pos: usize,
     done: bool,
 }
 
 impl<'a> Tokenizer<'a> {
     /// Create a tokenizer over `input`. Iterating it yields the JSON tokens of the rope's bytes.
-    pub fn new(input: &'a ByteRope) -> Self {
+    pub fn new(input: &'a ByteVec) -> Self {
         Tokenizer {
             input,
             pos: 0,
@@ -513,7 +513,7 @@ impl core::iter::FusedIterator for Tokenizer<'_> {}
 /// `content` is the span BETWEEN the quotes. The bytes were validated during tokenization, so every
 /// escape is well-formed here; a `\u` value that is not a scalar (a lone surrogate) is replaced with
 /// U+FFFD rather than failing, since decoding is infallible by contract.
-fn decode_content(input: &ByteRope, content: Span) -> String {
+fn decode_content(input: &ByteVec, content: Span) -> String {
     let mut bytes: Vec<u8> = Vec::with_capacity(content.len());
     let mut pos = content.start;
     let end = content.end;
@@ -578,7 +578,7 @@ fn push_scalar(bytes: &mut Vec<u8>, c: u32) {
 
 /// Read four hex digits at `at` and return their value; invalid/missing digits contribute nothing
 /// (the tokenizer already validated them, so this only runs over well-formed input).
-fn hex4(input: &ByteRope, at: usize) -> u32 {
+fn hex4(input: &ByteVec, at: usize) -> u32 {
     let mut v = 0u32;
     for i in 0..4 {
         let d = input.byte_at(at + i).unwrap_or(b'0');

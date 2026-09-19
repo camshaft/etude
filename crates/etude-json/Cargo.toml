@@ -13,11 +13,11 @@ repository.workspace = true
 [features]
 default = ["std"]
 # `std` only adds `std::error::Error` for the error type; the library floor is `no_std` + `alloc`.
-std = ["etude-byterope/std"]
+std = ["etude-bytevec/std"]
 
 [dependencies]
 # The input rope. Tokens reference byte ranges of it; nothing is copied out during tokenization.
-etude-byterope = { version = "0.1", path = "../etude-byterope", default-features = false }
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
 
 [dev-dependencies]
 # Differential oracle: the tokenizer is checked against serde_json (the reference implementation) —
