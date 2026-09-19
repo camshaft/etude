@@ -44,7 +44,7 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
 | to_decimal_string         | 64b    | 61.9 ns   | 72.2 ns    | **0.86**  |
-| to_decimal_string         | 256b   | 545 ns    | 248 ns     | 2.19      |
+| to_decimal_string         | 256b   | 486 ns    | 249 ns     | 1.95      |
 | to_decimal_string         | 1024b  | 3.76 µs   | 2.25 µs    | 1.67      |
 | to_decimal_string         | 4096b  | 24.1 µs   | 21.1 µs    | 1.14      |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
@@ -115,12 +115,14 @@ has no matching operation.)
 - **Single-limb `to_decimal` fast path** — a value that fits one `u64` limb (≤ ~1.8·10¹⁹) writes in a
   single chunk with no magnitude clone and no chunk-index `Vec`, instead of running the peel loop:
   64b 151 → 61.9 ns, crossing from 2.06× to **0.86× — now faster than num-bigint** at the small tier.
+- **Stack-scratch linear `to_decimal`** — the `2..=10`-limb peel loop runs over fixed stack buffers (the
+  quotient and the chunk list, both bounded by the limb threshold) instead of a heap `Vec` clone + chunk
+  `Vec`, so the whole narrow path allocates nothing: 256b 545 → 486 ns (2.19× → 1.95×).
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string at 256b (2.19×).** A 2–4-limb value still runs the peel loop with its scratch
-   `Vec`s; the ≤1-limb fast path already crosses 64b below 1.0. Extending the alloc-free path to a
-   handful of limbs (a stack scratch buffer) would pull 256b down too.
+1. **to_decimal_string at 256b/1024b (1.95× / 1.67×).** The narrow path is now alloc-free; the residual
+   is num-bigint's divide-by-`u64` inner loop and its recursive conversion constant factors.
 2. **to_decimal_string at 4096b (1.14×), sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the
    64b add/sub/mul tiers (~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest tiers is a
    subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd; at the
