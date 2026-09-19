@@ -153,9 +153,14 @@ fn bench_div_small(c: &mut Criterion) {
     let mut rng = Rng(0x5a11_d10e_0000_0001);
     let divisor = Big::from_i64(1_000_000_007); // a small (sub-limb) divisor, not a power of two
     let ndiv = to_num(&divisor);
+    let d_u64 = 1_000_000_007u64;
     for &(label, nbytes) in TIERS {
         let a = rng.big(nbytes);
         let na = to_num(&a);
+        // Native-scalar divmod: quotient + `u64` remainder, no `Big` divisor or `Big` remainder allocated.
+        g.bench_with_input(BenchmarkId::new("etude-u64", label), &a, |bch, a| {
+            bch.iter(|| black_box(a.divmod_u64(black_box(d_u64))))
+        });
         let d = divisor.clone();
         g.bench_with_input(BenchmarkId::new("etude", label), &(a, d), |bch, (a, d)| {
             bch.iter(|| black_box(a.divmod(black_box(d))))
