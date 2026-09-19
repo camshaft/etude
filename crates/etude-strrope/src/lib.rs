@@ -365,6 +365,28 @@ impl core::fmt::Debug for StrRope {
 #[cfg(test)]
 mod tests {
     use super::StrRope;
+
+    /// A conforming `Hasher` whose result depends on write-call boundaries (aHash-style): any
+    /// deterministic function of the write sequence is a legal Hasher, so fences using it catch
+    /// hash impls that leak internal chunk layout.
+    struct BoundarySensitiveHasher(u64);
+    impl core::hash::Hasher for BoundarySensitiveHasher {
+        fn write(&mut self, bytes: &[u8]) {
+            self.0 = self.0.wrapping_mul(31).wrapping_add(bytes.len() as u64);
+            for &b in bytes {
+                self.0 = self.0.wrapping_mul(131).wrapping_add(u64::from(b));
+            }
+        }
+        fn finish(&self) -> u64 {
+            self.0
+        }
+    }
+    fn boundary_sensitive_hash(r: &StrRope) -> u64 {
+        use core::hash::{Hash, Hasher};
+        let mut h = BoundarySensitiveHasher(0);
+        r.hash(&mut h);
+        h.finish()
+    }
     use etude_bytevec::ByteVec;
 
     /// Differential oracle vs `str`/`String`: arbitrary raw bytes, built into ropes under several
@@ -433,6 +455,11 @@ mod tests {
                         "Ord across chunkings"
                     );
                     assert_eq!(hash_of(&pair[0]), hash_of(&pair[1]), "Hash across chunkings");
+                    assert_eq!(
+                        boundary_sensitive_hash(&pair[0]),
+                        boundary_sensitive_hash(&pair[1]),
+                        "Hash across chunkings (write-boundary-sensitive hasher)"
+                    );
                 }
             });
     }
@@ -649,6 +676,29 @@ mod tests {
                 "width+precision for {content:?}"
             );
         }
+    }
+
+    /// The Hash contract (equal values yield equal hashes) must hold for every conforming
+    /// `Hasher`, including ones whose result depends on `write`-call boundaries (aHash-style —
+    /// `Hasher::write` makes no concatenation-equivalence promise). So StrRope's Hash must issue a
+    /// chunking-independent write sequence: hashing per internal chunk leaks the layout into the
+    /// hash and breaks `HashMap` lookups between equal ropes with different chunkings.
+    #[test]
+    fn hash_write_sequence_is_chunking_independent() {
+        let content = "hello world, héllo wörld";
+        let mut single = StrRope::new();
+        single.push_str(content);
+        let mut bytes = ByteVec::new();
+        for piece in content.as_bytes().chunks(3) {
+            bytes.push_back(bytes::Bytes::copy_from_slice(piece));
+        }
+        let chunked = StrRope::from_utf8(bytes).expect("valid");
+        assert_eq!(single, chunked, "equal content");
+        assert_eq!(
+            boundary_sensitive_hash(&single),
+            boundary_sensitive_hash(&chunked),
+            "Hash must not leak the internal chunk layout"
+        );
     }
 
     #[test]
