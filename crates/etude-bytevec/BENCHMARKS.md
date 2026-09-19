@@ -350,6 +350,27 @@ root with `get`. A cursor cache on `get` could close the sequential gap, but it 
 mutability on the `&self` read path (breaking `Sync`) to serve exactly the access pattern `chunks()`
 already serves — so `get` stays the clean random-access primitive and `chunks()` the sequential one.
 
+### Mixed read/write interleave (runnable: `cargo bench -p etude-bytevec -- mixed_rw`)
+
+A growing, randomly-queried buffer — an append-only log with random lookups, or a reassembly buffer
+inspected as it fills. Each of 64 rounds appends one chunk (write) and reads a byte at a random live
+offset (read), starting from a shallow or a deep backlog (aarch64, jemalloc, release):
+
+| start | rope | naive deque | ratio |
+|-------|------|-------------|-------|
+| from_shallow (4) | 3.28 µs | 2.51 µs | 1.31 |
+| from_deep (1000) | 7.79 µs | 29.1 µs | **0.27 (~3.7× faster)** |
+
+The tradeoff flips with backlog size, because the two halves stress opposite structures. The write is
+amortized-cheap for both; the read is where they diverge — the rope indexes O(log₃₂) down its size table
+regardless of length, while the deque must walk chunks O(n) to reach the offset. On a small buffer
+(`from_shallow`) the walk is short, so the read is cheap for both and the rope's per-chunk write overhead
+dominates — it trails 1.31× like the other shallow rows. On a large buffer (`from_deep`) each of the 64
+random reads walks up to ~1000 chunks in the deque but stays a shallow tree descent in the rope, so the
+read half swamps everything and the rope finishes **~3.7× ahead**. This is the point-lookup counterpart to
+the `slice`/`clone`/`append` structural wins: the more content a live buffer holds, the more the rope's
+O(log) addressing pays over a flat deque's O(n) reach.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat

@@ -1241,12 +1241,62 @@ fn bench_access_pattern(c: &mut Criterion) {
     g.finish();
 }
 
+/// Mixed read/write interleave — a growing, randomly-queried buffer (an append-only log with random
+/// lookups, or a reassembly buffer inspected as it fills). Each round appends one chunk (write) and
+/// reads a byte at a random *live* offset (read). The two halves stress opposite structures: the write
+/// is amortized-cheap for both, but the read diverges — the rope indexes O(log₃₂) down its size table
+/// while a flat deque must walk chunks O(n) to reach the offset, so the gap widens with the backlog.
+fn bench_mixed_rw(c: &mut Criterion) {
+    const ROUNDS: usize = 64;
+    let feed: Vec<Bytes> = (0..ROUNDS).map(|i| mtu_chunk(i as u8)).collect();
+    for &start in &[SHALLOW, DEEP] {
+        let label = if start == SHALLOW {
+            "from_shallow"
+        } else {
+            "from_deep"
+        };
+        let mut g = group(c, "mixed_rw");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter_batched_ref(
+                || rope_of(start),
+                |r| {
+                    let mut st = 0x9E37_79B9u64;
+                    for chunk in &feed {
+                        r.push_back(chunk.clone());
+                        st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let off = (st >> 33) as usize % r.len();
+                        black_box(r.byte_at(off));
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", label), |b| {
+            b.iter_batched_ref(
+                || naive_of(start),
+                |v| {
+                    let mut st = 0x9E37_79B9u64;
+                    for chunk in &feed {
+                        v.push_back(chunk.clone());
+                        st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let off = (st >> 33) as usize % v.len;
+                        black_box(byte_via_walk(v, off));
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_stream,
     bench_build_crossover,
     bench_churn_sweep,
     bench_access_pattern,
+    bench_mixed_rw,
     bench_push_back,
     bench_push_front,
     bench_mutating,
