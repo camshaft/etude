@@ -1,0 +1,35 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Slow, high-value checks that provide no per-PR signal (the full-workspace Miri run takes
+# 30-60+ min — longer than the fleet's push cadence, so per-PR it never completed while camping
+# a runner and starving the queue; operator-authorized move 2026-09-19). Runs nightly and on
+# demand; a red run is surfaced by the concierge to the owning lane, matching the advisory
+# land model.
+
+name: nightly
+
+on:
+  schedule:
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The buffer adapters use `unsafe`; check the whole workspace under Miri.
+  miri:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+      # bolero corpus discovery does a filesystem stat, which Miri's isolation blocks.
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: camshaft/rust-cache@v1
+      - run: cargo miri test --workspace --all-features
