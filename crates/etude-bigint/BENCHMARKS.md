@@ -40,6 +40,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | div_exact (quotient-only) | 256b   | 230 ns    | 232 ns     | **0.99**  |
 | div_exact (quotient-only) | 1024b  | 1.09 µs   | 1.02 µs    | 1.06      |
 | div_exact (quotient-only) | 4096b  | 11.4 µs   | 10.3 µs    | 1.10      |
+| div_small (n / 1-limb)    | 64b    | 24.8 ns   | 53.8 ns    | **0.46**  |
+| div_small (n / 1-limb)    | 256b   | 66.5 ns   | 122 ns     | **0.54**  |
+| div_small (n / 1-limb)    | 1024b  | 128 ns    | 465 ns     | **0.27**  |
+| div_small (n / 1-limb)    | 4096b  | 377 ns    | 1.70 µs    | **0.22**  |
 | gcd                       | 64b    | 843 ns    | 1.13 µs    | **0.74**  |
 | gcd                       | 256b   | 4.09 µs   | 4.71 µs    | **0.87**  |
 | gcd                       | 1024b  | 23.5 µs   | 23.1 µs    | 1.02      |
@@ -120,6 +124,12 @@ has no matching operation.)
   2-by-1 reciprocal (Möller–Granlund; `10¹⁹` is already normalized) — a `wide_mul` + two corrections, no
   128-bit divide: to_decimal/256b 486 → 342 ns (1.95× → **1.38×**). (64b is the single-limb write path,
   unchanged; 1024b+ use the recursive multi-limb divmod, not this peel.)
+- **Reciprocal single-limb `div_rem_limb_inplace`** — a bignum ÷ a single-limb divisor (`n / small`, the
+  `divmod`/`div_exact` single-limb path) did one `u128` divide *per limb* (each a `__udivti3` libcall).
+  Now: a 1-limb dividend takes a native `u64 / u64`; wider dividends build one reciprocal (normalizing the
+  divisor) and use `udiv_qrnnd_preinv` per limb — one libcall amortized, not `n`. vs num-bigint (`n /
+  small`): 64b 29 → 24.8 ns (**0.46×**), 256b 82 → 66.5 ns (**0.54×**), 1024b 305 → 128 ns (**0.27×**),
+  4096b 1.22 → 0.38 µs (**0.22×**) — beats num-bigint at every tier.
 - **In-place divide-by-limb in `to_decimal_string`** — the ÷10¹⁹ chunk loop divides the magnitude in
   place (`div_rem_limb_inplace`), so no per-chunk quotient `Vec` is allocated: 1024b 4.84 → 4.37 µs.
 - **Recursive divide-and-conquer `to_decimal_string`** — above a 10-limb crossover, split the magnitude

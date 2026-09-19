@@ -146,6 +146,30 @@ fn bench_div_exact(c: &mut Criterion) {
     g.finish();
 }
 
+/// Division by a SMALL (single-limb) divisor — the `n / small` shape (a bignum over a scalar), which
+/// takes the single-limb `div_rem_limb_inplace` path rather than Knuth. vs num-bigint's `/`.
+fn bench_div_small(c: &mut Criterion) {
+    let mut g = group(c, "div_small");
+    let mut rng = Rng(0x5a11_d10e_0000_0001);
+    let divisor = Big::from_i64(1_000_000_007); // a small (sub-limb) divisor, not a power of two
+    let ndiv = to_num(&divisor);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        let d = divisor.clone();
+        g.bench_with_input(BenchmarkId::new("etude", label), &(a, d), |bch, (a, d)| {
+            bch.iter(|| black_box(a.divmod(black_box(d))))
+        });
+        let nd = ndiv.clone();
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &(na, nd),
+            |bch, (a, d)| bch.iter(|| black_box((a / d, a % d))),
+        );
+    }
+    g.finish();
+}
+
 fn bench_gcd(c: &mut Criterion) {
     use num_integer::Integer;
     binop(c, "gcd", HEAVY_TIERS, |a, b| a.gcd(b), |a, b| a.gcd(b));
@@ -249,6 +273,7 @@ criterion_group!(
     bench_mul,
     bench_divmod,
     bench_div_exact,
+    bench_div_small,
     bench_gcd,
     bench_cmp,
     bench_to_decimal,
