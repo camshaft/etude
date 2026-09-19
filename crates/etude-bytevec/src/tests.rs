@@ -1238,6 +1238,7 @@ fn differential_against_model() {
         StartsEndsWith(usize, Vec<u8>),
         DoubleEndedCheck,
         InterleavedChunksCheck(Vec<bool>),
+        AsContiguousCheck,
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1517,6 +1518,16 @@ fn differential_against_model() {
                         front, want,
                         "fuzz-interleaved front/back must partition the chunks"
                     );
+                }
+                Op::AsContiguousCheck => {
+                    // The only soundness face of as_contiguous: a Some view must be the ENTIRE
+                    // content (never a partial chunk of a multi-chunk rope), on every shape the
+                    // harness reaches. None is always a legal (conservative) answer.
+                    if let Some(view) = rope.as_contiguous() {
+                        assert_eq!(view.len(), rope.len(), "as_contiguous length");
+                        assert_eq!(view, &model[..], "as_contiguous content");
+                        assert_eq!(rope.chunks().len(), usize::from(!view.is_empty()));
+                    }
                 }
             }
             assert_eq!(rope.len(), model.len(), "len after {op:?}");
