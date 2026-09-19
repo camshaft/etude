@@ -44,9 +44,11 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | normalize  | 64b    | 894 ns    | 1.22 µs      | **0.74**  |
 | normalize  | 256b   | 4.16 µs   | 4.97 µs      | **0.84**  |
 | normalize  | 1024b  | 24.8 µs   | 24.5 µs      | 1.01      |
-| cmp        | 64b    | 50.3 ns   | 54.4 ns      | **0.93**  |
-| cmp        | 256b   | 94.3 ns   | 145 ns       | **0.65**  |
-| cmp        | 1024b  | 160 ns    | 178 ns       | **0.90**  |
+| cmp        | 64b    | 50.9 ns   | 54.3 ns      | **0.94**  |
+| cmp        | 256b   | 94.5 ns   | 145 ns       | **0.65**  |
+| cmp        | 1024b  | 78.2 ns   | 179 ns       | **0.44**  |
+| cmp        | 2048b  | 812 ns    | 1.27 µs      | **0.64**  |
+| cmp        | 4096b  | 146 ns    | 561 ns       | **0.26**  |
 | add_eqden  | 64b    | 935 ns    | 1.36 µs      | **0.69**  |
 | add_eqden  | 256b   | 4.20 µs   | 4.99 µs      | **0.84**  |
 | add_eqden  | 1024b  | 25.2 µs   | 25.3 µs      | 1.00      |
@@ -56,8 +58,8 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 
 **We now beat num-rational on add, sub, mul, div, cmp (ALL tiers), recip (256b/1024b), normalize
 (64b/256b), and the equal-denominator add/cmp fast paths** — a decisive across-the-board lead. `cmp` is
-now a win at every tier (the 1024b cell crossed 1.06× → 0.90×). The only non-wins left are at parity or
-minor:
+now a decisive win at every tier (the large tiers by 1.5–3.8×, via the continued-fraction `q ∈ {0,1}`
+fast path). The only non-wins left are at parity or minor:
 
 1. **`recip`/`neg`/`abs` @64b — 1.5–2.0× (clone-bound).** All three are O(limbs) sign/swap ops that only
    clone the components; at 64b the small `Big` clone dominates, and etude-bigint's 1-limb `Big` clone is
@@ -68,10 +70,12 @@ minor:
    gcd; parity with num-rational's Stein gcd at 1024b, a slight loss at 4096b. The double-word-Lehmer/HGCD
    headroom in etude-bigint is deferred (a narrow, acceptable gap — see the coordination note in the log).
 
-The former `cmp` @1024b near-parity was closed by a **borrow-first-iteration** specialization of the
-continued-fraction comparison: the components are passed by reference and the first Euclidean step
-allocates nothing, so operands that differ in integer part (the common case) decide with zero operand
-clones. Only a same-integer-part tie with fractional remainders on both sides clones the two denominators
+The large-tier `cmp` lead comes from the continued-fraction comparison, sharpened two ways: a
+**borrow-first-iteration** (components passed by reference; the first Euclidean step allocates nothing and,
+when integer parts differ — the common case — decides with zero operand clones), and a **`q ∈ {0,1}` fast
+path** (`divmod_small_q`) that replaces the per-step `divmod` with a `Big` comparison / one subtraction,
+since similar-magnitude operands have quotient 0 or 1. The latter took 1024b 0.90× → **0.44×** and 4096b
+0.73× → **0.26×**. Only a same-integer-part tie with fractional remainders on both sides clones the two denominators
 and recurses. `abs` is now taken only when both operands are negative (denominators are already positive).
 
 ## Native i128 fast path — small (i64-fitting) operands
@@ -244,3 +248,9 @@ they are attacking next — re-bench on each render land.
   `String`. Removes the `format_args`/`Display` dispatch overhead and mid-render reallocations. `to_string`
   improved at every tier — 64b 0.65× → **0.36×** (~halved), 256b 0.98× → **0.72×**, 1024b 1.53× → 1.43×,
   4096b 1.04× → 1.02×. A local render lever that had been mis-attributed entirely to bignum `to_decimal`.
+- **slice 22** — continued-fraction `cmp` `divmod_small_q`: each CF step's operands are within a factor of
+  ~2, so `⌊a/b⌋ ∈ {0, 1}` dominates; replace the full `divmod` (schoolbook/reciprocal) with a `Big`
+  comparison (`q = 0`) or comparison + one subtraction (`q = 1`), falling back to `divmod` only at `q >= 2`.
+  Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
+  (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
+  oracle + the 40-pair `cmp_large_continued_fraction` test.
