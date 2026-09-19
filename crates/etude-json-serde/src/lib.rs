@@ -19,9 +19,11 @@
 //! token stream.
 //!
 //! # Strings and numbers
-//! - Strings arrive as [`RopeStr::Owned`] via `Token::decode_string` for now. The zero-copy
-//!   [`RopeStr::Borrowed`] arm (driven by the token's has-escapes flag) lands when
-//!   `Token::decode_str_rope` merges (etude-json #147).
+//! - Strings use the has-escapes split: an escape-free string is a zero-copy [`RopeStr::Borrowed`]
+//!   (an O(1) [`StrRope`] slice of the source rope — the copy-avoidance payoff); only an escaped
+//!   string is materialized into a [`RopeStr::Owned`] buffer via `Token::decode_string`. (etude-json
+//!   #147's `decode_str_rope` will let the escaped case return a built leaf too; the common zero-copy
+//!   case needs only `Token::string_span` + `string_has_escapes`, which exist today.)
 //! - Numbers arrive as an [`etude_serde::NumberToken`] built from `Token::number_parts` (component
 //!   spans) — no value is parsed here; a value type consumes the spans on demand (§6).
 
@@ -33,6 +35,7 @@ extern crate alloc;
 use etude_bytevec::ByteVec;
 use etude_json::{Token, TokenKind, Tokenizer};
 use etude_serde::{Deserializer, Error, MapAccess, NumberToken, RopeStr, SeqAccess, Visitor};
+use etude_strrope::StrRope;
 
 /// Deserialize the single JSON value in `input` (a rope), driving `visitor`. Errors if the bytes are
 /// not exactly one grammatical JSON value (trailing tokens, unterminated containers, missing
@@ -115,11 +118,27 @@ impl Deserializer for JsonDeserializer<'_, '_> {
             TokenKind::True => visitor.visit_bool(true),
             TokenKind::False => visitor.visit_bool(false),
             TokenKind::String => {
-                // Owned for now; the zero-copy Borrowed arm lands with decode_str_rope (#147).
-                let s = token
-                    .decode_string(self.stream.input)
-                    .expect("String token decodes");
-                visitor.visit_str(RopeStr::Owned(s))
+                let input = self.stream.input;
+                // Copy-avoidance payoff: an escape-free string's content is already valid UTF-8 in the
+                // source, so hand it as an O(1) structural share (RopeStr::Borrowed) — no unescape, no
+                // allocation. Only an escaped string must be materialized into an Owned buffer. The
+                // decoder picks the arm from its cheap has-escapes flag with no re-scan. (#147's
+                // decode_str_rope will further let the escaped case return a built leaf; not needed for
+                // the zero-copy common case, which this handles today.)
+                let has_escapes = token
+                    .string_has_escapes()
+                    .expect("String token has an escapes flag");
+                if has_escapes {
+                    let s = token.decode_string(input).expect("String token decodes");
+                    visitor.visit_str(RopeStr::Owned(s))
+                } else {
+                    let span = token
+                        .string_span()
+                        .expect("String token has a content span");
+                    let rope = StrRope::from_utf8(input.slice(span.range()))
+                        .expect("tokenizer guarantees escape-free string content is valid UTF-8");
+                    visitor.visit_str(RopeStr::Borrowed(rope))
+                }
             }
             TokenKind::Number => {
                 // Slice each component span into an O(1) sub-rope so the NumberToken is self-contained

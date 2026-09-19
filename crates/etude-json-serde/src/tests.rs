@@ -174,6 +174,61 @@ fn grammar_violations_the_lexer_accepts_are_rejected() {
     }
 }
 
+/// A [`Visitor`] that reports, for a string value, whether it arrived zero-copy ([`RopeStr::Borrowed`])
+/// plus the decoded content — so a test can pin the has-escapes split.
+struct StrArm;
+
+impl Visitor for StrArm {
+    type Value = (bool, String);
+
+    fn visit_str(self, s: RopeStr) -> Result<(bool, String), Error> {
+        Ok((s.is_borrowed(), s.to_string()))
+    }
+    fn visit_null(self) -> Result<(bool, String), Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_bool(self, _: bool) -> Result<(bool, String), Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_bytes(self, _: etude_serde::RopeBytes) -> Result<(bool, String), Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_number(self, _: NumberToken) -> Result<(bool, String), Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_seq<A: SeqAccess>(self, _: A) -> Result<(bool, String), Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_map<A: MapAccess>(self, _: A) -> Result<(bool, String), Error> {
+        Err(Error::custom("not a string"))
+    }
+}
+
+#[test]
+fn escape_free_strings_are_borrowed_escaped_are_owned() {
+    // (input, expected_is_borrowed, expected_content)
+    let cases: &[(&[u8], bool, &str)] = &[
+        (b"\"hello\"", true, "hello"), // plain ASCII -> zero-copy
+        (b"\"\"", true, ""),           // empty -> zero-copy
+        (b"\"unicode \xc3\xa9\"", true, "unicode \u{e9}"), // literal UTF-8, no escapes -> zero-copy
+        (b"\"a\\nb\"", false, "a\nb"), // \n escape -> materialized
+        (b"\"\\u0041\"", false, "A"),  // \u escape -> materialized
+        (b"\"tab\\tend\"", false, "tab\tend"), // \t escape -> materialized
+    ];
+    for (bytes, want_borrowed, want_content) in cases {
+        for chunk in [1usize, bytes.len()] {
+            let (is_borrowed, content) = from_rope(&rope(bytes, chunk), StrArm).unwrap();
+            assert_eq!(
+                is_borrowed,
+                *want_borrowed,
+                "borrow-arm mismatch for {:?}",
+                String::from_utf8_lossy(bytes)
+            );
+            assert_eq!(&content, want_content);
+        }
+    }
+}
+
 #[test]
 fn nested_structure_threads_through_the_seam() {
     // A deeper document: the no-'de SeqAccess/MapAccess threading must carry nested containers.

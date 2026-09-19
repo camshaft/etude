@@ -21,6 +21,8 @@ etude-json = { version = "0.1", path = "../etude-json", default-features = false
 etude-serde = { version = "0.1", path = "../etude-serde", default-features = false }
 # The input rope (string decode is resolved against it).
 etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
+# Zero-copy string values: an escape-free string's content is handed as an O(1) StrRope slice.
+etude-strrope = { version = "0.1", path = "../etude-strrope", default-features = false }
 
 [dev-dependencies]
 # Differential oracle: the adapter is now a grammar-enforcing parser, so its accept/reject must match
