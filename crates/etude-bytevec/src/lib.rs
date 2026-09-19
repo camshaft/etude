@@ -2858,6 +2858,15 @@ impl ByteVec {
 ///
 /// Carries a lifetime tied to the source rope; the bytes are held via an O(1)-shared clone, so
 /// iterating/reading does not disturb the source.
+///
+/// # Performance
+///
+/// Creating a reader is O(1): the source is captured by a structural-shared clone, not copied. The
+/// tradeoff falls on iteration — because the source stays live, draining the reader copies-on-write the
+/// shared spine as it advances, so a full read costs about as much as copying the spine once (the
+/// "Reader" row in `BENCHMARKS.md` measures this). When you do not need the source afterward, draining
+/// it directly (`pop_front` / `advance`, or handing it to a consumer) skips the copy-on-write; reach for
+/// a reader when the source must stay intact.
 pub struct Reader<'a> {
     inner: ByteVec,
     _borrow: core::marker::PhantomData<&'a ByteVec>,
