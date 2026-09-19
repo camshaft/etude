@@ -2989,6 +2989,17 @@ impl core::ops::Index<usize> for ByteVec {
 impl Extend<Bytes> for ByteVec {
     #[inline]
     fn extend<I: IntoIterator<Item = Bytes>>(&mut self, iter: I) {
+        let iter = iter.into_iter();
+        // Extending an empty rope is exactly building one. When the source is *known* to exceed a flat
+        // tier, reuse `FromIterator`'s bulk bottom-up path: it folds whole `FANOUT` leaf blocks straight
+        // into the tree, avoiding the incremental promote + per-chunk tail-fold a `push_back` loop pays.
+        // The gate matches `from_iter`'s own threshold, so a small or size-unknown source (and the
+        // shallow streaming path, which must not regress) stays on the plain loop — no `from_iter`
+        // indirection. A non-empty rope keeps the loop too (it appends to existing structure).
+        if self.is_empty() && iter.size_hint().0 > PROMOTE_AT {
+            *self = Self::from_iter(iter);
+            return;
+        }
         for chunk in iter {
             self.push_back(chunk);
         }
