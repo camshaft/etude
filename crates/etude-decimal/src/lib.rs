@@ -402,9 +402,19 @@ impl Decimal {
         // 64-bit coefficient fits `i128` (its product may too). Read the limbs straight into `i128` and box
         // only the result — no `Big` multiply or allocation — falling through on `i128` overflow.
         if let (Some(ca), Some(cb)) = (self.coeff.to_i128_checked(), other.coeff.to_i128_checked())
-            && let (Some(coeff), Some(exp)) = (ca.checked_mul(cb), self.exp.checked_add(other.exp))
+            && let Some(exp) = self.exp.checked_add(other.exp)
         {
-            return Decimal::new(Big::from_i128(coeff), exp);
+            if let Some(coeff) = ca.checked_mul(cb) {
+                return Decimal::new(Big::from_i128(coeff), exp);
+            }
+            // The signed product overflowed `i128`, but the magnitude may still fit `u128` — the top of the
+            // `64b × 64b` range (both coefficients below `2^64`, so the product is below `2^128`). Multiply
+            // the magnitudes in `u128` and box the result with its sign; only a truly wider product (a
+            // coefficient past `2^64`) overflows here and falls to the exact `Big` multiply.
+            if let Some(mag) = ca.unsigned_abs().checked_mul(cb.unsigned_abs()) {
+                let neg = ca.is_negative() ^ cb.is_negative();
+                return Decimal::new(big_from_u128(mag, neg), exp);
+            }
         }
         // Exponents come from parsing bounded to ≤18 digits, so their sum fits i64 for any realistic
         // input; saturate only in the astronomically-extreme case rather than wrap.
@@ -994,6 +1004,21 @@ fn pow10_i64(k: u32) -> Option<i64> {
 /// wider native arithmetic fast path to scale a coefficient by a power of ten.
 fn pow10_i128(k: u32) -> Option<i128> {
     10i128.checked_pow(k)
+}
+
+/// Build a signed [`Big`] from a `u128` magnitude and a sign — for a product that fits `u128` but whose
+/// magnitude may exceed `i128` (the top of the `64b × 64b` multiply range, `[2^127, 2^128)`). A magnitude
+/// within `i64` boxes through the cheap [`Big::from_i64`]; a wider one writes its little-endian bytes into a
+/// stack sign-magnitude buffer (one limb `Vec` allocated, no wider intermediate).
+fn big_from_u128(mag: u128, negative: bool) -> Big {
+    if mag <= i64::MAX as u128 {
+        let v = mag as i64;
+        return Big::from_i64(if negative { -v } else { v });
+    }
+    let mut buf = [0u8; 17]; // 1 sign byte + 16 magnitude bytes
+    buf[0] = negative as u8;
+    buf[1..].copy_from_slice(&mag.to_le_bytes());
+    Big::from_sign_magnitude_bytes(&buf)
 }
 
 /// `10^k` as a nonnegative [`Big`], by binary exponentiation (base-10, squaring). `10^0 == 1`.

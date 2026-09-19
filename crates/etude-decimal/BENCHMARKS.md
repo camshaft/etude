@@ -57,13 +57,18 @@ of the operand — no intermediate negated value is allocated.
 
 ### `mul` — exact product
 
+The `64b` tier multiplies natively: two coefficients that fit `i128` multiply in `i128`, and if that
+overflows (the top of the `64b × 64b` range, `[2^127, 2^128)`) the *magnitudes* multiply in `u128` and box
+with their sign — so the whole `64b` tier skips the `Big` multiply. Wider tiers use `Big::mul` and carry
+the cheaper `normalize` divisibility check (#205); the mid/large ratios fell accordingly.
+
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 63.77 ns  | 36.29 ns  | 1.76 |
-| 256b  | 122.23 ns | 65.07 ns  | 1.88 |
-| 1024b | 580.61 ns | 402.67 ns | 1.44 |
-| 2048b | 1.695 µs  | 1.511 µs  | 1.12 |
-| 4096b | 5.743 µs  | 5.010 µs  | 1.15 |
+| 64b   | 45.27 ns  | 31.55 ns  | 1.44 |
+| 256b  | 86.94 ns  | 63.13 ns  | 1.38 |
+| 1024b | 451.53 ns | 402.05 ns | 1.12 |
+| 2048b | 1.521 µs  | 1.506 µs  | 1.01 |
+| 4096b | 5.466 µs  | 5.009 µs  | 1.09 |
 
 ### `add_small` / `sub_small` / `mul_small` — i64-fitting values (the common real decimal) — we win
 
