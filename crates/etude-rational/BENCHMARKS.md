@@ -38,9 +38,9 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | normalize  | 64b    | 894 ns    | 1.22 µs      | **0.74**  |
 | normalize  | 256b   | 4.16 µs   | 4.97 µs      | **0.84**  |
 | normalize  | 1024b  | 24.8 µs   | 24.5 µs      | 1.01      |
-| cmp        | 64b    | 51.0 ns   | 54.3 ns      | **0.94**  |
-| cmp        | 256b   | 95.2 ns   | 143 ns       | **0.67**  |
-| cmp        | 1024b  | 192 ns    | 181 ns       | 1.06      |
+| cmp        | 64b    | 50.3 ns   | 54.4 ns      | **0.93**  |
+| cmp        | 256b   | 94.3 ns   | 145 ns       | **0.65**  |
+| cmp        | 1024b  | 160 ns    | 178 ns       | **0.90**  |
 | add_eqden  | 64b    | 935 ns    | 1.36 µs      | **0.69**  |
 | add_eqden  | 256b   | 4.20 µs   | 4.99 µs      | **0.84**  |
 | add_eqden  | 1024b  | 25.2 µs   | 25.3 µs      | 1.00      |
@@ -48,19 +48,22 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | cmp_eqden  | 256b   | 6.72 ns   | 8.88 ns      | **0.76**  |
 | cmp_eqden  | 1024b  | 11.5 ns   | 14.2 ns      | **0.81**  |
 
-**We now beat num-rational on add, sub, mul, div, cmp (64b/256b), recip (256b/1024b), normalize
-(64b/256b), and the equal-denominator add/cmp fast paths** — a decisive across-the-board lead. There are
-no remaining hard losses; the non-wins are at parity or minor:
+**We now beat num-rational on add, sub, mul, div, cmp (ALL tiers), recip (256b/1024b), normalize
+(64b/256b), and the equal-denominator add/cmp fast paths** — a decisive across-the-board lead. `cmp` is
+now a win at every tier (the 1024b cell crossed 1.06× → 0.90×). The only non-wins left are at parity or
+minor:
 
-1. **`cmp` @1024b — 1.06× (near parity).** The size-thresholded hybrid routes large operands to the
-   continued-fraction comparison (via the O(1) `Big::byte_len` probe), collapsing this from 4.33× to
-   ~parity. The residual ~11 ns is the CF setup (the `abs`/clone of the four components before the loop);
-   a borrow-first-iteration specialization could shave it. The small tiers stay wins (the probe adds ~6 ns
-   but 64b/256b remain 0.94/0.67).
-2. **`recip` @64b — 2.04× (clone-bound).** recip is already O(limbs) (gcd-free swap+sign); at 64b the two
+1. **`recip` @64b — 2.04× (clone-bound).** recip is already O(limbs) (gcd-free swap+sign); at 64b the two
    small `Vec` clones dominate. A clone/alloc-avoiding path could reach parity. Minor.
-3. **`normalize`/`add_eqden` @1024b — ~1.00 (parity).** Both bottom out on a single large gcd; parity
-   with num-rational's Stein gcd. Further headroom is a Lehmer-gcd item in etude-bigint (raised).
+2. **`normalize`/`add_eqden` @1024b — ~1.00 (parity), ~1.10× @4096b.** Both bottom out on a single large
+   gcd; parity with num-rational's Stein gcd at 1024b, a slight loss at 4096b. The double-word-Lehmer/HGCD
+   headroom in etude-bigint is deferred (a narrow, acceptable gap — see the coordination note in the log).
+
+The former `cmp` @1024b near-parity was closed by a **borrow-first-iteration** specialization of the
+continued-fraction comparison: the components are passed by reference and the first Euclidean step
+allocates nothing, so operands that differ in integer part (the common case) decide with zero operand
+clones. Only a same-integer-part tie with fractional remainders on both sides clones the two denominators
+and recurses. `abs` is now taken only when both operands are negative (denominators are already positive).
 
 ## Native i128 fast path — small (i64-fitting) operands
 
@@ -176,3 +179,8 @@ bignum-render-bound — not addressable locally; re-bench on each etude-bigint r
   Recorded the remaining 1024b/4096b render losses as O(n²)-peel-bound, awaiting a subquadratic
   divide-and-conquer `to_decimal` (coordination steer sent to etude-bigint; render is the higher-value
   target over a ≥1024b gcd crossing, which is only ~parity/1.10×).
+- **slice 16** — **`cmp` @1024b crossing** (1.06× → 0.90×): borrow-first-iteration of the continued-fraction
+  comparison. `cmp_magnitude` now takes the components by reference; the first Euclidean step allocates
+  nothing and, when the integer parts differ (the common case), decides with zero operand clones. Only a
+  same-integer-part tie recurses (cloning the two denominators once, via `cmp_magnitude_owned`). `abs` is
+  taken only when both operands are negative. `cmp` now wins every tier; no regression (64b 0.93, 256b 0.65).
