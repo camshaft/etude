@@ -209,13 +209,7 @@ fn assert_single(bytes: &[u8], kind: TokenKind) {
     let toks = tokenize_all(bytes).expect("valid single token");
     assert_eq!(toks.len(), 1, "{:?}", String::from_utf8_lossy(bytes));
     assert_eq!(toks[0].kind(), kind);
-    assert_eq!(
-        toks[0].span(),
-        Span {
-            start: 0,
-            end: bytes.len()
-        }
-    );
+    assert_eq!(toks[0].span(), Span::new(0, bytes.len()));
 }
 
 #[test]
@@ -262,13 +256,7 @@ fn tokenizes_numbers() {
         let toks = tokenize_all(n).unwrap();
         assert_eq!(toks.len(), 1, "{:?}", String::from_utf8_lossy(n));
         assert_eq!(toks[0].kind(), TokenKind::Number);
-        assert_eq!(
-            toks[0].span(),
-            Span {
-                start: 0,
-                end: n.len()
-            }
-        );
+        assert_eq!(toks[0].span(), Span::new(0, n.len()));
         assert_eq!(
             toks[0].number_is_integer(),
             Some(*is_int),
