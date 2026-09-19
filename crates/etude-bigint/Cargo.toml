@@ -4,11 +4,16 @@
 [package]
 name = "etude-bigint"
 version = "0.1.0"
-description = "Arbitrary-precision signed integers: a small no_std base-2^32 limb library with a canonical sign-magnitude form"
+description = "Arbitrary-precision signed integers: a small no_std limb library with a canonical sign-magnitude form"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[features]
+# Force the u32-half-synthesized widening multiply (the wasm/32-bit path) on any target, so the
+# differential oracle can exercise it on a 64-bit host. Off by default (64-bit uses the u128 multiply).
+synth-mul = []
 
 [dependencies]
 

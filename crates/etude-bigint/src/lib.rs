@@ -133,25 +133,30 @@ impl Big {
     }
 
     /// `a * b` over magnitudes (O(n·m) schoolbook), returning a normalized magnitude. Each limb product
-    /// is a native `u64 * u64 -> u128`, and a `u128` accumulator carries the high half forward.
+    /// is a widening `u64 * u64 -> (high, low)` via [`wide_mul`], accumulated with `u64` carries — no
+    /// `u128` on the multiply path, so it is native on wasm (see [`wide_mul`]).
     fn mul_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
         if a.is_empty() || b.is_empty() {
             return Vec::new();
         }
         let mut out = alloc::vec![0u64; a.len() + b.len()];
         for (i, &av) in a.iter().enumerate() {
-            let mut carry = 0u128;
+            let mut carry = 0u64;
             for (j, &bv) in b.iter().enumerate() {
-                let cur = out[i + j] as u128 + (av as u128) * (bv as u128) + carry;
-                out[i + j] = cur as u64;
-                carry = cur >> 64;
+                let (hi, lo) = wide_mul(av, bv);
+                // out[i+j] += lo + carry; the two carry-outs and hi form the next carry (which the
+                // schoolbook invariant keeps < 2^64, so this add cannot overflow).
+                let (s1, c1) = out[i + j].overflowing_add(lo);
+                let (s2, c2) = s1.overflowing_add(carry);
+                out[i + j] = s2;
+                carry = hi + c1 as u64 + c2 as u64;
             }
             // Propagate the final carry into the next limb (and beyond, if it cascades).
             let mut k = i + b.len();
             while carry != 0 {
-                let cur = out[k] as u128 + carry;
-                out[k] = cur as u64;
-                carry = cur >> 64;
+                let (s, c) = out[k].overflowing_add(carry);
+                out[k] = s;
+                carry = c as u64;
                 k += 1;
             }
         }
@@ -596,6 +601,52 @@ impl Big {
         b.normalize();
         b
     }
+}
+
+/// Widening multiply `u64 * u64 -> (high, low)`.
+///
+/// On 64-bit targets this is one native `u128` multiply. On 32-bit targets — including `wasm32`, which
+/// has native 64-bit integers but EMULATES 128-bit ones (a `u64 * u64 -> u128` lowers to a `__multi3`
+/// libcall) — it is synthesized from four native `u32 * u32 -> u64` partial products, so it stays on
+/// native wasm `i64` ops with no 128-bit intrinsic. The limb STORAGE is `u64` on both (native on wasm);
+/// only this intermediate differs. The `synth-mul` feature forces the synthesized path for testing.
+#[cfg(all(
+    not(feature = "synth-mul"),
+    not(target_pointer_width = "16"),
+    not(target_pointer_width = "32")
+))]
+#[inline]
+fn wide_mul(a: u64, b: u64) -> (u64, u64) {
+    let p = (a as u128) * (b as u128);
+    ((p >> 64) as u64, p as u64)
+}
+
+#[cfg(any(
+    feature = "synth-mul",
+    target_pointer_width = "16",
+    target_pointer_width = "32"
+))]
+#[inline]
+fn wide_mul(a: u64, b: u64) -> (u64, u64) {
+    // Split each operand into 32-bit halves; every partial product is a native u32*u32 -> u64.
+    let (a_lo, a_hi) = (a & 0xffff_ffff, a >> 32);
+    let (b_lo, b_hi) = (b & 0xffff_ffff, b >> 32);
+    let ll = a_lo * b_lo;
+    let lh = a_lo * b_hi;
+    let hl = a_hi * b_lo;
+    let hh = a_hi * b_hi;
+    // Sum the four partials at their 2^0 / 2^32 / 2^64 weights with native u64 carries. `x << 32` keeps
+    // a partial's low half (its high half feeds `hi` via `x >> 32`); the true high 64 bits fit u64, so
+    // the `hi` additions never overflow.
+    let mut lo = ll;
+    let mut hi = hh;
+    let (s, c1) = lo.overflowing_add(lh << 32);
+    lo = s;
+    hi += (lh >> 32) + c1 as u64;
+    let (s, c2) = lo.overflowing_add(hl << 32);
+    lo = s;
+    hi += (hl >> 32) + c2 as u64;
+    (hi, lo)
 }
 
 /// Strip trailing zero limbs from a magnitude (little-endian).
