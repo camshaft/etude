@@ -64,6 +64,8 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | clone                     | 1024b  | 13.8 ns   | 14.0 ns    | **0.98**  |
 | clone                     | 4096b  | 23.1 ns   | 23.1 ns    | 1.00      |
 | from_i64                  | —      | 12.2 ns   | 6.86 ns    | 1.77      |
+| from_i128                 | 2-limb | 12.0 ns   | 23.1 ns    | **0.52**  |
+| to_i128_checked           | 2-limb | 2.38 ns   | 4.72 ns    | **0.50**  |
 | from_base_10_pow_k        | 64b    | 22.1 ns   | 91.8 ns    | **0.24**  |
 | from_base_10_pow_k        | 256b   | 38.4 ns   | 266 ns     | **0.14**  |
 | from_base_10_pow_k        | 1024b  | 240 ns    | 772 ns     | **0.31**  |
@@ -276,6 +278,12 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   247 → 75 ns (**≈ −70%**); two's-complement 256b 153 → 58 ns (**closing the old 1.22× loss to 0.47×**),
   1024b 239 → 83 ns (**0.31×**). All tiers of both round-trips now beat / have no num-bigint peer. The
   decode direction was already reserved; this was pure encode-side realloc.
+- **Limb-level `from_i128` / `to_i128_checked`** — the i128 twins of `from_i64` / `to_i64_checked`, reading
+  and writing the ≤ 2 magnitude limbs directly (no byte buffer), for a downstream small-operand arithmetic
+  fast path (etude-decimal widening its native add/sub to coefficients in `[2^63, 2^64)`). vs num-bigint's
+  `From<i128>` / `ToPrimitive::to_i128`: `from_i128` 12.0 vs 23.1 ns (**0.52×**), `to_i128_checked` 2.38 vs
+  4.72 ns (**0.50×**). The byte-serializer round-trip (`i128_*_sign_magnitude_bytes`) was measured slower
+  than `Big::add` for this, so the direct limb pair is what makes the fast path a win.
 
 ## Where the gaps remain (optimization order)
 

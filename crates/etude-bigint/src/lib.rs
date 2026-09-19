@@ -489,6 +489,24 @@ impl Big {
         }
     }
 
+    /// Box a signed 128-bit int as a `Big`. The limb-level twin of [`Big::from_i64`] (no byte buffer),
+    /// for a small-operand arithmetic fast path that computes in `i128` and boxes the result directly.
+    pub fn from_i128(v: i128) -> Big {
+        if v == 0 {
+            return Big::zero();
+        }
+        let neg = v < 0;
+        let m = v.unsigned_abs(); // u128; exact for i128::MIN (= 2¹²⁷), fits ≤ 2 limbs
+        let (lo, hi) = (m as u64, (m >> 64) as u64);
+        // Canonical: drop the high limb when it is zero (the low limb is then nonzero, since m ≠ 0).
+        let mag = if hi == 0 {
+            alloc::vec![lo]
+        } else {
+            alloc::vec![lo, hi]
+        };
+        Big { neg, mag }
+    }
+
     /// Narrow to `i64` if it fits, else `None`.
     pub fn to_i64_checked(&self) -> Option<i64> {
         if self.mag.len() > 1 {
@@ -505,6 +523,33 @@ impl Big {
             }
         } else if m <= i64::MAX as u64 {
             Some(m as i64)
+        } else {
+            None
+        }
+    }
+
+    /// Narrow to `i128` if it fits, else `None`. The limb-level twin of [`Big::to_i64_checked`] (no byte
+    /// buffer) — reads the ≤ 2 magnitude limbs directly, for a small-operand arithmetic fast path that
+    /// widens its inputs to `i128`. Same result as `i128_from_sign_magnitude_bytes(&to_sign_magnitude_bytes())`.
+    pub fn to_i128_checked(&self) -> Option<i128> {
+        if self.mag.len() > 2 {
+            return None; // needs >128 bits — cannot fit i128
+        }
+        let lo = self.mag.first().copied().unwrap_or(0) as u128;
+        let hi = self.mag.get(1).copied().unwrap_or(0) as u128;
+        let m = lo | (hi << 64); // magnitude as u128
+        if self.neg {
+            // Negative: fits iff m ≤ 2¹²⁷ (that boundary is exactly i128::MIN). `-(m as i128)` would
+            // overflow at exactly m == 2¹²⁷, so handle that endpoint explicitly.
+            if m < (i128::MAX as u128) + 1 {
+                Some(-(m as i128))
+            } else if m == (i128::MAX as u128) + 1 {
+                Some(i128::MIN)
+            } else {
+                None
+            }
+        } else if m <= i128::MAX as u128 {
+            Some(m as i128)
         } else {
             None
         }

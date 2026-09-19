@@ -479,6 +479,71 @@ fn i64_round_trip_and_bounds() {
     assert_eq!(Big::from_i64(i64::MIN).to_i64_checked(), Some(i64::MIN));
 }
 
+/// `from_i128` / `to_i128_checked` (the limb-level pair) must round-trip, agree with num-bigint, and be
+/// byte-identical to / agree with the sign-magnitude byte versions (`i128_to/from_sign_magnitude_bytes`)
+/// they mirror — across the i64/i128 limb boundaries and the `i128::MIN`/`MAX` endpoints.
+#[test]
+fn i128_round_trip_bounds_and_vs_byte_versions() {
+    for &v in &[
+        0i128,
+        1,
+        -1,
+        42,
+        -42,
+        i64::MAX as i128,
+        i64::MIN as i128,
+        i64::MAX as i128 + 1, // first value needing a 2nd limb
+        i64::MIN as i128 - 1,
+        1i128 << 64,
+        -(1i128 << 64),
+        (1i128 << 64) + 1,
+        i128::MAX,
+        i128::MIN,
+        i128::MAX - 1,
+        i128::MIN + 1,
+        0x0123_4567_89ab_cdef_7654_3210_fedc_ba98,
+        -0x0123_4567_89ab_cdef_7654_3210_fedc_ba98,
+    ] {
+        let b = Big::from_i128(v);
+        assert_eq!(b.to_i128_checked(), Some(v), "i128 round-trip {v}");
+        assert_eq!(to_ref(&b), Ref::from(v), "i128 vs ref {v}");
+        // from_i128 builds the same value the byte serializer would.
+        let mut buf = [0u8; 17];
+        let n = Big::i128_to_sign_magnitude_bytes_into(v, &mut buf).unwrap();
+        assert_eq!(
+            Big::from_sign_magnitude_bytes(&buf[..n]),
+            b,
+            "from_i128 == byte build {v}"
+        );
+        // to_i128_checked agrees with the byte-level read.
+        assert_eq!(
+            b.to_i128_checked(),
+            Big::i128_from_sign_magnitude_bytes(&b.to_sign_magnitude_bytes()),
+            "to_i128_checked == byte read {v}"
+        );
+    }
+    // Random Bigs (often exceeding i128): to_i128_checked must match the byte read exactly, and when it
+    // fits, round-trip through from_i128 and equal the num-bigint value.
+    let mut rng = Rng(0x1128_1128_1128_1128);
+    for _ in 0..500 {
+        let b = rng.big_upto(6); // up to 5 limbs — frequently past i128's 2 limbs
+        assert_eq!(
+            b.to_i128_checked(),
+            Big::i128_from_sign_magnitude_bytes(&b.to_sign_magnitude_bytes()),
+            "to_i128_checked matches byte read for {b:?}"
+        );
+        if let Some(v) = b.to_i128_checked() {
+            assert_eq!(Big::from_i128(v), b, "from_i128 round-trip {v}");
+            assert_eq!(Ref::from(v), to_ref(&b), "i128 value vs ref {v}");
+        }
+    }
+    // A positive 2^127 (= i128::MAX + 1) exceeds i128 → None; the endpoints fit.
+    let two_127 = Big::from_i128(i128::MAX).add(&Big::from_i64(1));
+    assert_eq!(two_127.to_i128_checked(), None, "2^127 does not fit i128");
+    assert_eq!(Big::from_i128(i128::MIN).to_i128_checked(), Some(i128::MIN));
+    assert_eq!(Big::from_i128(i128::MAX).to_i128_checked(), Some(i128::MAX));
+}
+
 #[test]
 fn sign_magnitude_bytes_round_trip_and_canonical() {
     let mut rng = Rng(0xdead_beef_cafe_0001);
