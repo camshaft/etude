@@ -21,6 +21,8 @@ bigdecimal = "0.4"
 # bigdecimal re-exports num-bigint, but we depend on it explicitly for the canonical (sign, magnitude,
 # exponent) decomposition used by the oracle.
 num-bigint = "0.4"
+# The ToPrimitive trait, so the to_f64 benchmark can call bigdecimal's own to_f64 (the reference).
+num-traits = "0.2"
 # Coverage-guided property + shrinking engine for the differential harness.
 bolero = "0.13"
 bolero-generator = "0.13"

@@ -102,6 +102,72 @@ cargo bench -p etude-decimal --bench arith
 | 2048b | 12.32 µs  | 2.482 µs  | 4.96 |
 | 4096b | 31.90 µs  | 6.449 µs  | 4.95 |
 
+### `neg` — negate
+
+| tier | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 64b   | 13.75 ns | 5.72 ns  | 2.40 |
+| 256b  | 13.85 ns | 12.99 ns | 1.07 |
+| 1024b | 14.90 ns | 14.46 ns | 1.03 |
+| 2048b | 17.50 ns | 17.17 ns | 1.02 |
+| 4096b | 23.08 ns | 23.08 ns | 1.00 |
+
+### `abs` — absolute value
+
+| tier | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 64b   | 13.60 ns | 6.45 ns  | 2.11 |
+| 256b  | 13.71 ns | 13.21 ns | 1.04 |
+| 1024b | 14.83 ns | 14.60 ns | 1.02 |
+| 2048b | 17.16 ns | 17.04 ns | 1.01 |
+| 4096b | 23.23 ns | 24.15 ns | 0.96 |
+
+### `to_f64` — correctly-rounded conversion to `f64` — we win at scale
+
+Operand scaled into `f64` range (value in `(0, 1)`) so the full big-int-ratio path runs rather than
+short-circuiting on overflow. Our direct method scales far better than `bigdecimal`'s.
+
+| tier | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 64b   | 643.28 ns | 189.99 ns | 3.39 |
+| 256b  | 720.89 ns | 446.43 ns | 1.61 |
+| 1024b | 1.250 µs  | 3.680 µs  | **0.34** |
+| 2048b | 1.871 µs  | 13.73 µs  | **0.14** |
+| 4096b | 4.020 µs  | 53.81 µs  | **0.075** |
+
+### `div_exact` — exact division by a terminating divisor (etude only)
+
+`bigdecimal` has no exact-terminating division — its `/` is precision-bounded (that comparison is the
+`div_round` group above). This tracks our exact `div`'s cost across tiers (divisor `2^10`).
+
+| tier | etude |
+|------|------:|
+| 64b   | 1.213 µs |
+| 256b  | 3.252 µs |
+| 1024b | 16.04 µs |
+| 2048b | 43.79 µs |
+| 4096b | 140.2 µs |
+
+### `new` — construction + canonicalization (etude only)
+
+`BigDecimal::new` does not canonicalize (it keeps trailing zeros), so there is no equivalent to compare
+against; this tracks the canonicalization cost (coefficient carries ≥6 trailing zeros to exercise the
+strip). `iter_batched` clones the input in unmeasured setup so only `new` is timed.
+
+| tier | etude |
+|------|------:|
+| 64b   | 146.0 ns |
+| 256b  | 186.9 ns |
+| 1024b | 371.5 ns |
+| 2048b | 623.3 ns |
+| 4096b | 1.125 µs |
+
+### Coverage
+
+Every real-work public function is benchmarked (above). Simple O(1) getters — `coefficient`, `exponent`,
+`is_zero`, `is_negative`, `is_integer` — are intentionally not benchmarked (per the operator directive
+that simple getters need no bench). `parse`/`parse_prefix` share their work with `from_str`.
+
 ## Reading the board
 
 - **`div_round` is a clean sweep** — 10× faster at small magnitudes, still ahead at 4096b. Our exact
@@ -119,6 +185,11 @@ cargo bench -p etude-decimal --bench arith
   from `etude-bigint`) would close it.
 - **`from_str`/`to_string`** trail on the base-10 ↔ binary conversion; both improve once we adopt
   `etude-bigint`'s chunked base-`10^k` digit emit/absorb (the absorb helper is a requested follow-up).
+- **`to_f64` wins at scale** — from 1024b up it is 3×–13× faster than `bigdecimal`, because the direct
+  big-int-ratio method costs `O(coefficient)` where `bigdecimal`'s conversion grows super-linearly. Small
+  values (64b) trail bigdecimal's fast path; a small-magnitude shortcut would close that.
+- **`neg`/`abs`** sit at parity from 256b up (both are an `O(limbs)` clone plus a sign flip); only at 64b
+  does `bigdecimal`'s small-value representation edge ahead.
 
 ## Next optimizations (ranked by scoreboard leverage)
 

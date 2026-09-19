@@ -14,10 +14,11 @@
 //! the coefficient bit width (`bytes * 8`). Run with `cargo bench -p etude-decimal`.
 
 use bigdecimal::{BigDecimal, RoundingMode as RefRound};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_bigint::Big;
 use etude_decimal::{Decimal, RoundingMode};
 use num_bigint::BigInt;
+use num_traits::ToPrimitive; // bigdecimal's to_f64, for the differential to_f64 bench
 use std::hint::black_box;
 use std::num::NonZeroU64;
 use std::str::FromStr;
@@ -144,6 +145,31 @@ fn binop(
     g.finish();
 }
 
+/// Bench a unary op on both implementations across `TIERS`, one operand per tier. `make` builds the
+/// operand (so a bench can shape it — e.g. `to_f64` needs a value in `f64` range, `abs` a negative one).
+fn unop<O, T>(
+    c: &mut Criterion,
+    name: &str,
+    seed: u64,
+    make: impl Fn(&mut Rng, usize) -> Decimal,
+    ours: impl Fn(&Decimal) -> O,
+    theirs: impl Fn(&BigDecimal) -> T,
+) {
+    let mut g = group(c, name);
+    for &(label, nbytes) in TIERS {
+        let mut rng = Rng(seed ^ (nbytes as u64));
+        let a = make(&mut rng, nbytes);
+        let ra = to_ref(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+            be.iter(|| black_box(ours(black_box(a))))
+        });
+        g.bench_with_input(BenchmarkId::new("bigdecimal", label), &ra, |be, a| {
+            be.iter(|| black_box(theirs(black_box(a))))
+        });
+    }
+    g.finish();
+}
+
 fn bench(c: &mut Criterion) {
     binop(c, "add", |a, b| a.add(b), |a, b| a + b);
     binop(c, "sub", |a, b| a.sub(b), |a, b| a - b);
@@ -227,6 +253,71 @@ fn bench(c: &mut Criterion) {
             });
             g.bench_with_input(BenchmarkId::new("bigdecimal", label), &s, |be, s| {
                 be.iter(|| black_box(BigDecimal::from_str(black_box(s)).expect("valid literal")))
+            });
+        }
+        g.finish();
+    }
+
+    // Negate: flip the coefficient's sign (an O(limbs) clone + sign bit). Both return an owned value, so
+    // this is a fair clone-cost comparison.
+    unop(c, "neg", 0x0f0f_a5a5, |r, n| r.dec(n), |a| a.neg(), |a| -a);
+
+    // Absolute value: drop the sign (O(limbs) clone). Operand is negative so abs does its sign work.
+    unop(
+        c,
+        "abs",
+        0x5c5c_3210,
+        |r, n| r.dec(n).neg(),
+        |a| a.abs(),
+        |a| a.abs(),
+    );
+
+    // Decimal → f64, correctly rounded. The operand is scaled into f64 range (value in (0, 1)) so the
+    // conversion runs its full big-int-ratio path rather than short-circuiting to ±inf on overflow.
+    unop(
+        c,
+        "to_f64",
+        0xf64f_64f6,
+        |r, n| {
+            let coeff = r.big(n);
+            let digits = coeff.to_decimal_string().len() as i64;
+            Decimal::new(coeff, -digits)
+        },
+        |a| a.to_f64(),
+        |a| a.to_f64(),
+    );
+
+    // Exact division by a terminating divisor (2^10, so the quotient always terminates). No bigdecimal
+    // cell: bigdecimal has no exact-terminating division — its `/` is precision-bounded (that comparison
+    // is the `div_round` group). This tracks our exact `div`'s cost across tiers for regression.
+    {
+        let mut g = group(c, "div_exact");
+        let divisor = Decimal::from_i64(1024); // 2^10
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x0d17_ec00 ^ (nbytes as u64));
+            let a = rng.dec(nbytes);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter(|| black_box(a.div(black_box(&divisor)).expect("terminates")))
+            });
+        }
+        g.finish();
+    }
+
+    // Construction + canonicalization via `new`. No bigdecimal cell: `BigDecimal::new` does not
+    // canonicalize (it keeps trailing zeros), so there is no equivalent to compare against; this tracks
+    // the canonicalization cost. The coefficient carries ≥6 trailing zeros so `new` exercises the strip,
+    // not just the odd-reject. `iter_batched` clones the input in (unmeasured) setup so only `new` is timed.
+    {
+        let mut g = group(c, "new");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x0c70_0000 ^ (nbytes as u64));
+            let coeff = rng.big(nbytes).mul(&Big::from_i64(1_000_000));
+            g.bench_with_input(BenchmarkId::new("etude", label), &coeff, |be, coeff| {
+                be.iter_batched(
+                    || coeff.clone(),
+                    |c| black_box(Decimal::new(c, 0)),
+                    BatchSize::SmallInput,
+                )
             });
         }
         g.finish();
