@@ -18,7 +18,7 @@
 
 use bytes::{Bytes, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use etude_bytevec::ByteVec;
+use etude_bytevec::{ByteVec, Rope, Utf8};
 use std::collections::VecDeque;
 use std::hint::black_box;
 use std::time::Duration;
@@ -562,6 +562,63 @@ fn bench_from_iter(c: &mut Criterion) {
     }
 }
 
+/// `starts_with` / `ends_with`: the rope walks its chunks (early-exit; `ends_with` from the back via
+/// the double-ended chunk iterator, so it is O(suffix)); the reference is a contiguous `Vec<u8>`
+/// slice compare. The literal spans ~2 chunks so the scan crosses a boundary.
+fn bench_starts_ends_with(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let rope = rope_of(n);
+        let flat: Vec<u8> = rope.chunks().flat_map(|c| c.iter().copied()).collect();
+        let plen = 2500.min(flat.len());
+        let prefix: Vec<u8> = flat[..plen].to_vec();
+        let suffix: Vec<u8> = flat[flat.len() - plen..].to_vec();
+
+        let mut g = group(c, "starts_with");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter(|| black_box(rope.starts_with(black_box(&prefix))))
+        });
+        g.bench_function(BenchmarkId::new("flat_slice", label), |b| {
+            b.iter(|| black_box(flat.starts_with(black_box(&prefix[..]))))
+        });
+        g.finish();
+
+        let mut g = group(c, "ends_with");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter(|| black_box(rope.ends_with(black_box(&suffix))))
+        });
+        g.bench_function(BenchmarkId::new("flat_slice", label), |b| {
+            b.iter(|| black_box(flat.ends_with(black_box(&suffix[..]))))
+        });
+        g.finish();
+    }
+}
+
+/// `Rope<Utf8>::try_from_bytes` on valid content (the ingest accept path): the rope streams the
+/// validation over its chunks with no full-content allocation; the reference validates a contiguous
+/// `Vec<u8>` via `core::str::from_utf8`. Content is ascii so it is valid utf-8.
+fn bench_validate_utf8(c: &mut Criterion) {
+    let ascii_chunk = |i: usize| Bytes::from(vec![b'a' + (i as u8 % 26); 1400]);
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let template: Vec<Bytes> = (0..n).map(ascii_chunk).collect();
+        let flat: Vec<u8> = template.iter().flat_map(|c| c.iter().copied()).collect();
+
+        let mut g = group(c, "validate_utf8");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteVec>(),
+                |bv| black_box(Rope::<Utf8>::try_from_bytes(bv).is_ok()),
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("flat_from_utf8", label), |b| {
+            b.iter(|| black_box(core::str::from_utf8(black_box(&flat)).is_ok()))
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_push_back,
@@ -575,6 +632,8 @@ criterion_group!(
     bench_set_byte,
     bench_replace,
     bench_extend,
-    bench_from_iter
+    bench_from_iter,
+    bench_starts_ends_with,
+    bench_validate_utf8
 );
 criterion_main!(benches);
