@@ -1,0 +1,27 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-span"
+version = "0.1.0"
+description = "Byte-scanning primitives for copy-avoiding tokenizers over the etude byte-rope: a Span (byte range) and a chunk-streaming Cursor"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+# The library floor is `no_std` (core only, no alloc); `std` just forwards to the rope's `std` feature.
+std = ["etude-bytevec/std"]
+
+[dependencies]
+# The byte rope the cursor streams and spans reference.
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
+
+[dev-dependencies]
+# Build input ropes with explicit chunk layouts (to exercise the cursor across leaf boundaries).
+bytes = "1"
+# Coverage-guided property testing for the cursor against a flat byte-slice model.
+bolero = "0.13"
+bolero-generator = "0.13"

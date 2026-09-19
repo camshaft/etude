@@ -13,11 +13,13 @@ repository.workspace = true
 [features]
 default = ["std"]
 # `std` only adds `std::error::Error` for the error type; the library floor is `no_std` + `alloc`.
-std = ["etude-bytevec/std"]
+std = ["etude-bytevec/std", "etude-span/std"]
 
 [dependencies]
 # The input rope. Tokens reference byte ranges of it; nothing is copied out during tokenization.
 etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
+# Shared byte-scanning primitives: the chunk-streaming `Cursor` and the `Span` type (re-exported).
+etude-span = { version = "0.1", path = "../etude-span", default-features = false }
 
 [dev-dependencies]
 # Differential oracle: the tokenizer is checked against serde_json (the reference implementation) —
