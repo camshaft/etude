@@ -68,15 +68,20 @@ cargo bench -p etude-decimal --bench arith
 | 2048b | 20.41 µs  | 25.17 µs  | **0.81** |
 | 4096b | 51.14 µs  | 59.79 µs  | **0.86** |
 
-### `cmp` — three-way ordering
+### `cmp` — three-way ordering (equal-exponent `Big::cmp` fast path)
 
-| tier | etude | bigdecimal | ratio |
-|------|------:|-----------:|------:|
-| 64b   | 151.55 ns | 5.83 ns | 26.0 |
-| 256b  | 1.025 µs  | 5.82 ns | 176  |
-| 1024b | 7.573 µs  | 5.83 ns | 1298 |
-| 2048b | 18.32 µs  | 5.87 ns | 3120 |
-| 4096b | 48.43 µs  | 5.84 ns | 8292 |
+Now a direct coefficient compare when the exponents match (the common case), instead of rendering both
+operands to decimal strings. This collapsed the worst column from hundreds-to-thousands× down to a flat
+~24–50 ns — a 30×–1000× speedup — leaving only the two `abs()` clones between us and `bigdecimal`'s
+cached-length ~6 ns.
+
+| tier | etude (before) | etude (now) | bigdecimal | ratio |
+|------|---------------:|------------:|-----------:|------:|
+| 64b   | 151.55 ns | 24.10 ns | 5.56 ns | 4.33 |
+| 256b  | 1.025 µs  | 24.06 ns | 5.56 ns | 4.33 |
+| 1024b | 7.573 µs  | 26.12 ns | 5.59 ns | 4.67 |
+| 2048b | 18.32 µs  | 31.05 ns | 5.72 ns | 5.43 |
+| 4096b | 48.43 µs  | 49.81 ns | 5.99 ns | 8.32 |
 
 ### `to_string` — render to a decimal literal
 
@@ -108,18 +113,19 @@ cargo bench -p etude-decimal --bench arith
   repeated `divmod(10)` — each an `O(limbs)` pass over the coefficient. `bigdecimal` keeps trailing zeros
   and normalizes lazily. Closing this needs a cheap "count trailing base-10 zeros" on `Big` (or a
   radix-`10^k` chunked strip) so canonicalization is not a full division chain.
-- **`cmp` is the worst offender** and the highest-value fix: `cmp_magnitude` currently converts *both*
-  coefficients to decimal strings on every comparison (an `O(limbs²)` base-10 conversion), so even a
-  first-digit-differs comparison pays the full render cost. When the exponents are equal — the common
-  case — we can compare the `Big` coefficients directly (top-limb-first, short-circuiting), matching
-  `bigdecimal`'s flat ~6 ns. This is the next optimization slice.
+- **`cmp` was the worst offender — now largely closed.** `cmp_magnitude` used to convert *both*
+  coefficients to decimal strings on every comparison (an `O(limbs²)` base-10 conversion). The
+  equal-exponent path now compares the `Big` coefficients directly (a flat ~24–50 ns), a 30×–1000×
+  speedup; the residual ~4–8× is the two `abs()` clones. A magnitude-only compare on `Big` (no clone)
+  would close the rest. The unequal-exponent path still renders decimal strings (see below).
 - **`from_str`/`to_string`** trail on the base-10 ↔ binary conversion; both improve once `etude-bigint`
   exposes chunked base-`10^k` digit emit/absorb (the same primitive the rational crate is adopting).
 
 ## Next optimizations (ranked by scoreboard leverage)
 
-1. **`cmp` equal-exponent fast path** — compare coefficients via `Big::cmp` instead of decimal strings;
-   turns the worst column into a likely win.
+1. ~~**`cmp` equal-exponent fast path**~~ — DONE: compares `Big` coefficients directly; 30×–1000× faster.
+   Residual: a magnitude-only `Big` compare (no `abs()` clone) plus an unequal-exponent path that avoids
+   decimal strings.
 2. **Cheaper `normalize`** — trailing-base-10-zero count / chunked strip on `Big` to cut the
    `add`/`sub`/`mul` canonicalization tax.
 3. **Chunked base-`10^k` parse/render** — push the digit loop down into `etude-bigint` for

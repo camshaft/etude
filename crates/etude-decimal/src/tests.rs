@@ -184,6 +184,13 @@ fn comparison_is_exact() {
     // Equal adjusted exponent, decided on aligned digits.
     assert_eq!(d("1.5").cmp(&d("1.49")), Greater);
     assert_eq!(d("1.49").cmp(&d("1.5")), Less);
+    // Equal-exponent fast path: same scale, large magnitudes differing only in the last digit — decided
+    // by the direct coefficient compare, no decimal-string rendering.
+    assert_eq!(
+        d("123456789012345678901234567890").cmp(&d("123456789012345678901234567891")),
+        Less
+    );
+    assert_eq!(d("9.99").cmp(&d("1.23")), Greater); // both exp -2
     // Sign handling.
     assert_eq!(d("-0.1").cmp(&d("0")), Less);
     assert_eq!(d("-0.1").cmp(&d("0.1")), Less);

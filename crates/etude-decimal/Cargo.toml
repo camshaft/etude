@@ -4,7 +4,7 @@
 [package]
 name = "etude-decimal"
 version = "0.1.0"
-description = "Exact base-10 arbitrary-precision decimal numbers (coeff * 10^exp) over etude-bigint, with a lossless JSON-number parser"
+description = "Exact base-10 arbitrary-precision decimal numbers (coeff * 10^exp) over etude-bigint"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
