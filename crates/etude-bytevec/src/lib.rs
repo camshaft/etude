@@ -25,6 +25,7 @@
 extern crate alloc;
 
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use core::marker::PhantomData;
 // Re-exported (`pub`) at the crate root so callers get `Bytes`/`BytesMut` without a separate `bytes` dep.
 pub use bytes::{Bytes, BytesMut};
 
@@ -105,11 +106,55 @@ impl From<ByteVecError> for std::io::Error {
     }
 }
 
-/// A tiered byte rope. See the crate docs.
-#[derive(Clone, Default)]
-pub struct ByteVec {
+/// Content-kind markers for [`Rope`]. A rope carries its kind only as a zero-sized [`PhantomData`]
+/// marker, so `Rope<K>` values of different kinds have identical layout and convert without copying.
+pub mod kind {
+    /// Marker trait for a [`Rope`](crate::Rope)'s content kind — the invariant its bytes uphold.
+    /// Zero runtime cost; implemented only by the marker types in this module.
+    pub trait Kind {}
+
+    /// The unvalidated kind: any byte sequence is valid. `Rope<Bytes>` is [`ByteVec`](crate::ByteVec).
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct Bytes;
+
+    impl Kind for Bytes {}
+}
+
+/// A tiered byte rope, generic over a zero-sized content-[`kind`] marker `K` (defaulting to
+/// [`kind::Bytes`], the unvalidated byte rope — aliased as [`ByteVec`]). See the crate docs.
+///
+/// `K` is carried only as a [`PhantomData`] marker, so every `Rope<K>` has the exact layout of the
+/// flat chunk buffer regardless of kind, and ropes of different kinds convert without copying.
+pub struct Rope<K = kind::Bytes> {
     len: usize,
     repr: Repr,
+    _kind: PhantomData<fn() -> K>,
+}
+
+/// The unvalidated byte rope — the primary type of this crate. An alias of [`Rope`] at its default
+/// [`kind::Bytes`], so every `Rope<Bytes>` inherent method and trait impl is a `ByteVec` one.
+pub type ByteVec = Rope<kind::Bytes>;
+
+impl<K> Clone for Rope<K> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Rope {
+            len: self.len,
+            repr: self.repr.clone(),
+            _kind: PhantomData,
+        }
+    }
+}
+
+impl<K> Default for Rope<K> {
+    #[inline]
+    fn default() -> Self {
+        Rope {
+            len: 0,
+            repr: Repr::default(),
+            _kind: PhantomData,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -165,6 +210,7 @@ impl ByteVec {
                 head: Bytes::new(),
                 additional: VecDeque::new(),
             },
+            _kind: PhantomData,
         }
     }
 
@@ -511,6 +557,7 @@ impl ByteVec {
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
         Self {
+            _kind: PhantomData,
             len: 0,
             repr: Repr::Small {
                 head: Bytes::new(),
@@ -1273,6 +1320,7 @@ impl ByteVec {
         let mut rope = ByteVec {
             len,
             repr: Repr::Deep(Box::new(Deep { head, tree, tail })),
+            _kind: PhantomData,
         };
         rope.maybe_demote();
         rope
