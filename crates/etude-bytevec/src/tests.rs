@@ -205,10 +205,11 @@ fn starts_ends_with_match_flat_in_both_tiers() {
     }
 }
 
-/// `chunks_rev` yields exactly the forward chunks in reverse order, in both tiers, with an exact
-/// `ExactSizeIterator::len`.
+/// The chunk iterator is a `DoubleEndedIterator`: `.rev()` yields the forward chunks in reverse in
+/// both tiers, `ExactSizeIterator::len` stays exact, and — the property the two-cursor design has to
+/// get right — an interleaved front/back walk yields every chunk exactly once with no overlap.
 #[test]
-fn chunks_rev_reverses_chunks_in_both_tiers() {
+fn chunks_is_double_ended_in_both_tiers() {
     for n in [1usize, 4, PROMOTE_AT * 3 + 7] {
         let mut rope = ByteVec::new();
         let mut fwd: Vec<Vec<u8>> = Vec::new();
@@ -217,20 +218,50 @@ fn chunks_rev_reverses_chunks_in_both_tiers() {
             rope.push_back(chunk(&b));
             fwd.push(b.to_vec());
         }
-        // reverse iterator == forward chunks reversed
-        let rev: Vec<Vec<u8>> = rope.chunks_rev().map(|c| c.to_vec()).collect();
+        // `.rev()` == forward chunks reversed
+        let rev: Vec<Vec<u8>> = rope.chunks().rev().map(|c| c.to_vec()).collect();
         let mut fwd_rev = fwd.clone();
         fwd_rev.reverse();
         assert_eq!(rev, fwd_rev, "n={n}");
         // ExactSizeIterator::len is exact
-        assert_eq!(rope.chunks_rev().len(), rope.chunks().count(), "n={n} len");
+        assert_eq!(
+            rope.chunks().rev().len(),
+            rope.chunks().count(),
+            "n={n} len"
+        );
         // Re-reversing the reverse walk reconstructs the original byte content.
         let flat: Vec<u8> = fwd.iter().flatten().copied().collect();
         let mut round: Vec<u8> = Vec::new();
-        for c in rope.chunks_rev() {
+        for c in rope.chunks().rev() {
             round.splice(0..0, c.iter().copied());
         }
         assert_eq!(round, flat, "n={n} roundtrip");
+
+        // Interleave next/next_back: alternately take from the front and the back. The collected
+        // front-prefix ++ reversed(back-suffix) must reconstruct the exact forward chunk sequence,
+        // proving the two cursors partition the chunks (no chunk yielded twice, none skipped).
+        let mut it = rope.chunks();
+        let mut front: Vec<*const u8> = Vec::new();
+        let mut back: Vec<*const u8> = Vec::new();
+        let mut take_front = true;
+        loop {
+            let got = if take_front {
+                it.next()
+            } else {
+                it.next_back()
+            };
+            match got {
+                Some(c) if take_front => front.push(c.as_ptr()),
+                Some(c) => back.push(c.as_ptr()),
+                None => break,
+            }
+            take_front = !take_front;
+        }
+        let mut seq = front;
+        seq.extend(back.into_iter().rev());
+        let want: Vec<*const u8> = rope.chunks().map(|c| c.as_ptr()).collect();
+        assert_eq!(seq, want, "n={n} interleaved front/back partition");
+        assert_eq!(seq.len(), n, "n={n} interleaved yielded every chunk once");
     }
 }
 
@@ -922,7 +953,7 @@ fn differential_against_model() {
         MutateAlias(usize, u8),
         PushShared,
         StartsEndsWith(usize, Vec<u8>),
-        RevChunksCheck,
+        DoubleEndedCheck,
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1123,19 +1154,44 @@ fn differential_against_model() {
                     assert_eq!(rope.starts_with(d), model.starts_with(&d[..]));
                     assert_eq!(rope.ends_with(d), model.ends_with(&d[..]));
                 }
-                Op::RevChunksCheck => {
-                    // chunks_rev (#70) must be exactly the forward chunk sequence reversed —
-                    // pointer identity per chunk, exact ExactSizeIterator len — on EVERY shape
-                    // the harness reaches (deep starts, bulk builds, post-split, aliased).
+                Op::DoubleEndedCheck => {
+                    // The chunk iterator's DoubleEndedIterator (front + back cursors) must partition
+                    // the chunks with pointer identity and exact len on EVERY shape the harness
+                    // reaches (deep starts, bulk builds, post-split, aliased). Two properties:
+                    // (a) `.rev()` == forward reversed; (b) interleaved next/next_back yields each
+                    // chunk exactly once (front-prefix ++ reversed back-suffix == forward).
                     let fwd: Vec<&Bytes> = rope.chunks().collect();
-                    assert_eq!(rope.chunks_rev().len(), fwd.len());
-                    let mut rev: Vec<&Bytes> = rope.chunks_rev().collect();
+                    assert_eq!(rope.chunks().rev().len(), fwd.len());
+                    let mut rev: Vec<&Bytes> = rope.chunks().rev().collect();
                     rev.reverse();
-                    assert_eq!(rev.len(), fwd.len(), "chunks_rev count mismatch");
+                    assert_eq!(rev.len(), fwd.len(), "chunks().rev() count mismatch");
                     for (i, (a, b)) in rev.iter().zip(fwd.iter()).enumerate() {
-                        assert_eq!(a.as_ptr(), b.as_ptr(), "chunks_rev[{i}] wrong chunk");
+                        assert_eq!(a.as_ptr(), b.as_ptr(), "chunks().rev()[{i}] wrong chunk");
                         assert_eq!(a.len(), b.len());
                     }
+                    let mut it = rope.chunks();
+                    let mut front: Vec<*const u8> = Vec::new();
+                    let mut back: Vec<*const u8> = Vec::new();
+                    let mut take_front = true;
+                    loop {
+                        let got = if take_front {
+                            it.next()
+                        } else {
+                            it.next_back()
+                        };
+                        match got {
+                            Some(c) if take_front => front.push(c.as_ptr()),
+                            Some(c) => back.push(c.as_ptr()),
+                            None => break,
+                        }
+                        take_front = !take_front;
+                    }
+                    front.extend(back.into_iter().rev());
+                    let want: Vec<*const u8> = fwd.iter().map(|c| c.as_ptr()).collect();
+                    assert_eq!(
+                        front, want,
+                        "interleaved front/back must partition the chunks"
+                    );
                 }
             }
             assert_eq!(rope.len(), model.len(), "len after {op:?}");
