@@ -599,13 +599,14 @@ fn bench_clear(c: &mut Criterion) {
 fn bench_eq(c: &mut Criterion) {
     for &n in &[SHALLOW, DEEP] {
         let label = if n == SHALLOW { "shallow" } else { "deep" };
-        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
 
-        let mut g = group(c, "eq_self");
-        let ra = template.iter().cloned().collect::<ByteRope>();
-        let rb = template.iter().cloned().collect::<ByteRope>();
-        let va = template.iter().cloned().collect::<ByteVec>();
-        let vb = template.iter().cloned().collect::<ByteVec>();
+        // DISTINCT allocations, same content: the real `memcmp` path (no pointer-identity skip).
+        let ra = (0..n).map(|i| mtu_chunk(i as u8)).collect::<ByteRope>();
+        let rb = (0..n).map(|i| mtu_chunk(i as u8)).collect::<ByteRope>();
+        let va = (0..n).map(|i| mtu_chunk(i as u8)).collect::<ByteVec>();
+        let vb = (0..n).map(|i| mtu_chunk(i as u8)).collect::<ByteVec>();
+
+        let mut g = group(c, "eq_distinct");
         g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
             b.iter(|| black_box(black_box(&ra) == black_box(&rb)))
         });
@@ -614,8 +615,21 @@ fn bench_eq(c: &mut Criterion) {
         });
         g.finish();
 
+        // SHARED chunks (rope vs its O(1) clone): the pointer-identity fast path — every run's head
+        // pointer matches, so no bytes are compared. This is the common copy-on-write case.
+        let rc = ra.clone();
+        let vc = va.clone();
+        let mut g = group(c, "eq_shared_clone");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| black_box(black_box(&ra) == black_box(&rc)))
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| black_box(black_box(&va) == black_box(&vc)))
+        });
+        g.finish();
+
         let mut g = group(c, "eq_chunks_slice");
-        let chunks = template.clone();
+        let chunks: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
         g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
             b.iter(|| black_box(black_box(&ra) == black_box(&chunks[..])))
         });

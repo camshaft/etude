@@ -1715,7 +1715,12 @@ fn chunks_content_eq<'a, 'b>(
             return a.is_empty() && b.is_empty();
         }
         let n = a.len().min(b.len());
-        if a[..n] != b[..n] {
+        // Pointer-identity fast path: when both runs start at the same address — a shared `Bytes`
+        // (same `Arc`/buffer) under copy-on-write, or the same allocation — their overlap is the
+        // very same memory, so it is byte-equal without a `memcmp`. Cheap and common under structural
+        // sharing (e.g. comparing a rope to its O(1) clone). Only the `memcmp` is skipped; behavior
+        // is unchanged.
+        if a.as_ptr() != b.as_ptr() && a[..n] != b[..n] {
             return false;
         }
         a = &a[n..];
