@@ -120,8 +120,9 @@ impl StrRope {
     pub fn chars(&self) -> Chars<'_> {
         Chars {
             chunks: self.0.chunks(),
-            cur: &[],
-            pos: 0,
+            cur: "".chars(),
+            carry: [0u8; 4],
+            carry_len: 0,
         }
     }
 
@@ -288,23 +289,27 @@ where
 /// spans a chunk boundary by pulling bytes across chunks.
 pub struct Chars<'a> {
     chunks: etude_bytevec::Chunks<'a>,
-    cur: &'a [u8],
-    pos: usize,
+    /// Bulk decoder over the valid `&str` prefix of the current chunk — the fast path (std's own
+    /// contiguous UTF-8 decoder), so only chunk seams need special handling.
+    cur: core::str::Chars<'a>,
+    /// Leading bytes of a codepoint that straddles into the next chunk(s). `carry[0]` is always a
+    /// leading byte, so its width is known; `carry_len == 0` in the common (no-seam) case.
+    carry: [u8; 4],
+    carry_len: usize,
 }
 
-impl Chars<'_> {
-    /// The next byte of the logical stream, advancing across chunks (skipping empty ones).
+impl<'a> Chars<'a> {
+    /// Point `cur` at the valid prefix of `bytes` (decoded in bulk via `str`), stashing any trailing
+    /// incomplete codepoint into `carry` for the next chunk to complete.
     #[inline]
-    fn next_byte(&mut self) -> Option<u8> {
-        loop {
-            if self.pos < self.cur.len() {
-                let b = self.cur[self.pos];
-                self.pos += 1;
-                return Some(b);
-            }
-            self.cur = &self.chunks.next()?[..];
-            self.pos = 0;
-        }
+    fn set_cur(&mut self, bytes: &'a [u8]) {
+        let end = valid_prefix_len(bytes);
+        self.cur = core::str::from_utf8(&bytes[..end])
+            .expect("StrRope invariant: content is valid UTF-8")
+            .chars();
+        let tail = &bytes[end..];
+        self.carry[..tail.len()].copy_from_slice(tail);
+        self.carry_len = tail.len();
     }
 }
 
@@ -312,18 +317,48 @@ impl Iterator for Chars<'_> {
     type Item = char;
 
     fn next(&mut self) -> Option<char> {
-        let b0 = self.next_byte()?;
-        let width = utf8_char_width(b0);
-        let mut buf = [b0, 0, 0, 0];
-        for slot in buf.iter_mut().take(width).skip(1) {
-            *slot = self
-                .next_byte()
-                .expect("StrRope invariant: content is valid UTF-8 (truncated codepoint)");
+        loop {
+            // Fast path: decode within the current chunk's contiguous `&str`.
+            if let Some(c) = self.cur.next() {
+                return Some(c);
+            }
+            // The current chunk is drained; pull the next non-empty chunk.
+            let bytes: &[u8] = loop {
+                match self.chunks.next() {
+                    None => {
+                        debug_assert_eq!(
+                            self.carry_len, 0,
+                            "StrRope invariant: content is valid UTF-8 (no truncated tail)"
+                        );
+                        return None;
+                    }
+                    Some(chunk) if chunk.is_empty() => continue,
+                    Some(chunk) => break &chunk[..],
+                }
+            };
+            // A codepoint carried from the previous chunk completes from the front of this one — and,
+            // for tiny chunks, may still span further, so consume leading bytes into `carry` until full.
+            if self.carry_len > 0 {
+                let width = utf8_char_width(self.carry[0]);
+                let need = (width - self.carry_len).min(bytes.len());
+                self.carry[self.carry_len..self.carry_len + need].copy_from_slice(&bytes[..need]);
+                self.carry_len += need;
+                if self.carry_len < width {
+                    continue; // still incomplete; wait for the next chunk
+                }
+                let c = core::str::from_utf8(&self.carry[..width])
+                    .expect("StrRope invariant: content is valid UTF-8")
+                    .chars()
+                    .next()
+                    .expect("one codepoint");
+                self.carry_len = 0;
+                // The rest of this chunk becomes `cur` for subsequent calls.
+                self.set_cur(&bytes[need..]);
+                return Some(c);
+            }
+            // No carry: this chunk's valid prefix becomes `cur`; loop to pull its first char.
+            self.set_cur(bytes);
         }
-        core::str::from_utf8(&buf[..width])
-            .expect("StrRope invariant: content is valid UTF-8")
-            .chars()
-            .next()
     }
 }
 
@@ -345,16 +380,21 @@ impl Iterator for CharIndices<'_> {
 }
 
 impl From<&str> for StrRope {
+    /// Wraps a `&str` with a single copy of its bytes and no validation scan (a `&str` is valid UTF-8
+    /// by type), via the typed [`Rope<Utf8>`](etude_bytevec::Rope) constructor.
+    #[inline]
     fn from(s: &str) -> Self {
-        let mut r = Self::new();
-        r.push_str(s);
-        r
+        Self(Rope::<Utf8>::from(s))
     }
 }
 
 impl From<String> for StrRope {
+    /// Wraps a `String` by *moving* its buffer — the allocation is reused, with no copy and no
+    /// validation scan (a `String` is valid UTF-8 by type). Prefer this over [`from`](Self::from)`(&str)`
+    /// when you own the `String`, to avoid the copy.
+    #[inline]
     fn from(s: String) -> Self {
-        Self::from(s.as_str())
+        Self(Rope::<Utf8>::from(s))
     }
 }
 
@@ -986,6 +1026,32 @@ mod tests {
             s.char_indices().collect::<Vec<_>>(),
             "aé🦀z".char_indices().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn chars_match_str_across_varied_chunkings() {
+        // The bulk chars() decoder emits each chunk's valid `&str` prefix and stitches only the seam
+        // codepoint. Exercise that seam at many fixed chunk sizes so a multi-byte codepoint lands at every
+        // possible offset within (and straddling) a chunk — std str is the oracle.
+        let text = "aé🦀z—ß本d\u{10FFFF}f";
+        let bytes = text.as_bytes();
+        for size in 1..=7 {
+            let mut bv = ByteVec::default();
+            for piece in bytes.chunks(size) {
+                bv.push_back(bytes::Bytes::copy_from_slice(piece));
+            }
+            let s = StrRope::from_utf8(bv).unwrap();
+            assert_eq!(
+                s.chars().collect::<String>(),
+                text,
+                "chars() mismatch at chunk size {size}"
+            );
+            assert_eq!(
+                s.char_indices().collect::<Vec<_>>(),
+                text.char_indices().collect::<Vec<_>>(),
+                "char_indices() mismatch at chunk size {size}"
+            );
+        }
     }
 
     #[test]

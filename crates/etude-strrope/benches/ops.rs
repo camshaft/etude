@@ -64,6 +64,23 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
+        // Owned construction: `from(String)` MOVES the buffer (allocation reused, no copy, no scan),
+        // where `from(&str)` above must copy. The clone lives in the untimed setup, so this measures the
+        // move alone; the reference is a bare identity move of the owned String — the floor for consuming
+        // one — so `strrope` should sit close to it and neither should scale with length.
+        let mut g = c.benchmark_group("from_string_owned");
+        g.bench_with_input(BenchmarkId::new("strrope", n), &string, |b, s| {
+            b.iter_batched(
+                || s.clone(),
+                |owned| black_box(StrRope::from(owned)),
+                BatchSize::SmallInput,
+            );
+        });
+        g.bench_with_input(BenchmarkId::new("identity_move", n), &string, |b, s| {
+            b.iter_batched(|| s.clone(), black_box, BatchSize::SmallInput);
+        });
+        g.finish();
+
         let mut g = c.benchmark_group("from_utf8");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
