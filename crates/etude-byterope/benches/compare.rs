@@ -320,6 +320,100 @@ fn bench_get(c: &mut Criterion) {
     g.finish();
 }
 
+/// `slice(range)` — a rope-only capability that shares the covered subtree in O(log32) rather than
+/// materializing. Baseline = the naive "flatten the whole rope, then slice the flat `Bytes`" an
+/// API without a shared slice would force (O(n) copy). Both shapes.
+fn bench_slice(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let rope = rope_of(n);
+        let total = n * 1400;
+        let (start, end) = (total / 4, total * 3 / 4); // a mid subrange straddling chunk boundaries
+        let mut g = group(c, "slice");
+        g.bench_function(BenchmarkId::new("ByteRope_slice", label), |b| {
+            b.iter(|| black_box(rope.slice(start..end)))
+        });
+        g.bench_function(BenchmarkId::new("flatten_then_slice", label), |b| {
+            b.iter(|| black_box(rope.copy_to_bytes().slice(start..end)))
+        });
+        g.finish();
+    }
+}
+
+/// `set_byte(offset, val)` — in-place single-byte write. Measured both when the rope is **uniquely
+/// owned** (FBIP: write in place, no copy) and when a **shared clone is retained** (copy-on-write:
+/// the touched chunk is copied — bounded, not the whole buffer — and the deep-tier spine is
+/// path-copied). The shared case pins the bounded-COW win: it must stay cheap even for a huge rope.
+fn bench_set_byte(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let mid = n * 1400 / 2;
+        let mut g = group(c, "set_byte");
+        g.bench_function(BenchmarkId::new("unique", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteRope>(),
+                |mut r| {
+                    r.set_byte(mid, 0xEE).unwrap();
+                    black_box(r)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("shared_cow", label), |b| {
+            b.iter_batched(
+                || {
+                    let r: ByteRope = template.iter().cloned().collect();
+                    let guard = r.clone(); // retained ⇒ chunks shared ⇒ set_byte takes the COW path
+                    (r, guard)
+                },
+                |(mut r, guard)| {
+                    r.set_byte(mid, 0xEE).unwrap();
+                    black_box((r, guard))
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
+/// `replace(range, value)` — the length-preserving overwrite (UC1–3, in place) and the
+/// length-changing splice (UC4–6). Both are on the runtime's hot path, so pin them at both shapes.
+/// Ropes are freshly + uniquely built in (untimed) setup so the in-place FBIP path fires.
+fn bench_replace(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let start = n * 1400 / 4;
+        let span = 2100; // 1.5 chunks — straddles a chunk boundary in the deep tier
+        let overwrite = vec![0xABu8; span]; // equal length ⇒ no structure change
+        let insert = [0xCDu8; 100]; // shorter ⇒ shrinking splice (structure change)
+        let mut g = group(c, "replace");
+        g.bench_function(BenchmarkId::new("overwrite_eqlen", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteRope>(),
+                |mut r| {
+                    r.replace(start..start + span, &overwrite[..]).unwrap();
+                    black_box(r)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("splice_shrink", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteRope>(),
+                |mut r| {
+                    r.replace(start..start + span, &insert[..]).unwrap();
+                    black_box(r)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
 fn byte_via_walk(v: &ByteVec, mut offset: usize) -> Option<u8> {
     for chunk in v.chunks() {
         if offset < chunk.len() {
@@ -339,6 +433,9 @@ criterion_group!(
     bench_iterate,
     bench_clone,
     bench_random_access,
-    bench_get
+    bench_get,
+    bench_slice,
+    bench_set_byte,
+    bench_replace
 );
 criterion_main!(benches);
