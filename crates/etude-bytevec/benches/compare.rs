@@ -1123,9 +1123,36 @@ fn bench_stream(c: &mut Criterion) {
     g.finish();
 }
 
+/// Bulk build vs incremental append, swept across sizes to locate the crossover. Building a rope by
+/// `collect`/`from_iter` folds whole `FANOUT` blocks bottom-up in one pass; building it by a
+/// `push_back` loop appends chunk-by-chunk and promotes `Small` → `Deep` once `additional` crosses
+/// `PROMOTE_AT` (64), then pays the per-chunk tree descent for every chunk past that. The sweep shows
+/// where the bulk path pulls ahead — below the promotion threshold the two are the same flat deque
+/// pushes; above it the incremental path takes on the per-chunk tree cost the bulk build amortizes.
+fn bench_build_crossover(c: &mut Criterion) {
+    for &n in &[16usize, 32, 64, 128, 256, 1024] {
+        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+        let mut g = group(c, "build_crossover");
+        g.bench_function(BenchmarkId::new("rope_bulk", n.to_string()), |b| {
+            b.iter(|| black_box(template.iter().cloned().collect::<ByteVec>()))
+        });
+        g.bench_function(BenchmarkId::new("rope_incremental", n.to_string()), |b| {
+            b.iter(|| {
+                let mut r = ByteVec::new();
+                for chunk in &template {
+                    r.push_back(chunk.clone());
+                }
+                black_box(r)
+            })
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_stream,
+    bench_build_crossover,
     bench_push_back,
     bench_push_front,
     bench_mutating,
