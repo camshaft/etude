@@ -252,3 +252,93 @@ fn accept_reject_agrees_with_serde_json() {
         }
     }
 }
+
+#[test]
+fn number_parts_decompose_the_lexeme() {
+    // Each number lexeme decomposes into representation-neutral digit spans: sign, integer digits,
+    // fraction digits (no `.`), exponent digits (no `e`/sign) + exponent sign. The spans are byte
+    // offsets into the input, so slicing the input at each span yields exactly those digits.
+    // (bytes, negative, integer, fraction, exponent, exp_negative)
+    type Case = (
+        &'static [u8],
+        bool,
+        &'static str,
+        Option<&'static str>,
+        Option<&'static str>,
+        bool,
+    );
+    let cases: &[Case] = &[
+        (b"0", false, "0", None, None, false),
+        (b"-0", true, "0", None, None, false),
+        (b"123", false, "123", None, None, false),
+        (b"-42", true, "42", None, None, false),
+        (b"3.14", false, "3", Some("14"), None, false),
+        (b"-0.500", true, "0", Some("500"), None, false),
+        (b"1e10", false, "1", None, Some("10"), false),
+        (b"1E+06", false, "1", None, Some("06"), false),
+        (b"-2.5e-30", true, "2", Some("5"), Some("30"), true),
+        (
+            b"60221407600000000000000",
+            false,
+            "60221407600000000000000",
+            None,
+            None,
+            false,
+        ),
+    ];
+    for (bytes, neg, int, frac, exp, exp_neg) in cases {
+        for chunk in [1usize, 2, bytes.len().max(1)] {
+            let r = rope(bytes, chunk);
+            let toks: Vec<_> = Tokenizer::new(&r).collect::<Result<_, _>>().unwrap();
+            assert_eq!(toks.len(), 1, "{:?}", String::from_utf8_lossy(bytes));
+            let p = toks[0].number_parts().expect("number token has parts");
+            let at = |s: etude_json::Span| std::str::from_utf8(&bytes[s.start()..s.end()]).unwrap();
+            assert_eq!(
+                p.negative,
+                *neg,
+                "sign of {:?}",
+                String::from_utf8_lossy(bytes)
+            );
+            assert_eq!(
+                at(p.integer),
+                *int,
+                "integer of {:?}",
+                String::from_utf8_lossy(bytes)
+            );
+            assert_eq!(
+                p.fraction.map(at),
+                *frac,
+                "fraction of {:?}",
+                String::from_utf8_lossy(bytes)
+            );
+            assert_eq!(
+                p.exponent.map(at),
+                *exp,
+                "exponent of {:?}",
+                String::from_utf8_lossy(bytes)
+            );
+            assert_eq!(
+                p.exponent_negative,
+                *exp_neg,
+                "exp sign of {:?}",
+                String::from_utf8_lossy(bytes)
+            );
+            // Consistency with the derived integer flag.
+            assert_eq!(
+                toks[0].number_is_integer(),
+                Some(frac.is_none() && exp.is_none())
+            );
+        }
+    }
+
+    // number_parts is None for a non-number token.
+    let r = rope(b"true", 4);
+    assert!(
+        Tokenizer::new(&r)
+            .next()
+            .unwrap()
+            .unwrap()
+            .number_parts()
+            .is_none()
+    );
+}
