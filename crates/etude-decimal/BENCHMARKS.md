@@ -84,6 +84,20 @@ more than `Big::add` itself). That flipped `add` 64b `1.11 → 0.83` and `sub` 6
 | `sub_small` | 100.5 ns | 27.70 ns | 67.81 ns | **0.41** |
 | `mul_small` | 32.73 ns | 23.93 ns | 22.01 ns | 1.09 |
 
+`mul` has the same `i128` second tier: two `i64`-fitting coefficients always have an `i128` product, so a
+mid-size product (the common "large price × quantity") multiplies in `i128` and boxes once via
+`Big::from_i128`, skipping the `Big` multiply. Operands `1234567890.12345678 × 9876543210.98765432`
+(each coefficient `< i64::MAX`, product `~1.2e35` — fits `i128`, not `i64`):
+
+| op | etude (Big path) | etude (i128 tier) | bigdecimal | ratio |
+|----|-----------------:|------------------:|-----------:|------:|
+| `mul_mid` | 63.8 ns | 54.9 ns | 30.3 ns | 1.81 |
+
+The tier shaves ~14% here, but `mul_mid` still trails `bigdecimal`: the residual is the same eager
+`normalize` divisibility check (plus the `Big::from_i128` box) that the large-tier arithmetic pays and
+`bigdecimal` skips — not the multiply. (The full-width `64b`/`256b` `mul` tiers above are unaffected: those
+coefficients' products overflow `i128`, so they stay on the `Big` path.)
+
 ### `div_round` — rounded quotient, 34 sig-digits, HalfEven — we win every tier
 
 | tier | etude | bigdecimal | ratio |
