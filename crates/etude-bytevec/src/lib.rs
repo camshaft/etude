@@ -501,46 +501,7 @@ impl ByteVec {
                     tree: d.tree.chunks(),
                     tail: d.tail.iter(),
                     phase: 0,
-                },
-            },
-        }
-    }
-
-    /// Iterates the chunks from last to first — the reverse of [`chunks`](Self::chunks).
-    ///
-    /// Cheap tail access on the tiered rope: it descends the *rightmost* spine, so consuming only
-    /// the last `k` chunks touches O(k) nodes rather than walking the whole buffer. This is what
-    /// makes [`ends_with`](Self::ends_with) O(suffix) instead of O(len). Exposed as its own method
-    /// (not `DoubleEndedIterator` / `.rev()`): a single DFS cursor cannot correctly serve both ends
-    /// of the relaxed-radix tree, so a dedicated reverse walk is the correct, allocation-light form.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use etude_bytevec::ByteVec;
-    /// use bytes::Bytes;
-    ///
-    /// let v: ByteVec = [Bytes::from_static(b"ab"), Bytes::from_static(b"cd")].into_iter().collect();
-    /// let rev: Vec<_> = v.chunks_rev().map(|c| c.to_vec()).collect();
-    /// assert_eq!(rev, vec![b"cd".to_vec(), b"ab".to_vec()]);
-    /// ```
-    pub fn chunks_rev(&self) -> RevChunks<'_> {
-        let remaining = self.chunk_count();
-        match &self.repr {
-            Repr::Small { head, additional } => RevChunks {
-                remaining,
-                inner: RevChunksInner::Small {
-                    head: if head.is_empty() { None } else { Some(head) },
-                    rest: additional.iter(),
-                },
-            },
-            Repr::Deep(d) => RevChunks {
-                remaining,
-                inner: RevChunksInner::Deep {
-                    head: d.head.iter(),
-                    tree: d.tree.chunks_rev(),
-                    tail: d.tail.iter(),
-                    phase: 0,
+                    back_phase: 0,
                 },
             },
         }
@@ -634,9 +595,9 @@ impl ByteVec {
     /// Returns `true` if the byte content ends with `suffix`.
     ///
     /// Chunk-aware and copy-free, and **O(suffix), not O(len)**: walks the buffer's chunks from the
-    /// back via [`chunks_rev`](Self::chunks_rev), comparing `suffix` from its end, and stops as soon
-    /// as `suffix` is consumed — touching only the last chunks, never the leading ones, and never
-    /// linearizing.
+    /// back via [`chunks().rev()`](Self::chunks) (the chunk iterator is a `DoubleEndedIterator`),
+    /// comparing `suffix` from its end, and stops as soon as `suffix` is consumed — touching only
+    /// the last chunks, never the leading ones, and never linearizing.
     ///
     /// # Examples
     ///
@@ -655,7 +616,7 @@ impl ByteVec {
             return false;
         }
         let mut rest = suffix;
-        for chunk in self.chunks_rev() {
+        for chunk in self.chunks().rev() {
             if rest.is_empty() {
                 break;
             }
@@ -1340,9 +1301,14 @@ enum ChunksInner<'a> {
         head: alloc::collections::vec_deque::Iter<'a, Bytes>,
         tree: tree::Chunks<'a>,
         tail: alloc::collections::vec_deque::Iter<'a, Bytes>,
-        /// Which section is being drained: 0 = head, 1 = tree, 2 = tail. Advances once per section
-        /// (rather than re-polling an exhausted iterator on every chunk).
+        /// Which section the *front* cursor is draining: 0 = head, 1 = tree, 2 = tail. Advances once
+        /// per section (rather than re-polling an exhausted iterator on every chunk).
         phase: u8,
+        /// Which section the *back* cursor is draining, back to front: 0 = tail, 1 = tree, 2 = head.
+        /// The `head`/`tail` deque iterators are double-ended and the `tree` iterator is itself
+        /// double-ended (guarded by its own exact chunk count), so front and back share the same
+        /// three sub-iterators and provably never yield the same chunk.
+        back_phase: u8,
     },
 }
 
@@ -1357,6 +1323,7 @@ pub struct Chunks<'a> {
 }
 
 impl<'a> Chunks<'a> {
+    /// Front cursor: the next chunk in order (head → tree → tail).
     #[inline]
     fn next_chunk(&mut self) -> Option<&'a Bytes> {
         match &mut self.inner {
@@ -1366,6 +1333,7 @@ impl<'a> Chunks<'a> {
                 tree,
                 tail,
                 phase,
+                back_phase: _,
             } => loop {
                 match phase {
                     0 => match head.next() {
@@ -1381,75 +1349,32 @@ impl<'a> Chunks<'a> {
             },
         }
     }
-}
 
-impl<'a> Iterator for Chunks<'a> {
-    type Item = &'a Bytes;
-
+    /// Back cursor: the next chunk from the end (tail → tree → head). Shares the same sub-iterators
+    /// as [`next_chunk`](Self::next_chunk) — each is double-ended — so the front and back cursors
+    /// meet without overlap; the `remaining` guard in `next`/`next_back` stops both once they cross.
     #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.next_chunk();
-        if item.is_some() {
-            self.remaining -= 1;
-        }
-        item
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
-impl ExactSizeIterator for Chunks<'_> {}
-
-enum RevChunksInner<'a> {
-    Small {
-        // Yielded last (the front chunk comes out after `rest` is drained from the back).
-        head: Option<&'a Bytes>,
-        rest: alloc::collections::vec_deque::Iter<'a, Bytes>,
-    },
-    Deep {
-        head: alloc::collections::vec_deque::Iter<'a, Bytes>,
-        tree: tree::RevChunks<'a>,
-        tail: alloc::collections::vec_deque::Iter<'a, Bytes>,
-        /// Which section is being drained, back to front: 0 = tail, 1 = tree, 2 = head.
-        phase: u8,
-    },
-}
-
-/// Reverse iterator over a rope's `Bytes` chunks, last to first. See [`ByteVec::chunks_rev`].
-///
-/// Reports its exact remaining chunk count via [`ExactSizeIterator::len`].
-pub struct RevChunks<'a> {
-    /// Chunks not yet yielded; drives `size_hint`/`len`.
-    remaining: usize,
-    inner: RevChunksInner<'a>,
-}
-
-impl<'a> RevChunks<'a> {
-    #[inline]
-    fn next_chunk(&mut self) -> Option<&'a Bytes> {
+    fn next_chunk_back(&mut self) -> Option<&'a Bytes> {
         match &mut self.inner {
-            RevChunksInner::Small { head, rest } => match rest.next_back() {
+            ChunksInner::Small { head, rest } => match rest.next_back() {
                 some @ Some(_) => some,
                 None => head.take(),
             },
-            RevChunksInner::Deep {
+            ChunksInner::Deep {
                 head,
                 tree,
                 tail,
-                phase,
+                phase: _,
+                back_phase,
             } => loop {
-                match phase {
+                match back_phase {
                     0 => match tail.next_back() {
                         some @ Some(_) => return some,
-                        None => *phase = 1,
+                        None => *back_phase = 1,
                     },
-                    // `tree` is already a reverse (last-to-first) iterator.
-                    1 => match tree.next() {
+                    1 => match tree.next_back() {
                         some @ Some(_) => return some,
-                        None => *phase = 2,
+                        None => *back_phase = 2,
                     },
                     _ => return head.next_back(),
                 }
@@ -1458,11 +1383,14 @@ impl<'a> RevChunks<'a> {
     }
 }
 
-impl<'a> Iterator for RevChunks<'a> {
+impl<'a> Iterator for Chunks<'a> {
     type Item = &'a Bytes;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
         let item = self.next_chunk();
         if item.is_some() {
             self.remaining -= 1;
@@ -1476,7 +1404,21 @@ impl<'a> Iterator for RevChunks<'a> {
     }
 }
 
-impl ExactSizeIterator for RevChunks<'_> {}
+impl<'a> DoubleEndedIterator for Chunks<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let item = self.next_chunk_back();
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
+    }
+}
+
+impl ExactSizeIterator for Chunks<'_> {}
 
 /// Batches `chunks` into blocks of up to `FANOUT` and pushes each onto `tree`.
 fn extend_blocks(tree: &mut Tree, chunks: impl Iterator<Item = Bytes>) {

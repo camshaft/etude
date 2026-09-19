@@ -708,22 +708,11 @@ impl Tree {
         }
     }
 
+    /// Double-ended, in-order chunk iterator. `next` descends the leftmost spine, `next_back` the
+    /// rightmost, so consuming only the last few chunks from the back touches O(1) nodes per chunk
+    /// rather than walking the whole tree.
     pub(crate) fn chunks(&self) -> Chunks<'_> {
-        let mut it = Chunks::empty();
-        if let Some(root) = &self.root {
-            it.descend(root);
-        }
-        it
-    }
-
-    /// Reverse (last-to-first) chunk iterator. Descends the *rightmost* spine, so consuming only the
-    /// last few chunks touches only O(1) nodes per chunk rather than the whole tree.
-    pub(crate) fn chunks_rev(&self) -> RevChunks<'_> {
-        let mut it = RevChunks::empty();
-        if let Some(root) = &self.root {
-            it.descend(root);
-        }
-        it
+        Chunks::new(self.root.as_ref(), self.chunk_count)
     }
 
     /// Concatenates `left ++ right`, sharing all subtrees away from the seam. O(log₃₂).
@@ -1227,39 +1216,61 @@ fn remove_at_deque(kids: &mut VecDeque<Node>, end: End) {
     }
 }
 
-/// Ordered iterator over a tree's `Bytes` chunks. See [`Tree::chunks`].
+/// Ordered, **double-ended** iterator over a tree's `Bytes` chunks. See [`Tree::chunks`].
 ///
-/// The descent stack is a `Vec`, but it only ever allocates for a *deep* tree — a shallow rope
-/// iterates its `head`/deque directly and never builds this iterator — so the common case pays
-/// nothing and the deep case amortizes one small allocation over the whole walk.
+/// Front and back cursors descend the leftmost / rightmost spines independently (each its own DFS
+/// stack). `remaining` — the exact number of chunks not yet yielded — is decremented by BOTH ends
+/// and checked before every step, so the two cursors provably never yield the same chunk and both
+/// report `None` the instant they meet (the front cursor only ever advances rightward, the back
+/// leftward; while `remaining > 0` the next front chunk is strictly left of the next back chunk).
+///
+/// The back cursor is built lazily — a forward-only walk never touches it — so `next()` is exactly
+/// as cheap as the single-direction walk was. Each stack allocates only for a *deep* tree.
 pub(crate) struct Chunks<'a> {
-    stack: Vec<alloc::collections::vec_deque::Iter<'a, Node>>,
-    leaf: core::slice::Iter<'a, Bytes>,
+    /// Exact chunks not yet yielded from either end; the front/back meeting guard.
+    remaining: usize,
+    /// Root, retained for the lazy back descent.
+    root: Option<&'a Node>,
+    front_stack: Vec<alloc::collections::vec_deque::Iter<'a, Node>>,
+    front_leaf: core::slice::Iter<'a, Bytes>,
+    back_ready: bool,
+    back_stack: Vec<alloc::collections::vec_deque::Iter<'a, Node>>,
+    back_leaf: core::slice::Iter<'a, Bytes>,
 }
 
 impl<'a> Chunks<'a> {
-    fn empty() -> Self {
-        Chunks {
-            stack: Vec::new(),
-            leaf: [].iter(),
+    /// Builds the iterator over `root` (holding `remaining` chunks), eagerly descending the front
+    /// (leftmost) spine so `next()` keeps its cheap single-`leaf.next()` hot path.
+    fn new(root: Option<&'a Node>, remaining: usize) -> Self {
+        let mut it = Chunks {
+            remaining,
+            root,
+            front_stack: Vec::new(),
+            front_leaf: [].iter(),
+            back_ready: false,
+            back_stack: Vec::new(),
+            back_leaf: [].iter(),
+        };
+        if let Some(r) = root {
+            it.descend_front(r);
         }
+        it
     }
 
-    /// Walks the leftmost spine of `node`, pushing each branch's children iterator and leaving
-    /// `self.leaf` on the leftmost leaf.
-    fn descend(&mut self, node: &'a Node) {
+    /// Walks the leftmost spine of `node`, leaving `front_leaf` on the leftmost leaf.
+    fn descend_front(&mut self, node: &'a Node) {
         let mut node = node;
         loop {
             match node {
                 Node::Leaf(b) => {
-                    self.leaf = b.chunks.iter();
+                    self.front_leaf = b.chunks.iter();
                     return;
                 }
                 Node::Branch(b) => {
                     let mut it = b.children.iter();
                     match it.next() {
                         Some(first) => {
-                            self.stack.push(it);
+                            self.front_stack.push(it);
                             node = first;
                         }
                         None => return,
@@ -1268,70 +1279,37 @@ impl<'a> Chunks<'a> {
             }
         }
     }
-}
 
-impl<'a> Chunks<'a> {
-    /// Cold path: the current leaf is exhausted — walk the branch stack to the next leaf.
     #[cold]
-    fn next_leaf(&mut self) -> Option<&'a Bytes> {
+    fn front_next_leaf(&mut self) -> Option<&'a Bytes> {
         loop {
-            let top = self.stack.last_mut()?;
+            let top = self.front_stack.last_mut()?;
             if let Some(node) = top.next() {
-                self.descend(node);
-                if let Some(chunk) = self.leaf.next() {
+                self.descend_front(node);
+                if let Some(chunk) = self.front_leaf.next() {
                     return Some(chunk);
                 }
             } else {
-                self.stack.pop();
+                self.front_stack.pop();
             }
         }
     }
-}
 
-impl<'a> Iterator for Chunks<'a> {
-    type Item = &'a Bytes;
-
-    /// Hot path is a single `leaf.next()`; the stack walk is out-of-line so it inlines tightly.
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.leaf.next() {
-            some @ Some(_) => some,
-            None => self.next_leaf(),
-        }
-    }
-}
-
-/// Reverse (last-to-first) counterpart of [`Chunks`]. Keeps its OWN rightmost-descent stack — it is a
-/// one-directional reverse walk, not a `DoubleEndedIterator` over [`Chunks`] (a single DFS stack
-/// cannot serve both ends of this relaxed-radix tree correctly), so it is correct by construction.
-pub(crate) struct RevChunks<'a> {
-    stack: Vec<alloc::collections::vec_deque::Iter<'a, Node>>,
-    leaf: core::slice::Iter<'a, Bytes>,
-}
-
-impl<'a> RevChunks<'a> {
-    fn empty() -> Self {
-        RevChunks {
-            stack: Vec::new(),
-            leaf: [].iter(),
-        }
-    }
-
-    /// Walks the rightmost spine of `node`, pushing each branch's children iterator (consumed from
-    /// the back) and leaving `self.leaf` on the rightmost leaf.
-    fn descend(&mut self, node: &'a Node) {
+    /// Walks the rightmost spine of `node` (branches consumed from the back), leaving `back_leaf` on
+    /// the rightmost leaf.
+    fn descend_back(&mut self, node: &'a Node) {
         let mut node = node;
         loop {
             match node {
                 Node::Leaf(b) => {
-                    self.leaf = b.chunks.iter();
+                    self.back_leaf = b.chunks.iter();
                     return;
                 }
                 Node::Branch(b) => {
                     let mut it = b.children.iter();
                     match it.next_back() {
                         Some(last) => {
-                            self.stack.push(it);
+                            self.back_stack.push(it);
                             node = last;
                         }
                         None => return,
@@ -1341,33 +1319,55 @@ impl<'a> RevChunks<'a> {
         }
     }
 
-    /// Cold path: the current leaf is exhausted — walk the branch stack (from the back) to the
-    /// previous leaf.
     #[cold]
-    fn next_leaf(&mut self) -> Option<&'a Bytes> {
+    fn back_next_leaf(&mut self) -> Option<&'a Bytes> {
         loop {
-            let top = self.stack.last_mut()?;
+            let top = self.back_stack.last_mut()?;
             if let Some(node) = top.next_back() {
-                self.descend(node);
-                if let Some(chunk) = self.leaf.next_back() {
+                self.descend_back(node);
+                if let Some(chunk) = self.back_leaf.next_back() {
                     return Some(chunk);
                 }
             } else {
-                self.stack.pop();
+                self.back_stack.pop();
             }
         }
     }
 }
 
-impl<'a> Iterator for RevChunks<'a> {
+impl<'a> Iterator for Chunks<'a> {
     type Item = &'a Bytes;
 
-    /// Hot path is a single `leaf.next_back()`; the stack walk is out-of-line.
+    /// Hot path is a single `front_leaf.next()`; the stack walk is out-of-line so it inlines tightly.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        match self.leaf.next_back() {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        match self.front_leaf.next() {
             some @ Some(_) => some,
-            None => self.next_leaf(),
+            None => self.front_next_leaf(),
+        }
+    }
+}
+
+impl<'a> DoubleEndedIterator for Chunks<'a> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        if !self.back_ready {
+            self.back_ready = true;
+            if let Some(r) = self.root {
+                self.descend_back(r);
+            }
+        }
+        match self.back_leaf.next_back() {
+            some @ Some(_) => some,
+            None => self.back_next_leaf(),
         }
     }
 }
