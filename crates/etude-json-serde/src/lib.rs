@@ -129,24 +129,30 @@ impl Deserializer for JsonDeserializer<'_, '_> {
             TokenKind::False => visitor.visit_bool(false),
             TokenKind::String => {
                 let input = self.stream.input;
-                // Copy-avoidance payoff: an escape-free string's content is already valid UTF-8 in the
-                // source, so hand it as an O(1) structural share (RopeStr::Borrowed) — no unescape, no
-                // allocation. Only an escaped string must be materialized into an Owned buffer. The
-                // decoder picks the arm from its cheap has-escapes flag with no re-scan. (#147's
-                // decode_str_rope will further let the escaped case return a built leaf; not needed for
-                // the zero-copy common case, which this handles today.)
+                // Copy-avoidance payoff: an escape-free string's content is handed as an O(1) structural
+                // share (RopeStr::Borrowed) — no unescape, no allocation; only an escaped string is
+                // materialized into an Owned buffer, chosen from the cheap has-escapes flag.
+                //
+                // Content validity is INPUT-derived, so it is an Err path, never a panic: the tokenizer
+                // currently accepts string content that is not valid UTF-8 (a raw non-UTF-8 byte lexes as
+                // a String), which serde_json rejects. Until that is resolved at the lexer (the pending
+                // strict-vs-lossy policy call), the adapter rejects it here — a Deserializer must return
+                // Err, not panic. (When the lexer validates UTF-8, from_utf8 becomes infallible and this
+                // Borrowed arm can move to the zero-copy from_utf8_unchecked.)
                 let has_escapes = token
                     .string_has_escapes()
                     .expect("String token has an escapes flag");
                 if has_escapes {
-                    let s = token.decode_string(input).expect("String token decodes");
+                    let s = token
+                        .decode_string(input)
+                        .ok_or_else(|| Error::custom("string content could not be decoded"))?;
                     visitor.visit_str(RopeStr::Owned(s))
                 } else {
                     let span = token
                         .string_span()
                         .expect("String token has a content span");
                     let rope = StrRope::from_utf8(input.slice(span.range()))
-                        .expect("tokenizer guarantees escape-free string content is valid UTF-8");
+                        .map_err(|_| Error::custom("string content is not valid UTF-8"))?;
                     visitor.visit_str(RopeStr::Borrowed(rope))
                 }
             }

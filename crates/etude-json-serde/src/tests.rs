@@ -215,6 +215,17 @@ fn string_escape_grammar_matches_serde_json() {
 }
 
 #[test]
+fn invalid_utf8_string_content_is_rejected_not_panicked() {
+    // The tokenizer currently lexes a raw non-UTF-8 byte inside quotes as a String token (the pending
+    // strict-vs-lossy lexer policy call); serde_json rejects it (RFC 8259 requires UTF-8). The adapter
+    // must return Err — NOT panic on the Borrowed arm's from_utf8 — matching serde. Pinned so the
+    // panic->Err fix cannot regress. (If the lexer is later made strict, both still reject; this stays green.)
+    check(b"\"\xff\"");
+    check(b"[\"ok\",\"\xff\"]");
+    check(b"{\"k\":\"\xed\xa0\x80\"}"); // 0xED A0 80 = a raw UTF-16 high surrogate, invalid UTF-8
+}
+
+#[test]
 fn whitespace_and_bom_match_serde_json() {
     // JSON insignificant whitespace is EXACTLY space/tab/LF/CR; a leading BOM is not allowed. These are
     // classic divergence points (many parsers wrongly accept form-feed/vertical-tab/NBSP or eat a BOM).
