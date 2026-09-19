@@ -184,13 +184,17 @@ impl StrRope {
     #[must_use]
     pub fn slice<R: core::ops::RangeBounds<usize>>(&self, range: R) -> StrRope {
         use core::ops::Bound;
+        // `saturating_add` so an excluded start / inclusive end of `usize::MAX` cannot wrap the
+        // `+ 1` to 0 (which would silently return the wrong slice in release); it saturates to
+        // `usize::MAX`, which is past the end and so fails the `is_char_boundary` assert below —
+        // the documented out-of-bounds panic.
         let start = match range.start_bound() {
             Bound::Included(&s) => s,
-            Bound::Excluded(&s) => s + 1,
+            Bound::Excluded(&s) => s.saturating_add(1),
             Bound::Unbounded => 0,
         };
         let end = match range.end_bound() {
-            Bound::Included(&e) => e + 1,
+            Bound::Included(&e) => e.saturating_add(1),
             Bound::Excluded(&e) => e,
             Bound::Unbounded => self.len(),
         };
@@ -430,6 +434,33 @@ mod tests {
                     assert_eq!(hash_of(&pair[0]), hash_of(&pair[1]), "Hash across chunkings");
                 }
             });
+    }
+
+    /// RED (breaker-byterope): `slice` resolves its bounds with an UNCHECKED `+ 1`
+    /// (`Excluded(s) => s + 1`, `Included(e) => e + 1`). In release the add WRAPS to 0, so an
+    /// out-of-bounds bound silently returns the WRONG rope instead of panicking: an Excluded start
+    /// of `usize::MAX` yields the WHOLE rope, and an Included end of `usize::MAX` yields the EMPTY
+    /// rope. Same bug class as etude#40 (ByteVec resolve_range/slice, fixed with checked/saturating
+    /// adds) reintroduced in the StrRope layer. Fix-shape-agnostic: any panic satisfies this test
+    /// (debug currently panics via arithmetic overflow; the fix should make release panic per the
+    /// documented out-of-bounds contract). Run in RELEASE to observe the failure.
+    #[test]
+    fn slice_bound_plus_one_must_not_wrap_on_overflow() {
+        use core::ops::Bound;
+        use core::panic::AssertUnwindSafe;
+        let r = StrRope::from("hello");
+        let got = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            r.slice((Bound::Excluded(usize::MAX), Bound::Unbounded))
+        }));
+        assert!(
+            got.is_err(),
+            "slice(Excluded(MAX)..) must panic (start out of bounds), not wrap to the whole rope"
+        );
+        let got = std::panic::catch_unwind(AssertUnwindSafe(|| r.slice(0..=usize::MAX)));
+        assert!(
+            got.is_err(),
+            "slice(..=MAX) must panic (end out of bounds), not wrap to the empty rope"
+        );
     }
 
     #[test]
