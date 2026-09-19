@@ -131,6 +131,12 @@ has no matching operation.)
   multi-limb divmod — 256b 207 → 154 ns (0.53× → **0.39×**), 1024b 1.13 → 0.83 µs (**0.40×**), 4096b 11.1
   → 9.82 µs (**0.48×**) — and the recursive `to_decimal` that leans on it: 1024b 3.76 → 3.57 µs (**1.58×**),
   4096b 24.1 → 22.1 µs (1.14× → **1.04×**).
+- **Native-scalar accessors for downstream decimal** — `is_even`/`is_odd` (O(1), the low bit of the low
+  limb) and `rem_u64` / `divmod_u64` (single-limb divisor, native `u64` remainder, no `Big` divisor or
+  remainder allocated — riding the reciprocal single-limb path). `divmod_u64` vs num-bigint's `/`+`%`:
+  64b 17.0 ns (**0.31×**), 256b 53.5 (**0.42×**), 1024b 116 (**0.26×**), 4096b 365 (**0.21×**); and
+  15–39% faster than `divmod` with a one-limb `Big` divisor. Requested by etude-decimal, whose normalize
+  ran a `divmod(10)` per arithmetic result — `is_even` short-circuits ~half with no division.
 - **Reciprocal single-limb `div_rem_limb_inplace`** — a bignum ÷ a single-limb divisor (`n / small`, the
   `divmod`/`div_exact` single-limb path) did one `u128` divide *per limb* (each a `__udivti3` libcall).
   Now: a 1-limb dividend takes a native `u64 / u64`; wider dividends build one reciprocal (normalizing the

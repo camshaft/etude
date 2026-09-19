@@ -56,6 +56,16 @@ impl Big {
         self.neg
     }
 
+    /// Whether this is even. `O(1)` — the low bit of the least-significant limb; zero is even.
+    pub fn is_even(&self) -> bool {
+        self.mag.first().is_none_or(|&lo| lo & 1 == 0)
+    }
+
+    /// Whether this is odd. `O(1)` (the complement of [`Big::is_even`]).
+    pub fn is_odd(&self) -> bool {
+        !self.is_even()
+    }
+
     /// The absolute value `|self|`.
     pub fn abs(&self) -> Big {
         Big {
@@ -309,6 +319,35 @@ impl Big {
         };
         q.normalize();
         Some(q)
+    }
+
+    /// The remainder `|self| mod d` for a single-limb divisor `d`, or `None` when `d` is zero. Returns
+    /// the magnitude remainder (`< d`, so it fits a `u64`) — sign-agnostic, since the common uses are
+    /// divisibility tests and small-factor stripping. Allocation-free: scans the limbs with the
+    /// reciprocal 2-by-1 division (no `Big` divisor/remainder, no per-limb `u128` divide libcall).
+    pub fn rem_u64(&self, d: u64) -> Option<u64> {
+        if d == 0 {
+            return None;
+        }
+        Some(rem_by_limb(&self.mag, d))
+    }
+
+    /// Truncating division by a single-limb divisor `d`: `(quotient, |remainder|)`, or `None` when `d`
+    /// is zero. The quotient is a `Big` carrying `self`'s sign (`d` is positive); the remainder is the
+    /// magnitude remainder as a native `u64` (no `Big` divisor or `Big` remainder is allocated). Faster
+    /// than [`Big::divmod`] with a one-limb `Big` divisor — it takes the reciprocal single-limb path.
+    pub fn divmod_u64(&self, d: u64) -> Option<(Big, u64)> {
+        if d == 0 {
+            return None;
+        }
+        let mut qmag = self.mag.clone();
+        let rem = div_rem_limb_inplace(&mut qmag, d);
+        let mut q = Big {
+            neg: self.neg,
+            mag: qmag,
+        };
+        q.normalize();
+        Some((q, rem))
     }
 
     /// The greatest common divisor of `|self|` and `|other|` — always NON-NEGATIVE (gcd is sign-agnostic:
@@ -1108,6 +1147,37 @@ fn div_rem_limb_inplace(m: &mut Vec<u64>, d: u64) -> u64 {
         rem >>= sh;
     }
     strip(m);
+    rem
+}
+
+/// `mag mod d` for a single nonzero limb `d`, without allocating a quotient — the remainder-only twin of
+/// [`div_rem_limb_inplace`] (same reciprocal scan, quotient limbs discarded). `mag` is read-only.
+fn rem_by_limb(mag: &[u64], d: u64) -> u64 {
+    if mag.is_empty() {
+        return 0;
+    }
+    if mag.len() == 1 {
+        return mag[0] % d;
+    }
+    let sh = d.leading_zeros();
+    let dn = d << sh;
+    let v = reciprocal_2by1(dn);
+    let n = mag.len();
+    let mut rem;
+    if sh == 0 {
+        rem = 0u64;
+        for &limb in mag.iter().rev() {
+            (_, rem) = udiv_qrnnd_preinv(rem, limb, dn, v);
+        }
+    } else {
+        rem = mag[n - 1] >> (64 - sh);
+        for i in (0..n).rev() {
+            let lo = if i == 0 { 0 } else { mag[i - 1] };
+            let shifted = (mag[i] << sh) | (lo >> (64 - sh));
+            (_, rem) = udiv_qrnnd_preinv(rem, shifted, dn, v);
+        }
+        rem >>= sh;
+    }
     rem
 }
 

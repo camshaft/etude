@@ -290,6 +290,55 @@ fn write_decimal_matches_to_decimal_string_and_num_bigint() {
     );
 }
 
+/// The native-scalar accessors — `is_even`/`is_odd` and the single-limb `rem_u64`/`divmod_u64` — vs
+/// num-bigint, across signs and widths and a spread of divisors (powers of two, small primes, `10¹⁹`,
+/// `u64::MAX`). The remainder is the magnitude remainder `|self| mod d`.
+#[test]
+fn scalar_primitives_vs_num_bigint() {
+    use num_traits::ToPrimitive;
+    let mut rng = Rng(0x5ca1_a400_0000_0001);
+    let divisors: &[u64] = &[
+        1,
+        2,
+        5,
+        10,
+        7,
+        1_000_000_007,
+        1u64 << 32,
+        10u64.pow(19),
+        u64::MAX,
+    ];
+    let two = Ref::from(2);
+    for _ in 0..3000 {
+        let a = rng.big_upto(8);
+        let ra = to_ref(&a);
+        // parity: even iff (value mod 2) == 0.
+        let even = (&ra % &two) == Ref::from(0);
+        assert_eq!(a.is_even(), even, "is_even {a:?}");
+        assert_eq!(a.is_odd(), !even, "is_odd {a:?}");
+        for &d in divisors {
+            let rd = Ref::from(d);
+            // magnitude remainder |self| mod d = |self mod d| (truncated division).
+            let exp_rem = (&ra % &rd).magnitude().to_u64().unwrap();
+            assert_eq!(a.rem_u64(d), Some(exp_rem), "rem_u64 {a:?} % {d}");
+            let (q, r) = a.divmod_u64(d).unwrap();
+            assert_eq!(r, exp_rem, "divmod_u64 rem {a:?} % {d}");
+            assert_eq!(to_ref(&q), &ra / &rd, "divmod_u64 quotient {a:?} / {d}");
+        }
+        assert_eq!(a.rem_u64(0), None, "rem_u64 by zero");
+        assert!(a.divmod_u64(0).is_none(), "divmod_u64 by zero");
+    }
+    // Zero and small explicit values.
+    assert!(Big::zero().is_even());
+    assert!(Big::from_i64(-4).is_even());
+    assert!(Big::from_i64(-3).is_odd());
+    assert_eq!(Big::from_i64(-17).rem_u64(5), Some(2)); // |−17| mod 5 = 2
+    assert_eq!(
+        Big::from_i64(-17).divmod_u64(5),
+        Some((Big::from_i64(-3), 2))
+    );
+}
+
 #[test]
 fn canonical_form_invariants() {
     // Zero is unique and non-negative.
