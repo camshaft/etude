@@ -525,6 +525,19 @@ impl Decimal {
         if self.coeff.is_zero() {
             return 0.0;
         }
+        // Fast path: a coefficient that fits f64's 53-bit mantissa exactly, times an exactly-representable
+        // power of ten (`10^0..=10^22` are exact f64s), converts with a single correctly-rounded IEEE
+        // operation — the common case for values that originate as ordinary decimal literals. Both
+        // operands are exact, so the one multiply (or divide) yields the correctly-rounded result,
+        // identical to the exact big-int path below.
+        if (-22..=22).contains(&self.exp)
+            && let Some(c) = self.coeff.to_i64_checked()
+            && c.unsigned_abs() < (1u64 << 53)
+        {
+            let cf = c as f64; // exact: |c| < 2^53
+            let p = POW10_F64[self.exp.unsigned_abs() as usize]; // exact: 10^0..=10^22
+            return if self.exp >= 0 { cf * p } else { cf / p };
+        }
         let neg = self.coeff.is_negative();
         let sign = if neg { 1u64 << 63 } else { 0 };
         let inf = if neg {
@@ -748,6 +761,15 @@ impl Decimal {
         }
     }
 }
+
+/// `10^0 ..= 10^22` as `f64`, each exactly representable (`10^k = 2^k · 5^k`, and `5^22 < 2^52`, so the
+/// significand fits 53 bits). Used by the [`Decimal::to_f64`] fast path, where one multiply or divide by
+/// an exact power of ten is correctly rounded. `10^23` is the first inexact power, so the table stops at
+/// `10^22`.
+const POW10_F64: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
 
 /// `10^k` as a nonnegative [`Big`], by binary exponentiation (base-10, squaring). `10^0 == 1`.
 fn pow10(k: u64) -> Big {

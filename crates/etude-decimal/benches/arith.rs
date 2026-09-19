@@ -287,6 +287,22 @@ fn bench(c: &mut Criterion) {
         |a| a.to_f64(),
     );
 
+    // to_f64 fast path: a small coefficient (`< 2^53`) at a modest exponent — the common decimal-literal
+    // case, handled by a single correctly-rounded IEEE multiply/divide. The TIERS sweep above cannot
+    // exercise it (those coefficients exceed the f64 mantissa), so it gets its own cell.
+    {
+        let mut g = group(c, "to_f64_small");
+        let a = Decimal::from_str("12345678.9012345").expect("valid"); // 15 sig digits, exp -7
+        let ra = BigDecimal::from_str("12345678.9012345").expect("valid");
+        g.bench_function(BenchmarkId::new("etude", "15d"), |be| {
+            be.iter(|| black_box(black_box(&a).to_f64()))
+        });
+        g.bench_function(BenchmarkId::new("bigdecimal", "15d"), |be| {
+            be.iter(|| black_box(black_box(&ra).to_f64()))
+        });
+        g.finish();
+    }
+
     // Exact division by a terminating divisor (2^10, so the quotient always terminates). No bigdecimal
     // cell: bigdecimal has no exact-terminating division — its `/` is precision-bounded (that comparison
     // is the `div_round` group). This tracks our exact `div`'s cost across tiers for regression.
