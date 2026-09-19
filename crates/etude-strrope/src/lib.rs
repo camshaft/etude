@@ -463,6 +463,101 @@ mod tests {
         );
     }
 
+    /// Mutation-op differential harness vs a `String` model: every mutating and structural op the
+    /// crate exposes, applied in fuzz-chosen sequences (fuzzed indices snapped down to the nearest
+    /// char boundary so both sides accept them), must keep the rope byte-identical to the model —
+    /// content, length, `chars`/`char_indices`, `Display`, and slicing all agree after every step.
+    /// The `Rechunk` op rebuilds the rope from the model under a fuzz-chosen chunk layout
+    /// mid-sequence, so later ops run against shifted leaf boundaries.
+    #[test]
+    fn mutation_differential_against_string_model() {
+        use bolero_generator::TypeGenerator;
+
+        #[derive(Debug, Clone, TypeGenerator)]
+        enum Op {
+            PushStr(String),
+            Push(char),
+            InsertStr(usize, String),
+            Insert(usize, char),
+            SplitOffKeepHead(usize),
+            SplitOffKeepTail(usize),
+            SliceCheck(usize, usize),
+            CharsCheck,
+            Rechunk(u8),
+        }
+
+        fn snap(model: &str, idx: usize) -> usize {
+            let mut i = idx % (model.len() + 1);
+            while !model.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        }
+
+        bolero::check!()
+            .with_type::<Vec<Op>>()
+            .cloned()
+            .for_each(|ops| {
+                let mut rope = StrRope::new();
+                let mut model = String::new();
+                for op in ops {
+                    match &op {
+                        Op::PushStr(s) => {
+                            rope.push_str(s);
+                            model.push_str(s);
+                        }
+                        Op::Push(c) => {
+                            rope.push(*c);
+                            model.push(*c);
+                        }
+                        Op::InsertStr(idx, s) => {
+                            let at = snap(&model, *idx);
+                            rope.insert_str(at, s);
+                            model.insert_str(at, s);
+                        }
+                        Op::Insert(idx, c) => {
+                            let at = snap(&model, *idx);
+                            rope.insert(at, *c);
+                            model.insert(at, *c);
+                        }
+                        Op::SplitOffKeepHead(idx) => {
+                            let at = snap(&model, *idx);
+                            let tail = rope.split_off(at);
+                            let mtail = model.split_off(at);
+                            assert_eq!(tail, *mtail.as_str(), "split-off tail");
+                        }
+                        Op::SplitOffKeepTail(idx) => {
+                            let at = snap(&model, *idx);
+                            let tail = rope.split_off(at);
+                            model = model.split_off(at);
+                            rope = tail;
+                        }
+                        Op::SliceCheck(a, b) => {
+                            let (mut a, mut b) = (snap(&model, *a), snap(&model, *b));
+                            if a > b {
+                                core::mem::swap(&mut a, &mut b);
+                            }
+                            assert_eq!(rope.slice(a..b), model[a..b], "slice({a}..{b})");
+                        }
+                        Op::CharsCheck => {
+                            assert!(rope.chars().eq(model.chars()), "chars");
+                            assert!(rope.char_indices().eq(model.char_indices()), "char_indices");
+                        }
+                        Op::Rechunk(width) => {
+                            let width = usize::from(width % 7) + 1;
+                            let mut bytes = ByteVec::new();
+                            for piece in model.as_bytes().chunks(width) {
+                                bytes.push_back(bytes::Bytes::copy_from_slice(piece));
+                            }
+                            rope = StrRope::from_utf8(bytes).expect("model is valid UTF-8");
+                        }
+                    }
+                    assert_eq!(rope, *model.as_str(), "content after {op:?}");
+                    assert_eq!(rope.len(), model.len(), "len after {op:?}");
+                }
+            });
+    }
+
     #[test]
     fn from_str_and_basic_queries() {
         let s = StrRope::from("héllo");
