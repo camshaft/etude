@@ -63,6 +63,16 @@ double-ended chunk iterator, not the whole buffer); and `validate_utf8` streams 
 chunks with no full-content allocation, so it beats the former copy-then-validate path (which allocated
 an O(n) contiguous buffer) on the valid ingest path despite the 1.28× vs an already-contiguous slice.
 
+### `copy_to_bytes_mut` single-chunk reclaim (runnable: `cargo bench -p etude-bytevec -- copy_to_bytes_mut`)
+
+`copy_to_bytes_mut` on a single, uniquely-owned chunk reclaims the chunk's allocation in place
+(`BytesMut::from` on a unique `Bytes`) instead of copying. The tell is size-independence: it measures
+**14.0 ns at a 1400 B chunk and 14.2 ns at a 256 KB chunk** — flat, so no copy happens (a copy would
+scale with size, ~microseconds at 256 KB), against `BytesMut::from(Vec)`'s 7 ns ideal reclaim. Before
+this landed the fast path cloned the chunk first, which forced the refcount to 2 and defeated the
+reclaim, so it always copied; moving the chunk out by value (the rope is consumed anyway) restores the
+documented zero-copy. Fenced content-wise by the shared harness (`CopyToBytesMutCheck`).
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat

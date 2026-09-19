@@ -619,6 +619,43 @@ fn bench_validate_utf8(c: &mut Criterion) {
     }
 }
 
+/// `copy_to_bytes_mut` on a single, uniquely-owned chunk reclaims the allocation in place rather
+/// than copying, so its time is flat across chunk size (a copy would scale with size). Benched at a
+/// small and a large single chunk to show the size-independence, against `BytesMut::from(Vec)` (the
+/// ideal reclaim) and a deep multi-chunk rope (which must copy).
+fn bench_copy_to_bytes_mut(c: &mut Criterion) {
+    let mut g = group(c, "copy_to_bytes_mut");
+    for &sz in &[1400usize, 262_144] {
+        let label = format!("single_{sz}");
+        g.bench_function(BenchmarkId::new("rope_reclaim", &label), |b| {
+            b.iter_batched(
+                || {
+                    let mut r = ByteVec::new();
+                    r.push_back(Bytes::from(vec![0u8; sz]));
+                    r
+                },
+                |r| black_box(r.copy_to_bytes_mut()),
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("bytesmut_from_vec", &label), |b| {
+            b.iter_batched(
+                || Bytes::from(vec![0u8; sz]),
+                |by| black_box(BytesMut::from(by)),
+                BatchSize::SmallInput,
+            )
+        });
+    }
+    g.bench_function(BenchmarkId::new("rope_copy", "deep"), |b| {
+        b.iter_batched(
+            || rope_of(DEEP),
+            |r| black_box(r.copy_to_bytes_mut()),
+            BatchSize::SmallInput,
+        )
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_push_back,
@@ -634,6 +671,7 @@ criterion_group!(
     bench_extend,
     bench_from_iter,
     bench_starts_ends_with,
-    bench_validate_utf8
+    bench_validate_utf8,
+    bench_copy_to_bytes_mut
 );
 criterion_main!(benches);
