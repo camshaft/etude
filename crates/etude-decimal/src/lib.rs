@@ -803,6 +803,23 @@ impl Decimal {
             // Equal scale: |a·10^e| vs |b·10^e| is |a| vs |b| — a direct coefficient compare.
             return by_mag(&self.coeff, &other.coeff);
         }
+        // Native fast path for small unequal-scale values: when both coefficients fit `i128` and aligning
+        // them to the smaller exponent (scaling by a power of ten) stays within `i128`, compare the scaled
+        // integers directly — no digit count, `bit_len` estimate, or `Big` scale. `checked_mul` returns
+        // `None` on overflow (a wide coefficient or a large scale gap), falling through to the exact paths
+        // below.
+        if let (Some(ca), Some(cb)) = (self.coeff.to_i128_checked(), other.coeff.to_i128_checked())
+        {
+            let e = self.exp.min(other.exp);
+            if let (Some(pa), Some(pb)) = (
+                pow10_i128((self.exp - e) as u32),
+                pow10_i128((other.exp - e) as u32),
+            ) && let (Some(sa), Some(sb)) = (ca.checked_mul(pa), cb.checked_mul(pb))
+            {
+                // `sa`/`sb` carry the shared sign, so `by_mag`'s flip applies to the scaled integers too.
+                return if neg { sb.cmp(&sa) } else { sa.cmp(&sb) };
+            }
+        }
         // Adjusted exponent = position of the most-significant digit = (digit count - 1) + exp. Larger
         // adjusted exponent = larger magnitude (independent of the shared sign). Computed in i128 so a
         // near-`i64::MAX` exponent cannot overflow the addition.
