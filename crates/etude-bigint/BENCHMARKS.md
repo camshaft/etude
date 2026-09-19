@@ -43,7 +43,7 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
-| to_decimal_string         | 64b    | 151 ns    | 73.3 ns    | 2.06      |
+| to_decimal_string         | 64b    | 61.9 ns   | 72.2 ns    | **0.86**  |
 | to_decimal_string         | 256b   | 545 ns    | 248 ns     | 2.19      |
 | to_decimal_string         | 1024b  | 3.76 µs   | 2.25 µs    | 1.67      |
 | to_decimal_string         | 4096b  | 24.1 µs   | 21.1 µs    | 1.14      |
@@ -52,8 +52,9 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 4096b  | 524 ns    | —          | —         |
 
-We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), and **cmp** (three of four
-tiers), and reach parity-or-better on **mul at 256b/1024b** and **sub at 256b**.
+We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), **cmp** (three of four
+tiers), and **to_decimal_string at 64b** (0.86×), and reach parity-or-better on **mul at 256b/1024b**
+and **sub at 256b**.
 
 (divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd is capped at 1024b because
 its Euclid cost is steep. sign_magnitude_roundtrip is the canonical map-key encode+decode; num-bigint
@@ -111,15 +112,20 @@ has no matching operation.)
   tier: 64b 186 → 151 ns (2.58 → 2.06), 256b 623 → 545 ns (2.51 → 2.19), 1024b 4.03 → 3.76 µs
   (1.79 → 1.67), 4096b 25.3 → 24.1 µs (1.19 → 1.14). It also lets a downstream `Display` render a `Big`
   with no intermediate allocation.
+- **Single-limb `to_decimal` fast path** — a value that fits one `u64` limb (≤ ~1.8·10¹⁹) writes in a
+  single chunk with no magnitude clone and no chunk-index `Vec`, instead of running the peel loop:
+  64b 151 → 61.9 ns, crossing from 2.06× to **0.86× — now faster than num-bigint** at the small tier.
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string at the small tiers (64b/256b ~2.5×).** These stay on the linear chunk method
-   (below the recursive crossover); the residual is num-bigint's inline small-value handling — a
-   small-value fast path (avoiding a heap `Vec` for ≤1-limb values) would help here and elsewhere.
-2. **to_decimal_string at 4096b (1.19×), sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the
-   64b tiers (add/sub/mul ~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest tiers is a
-   subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd.
+1. **to_decimal_string at 256b (2.19×).** A 2–4-limb value still runs the peel loop with its scratch
+   `Vec`s; the ≤1-limb fast path already crosses 64b below 1.0. Extending the alloc-free path to a
+   handful of limbs (a stack scratch buffer) would pull 256b down too.
+2. **to_decimal_string at 4096b (1.14×), sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the
+   64b add/sub/mul tiers (~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest tiers is a
+   subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd; at the
+   smallest, an inline small-value magnitude repr (no heap `Vec` for ≤1-limb values) would close the
+   arithmetic + clone gap.
 
 ## Roadmap
 

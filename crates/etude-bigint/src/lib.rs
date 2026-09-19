@@ -696,13 +696,19 @@ const DECIMAL_RECURSIVE_THRESHOLD: usize = 10;
 
 /// Render a nonzero canonical magnitude `mag` as decimal digits into the sink `w` (no leading zeros).
 ///
-/// Narrow magnitudes use [`emit_decimal_linear`] (peel `10^19` chunks). Wide ones use a recursive
+/// A single-limb value (the common small case) writes directly in one chunk — no scratch allocation.
+/// Wider narrow magnitudes use [`emit_decimal_linear`] (peel `10^19` chunks). Wide ones use a recursive
 /// divide-and-conquer split: with `pow[i] = 10^(19·2^i)`, dividing by the half-width power `pow[level-1]`
 /// splits the value into a high and low half of ≈equal digit width, each converted recursively. The
 /// linear method is O(n²) (each of the n/19 chunk divisions scans the whole shrinking magnitude); the
 /// split makes the sub-divisions operate on geometrically smaller operands, the same subquadratic
 /// base conversion `num-bigint` uses.
 fn write_decimal_mag<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt::Result {
+    // Single-limb value (≤ ~1.8·10¹⁹, ≤20 digits): its one `u64` writes in a single chunk with no
+    // magnitude clone and no chunk-index `Vec` — the fast path for the common small-value case.
+    if mag.len() <= 1 {
+        return write_decimal_chunk(w, mag.first().copied().unwrap_or(0), 0);
+    }
     if mag.len() <= DECIMAL_RECURSIVE_THRESHOLD {
         return emit_decimal_linear(mag, w);
     }
