@@ -2,12 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Exact base-10 arbitrary-precision decimal numbers — a `coeff * 10^exp` value over
-//! [`etude_bigint::Big`]. Pure over `alloc`, no I/O, no dependency but `etude-bigint`. A decimal number
-//! literal (`-?int(.frac)?([eE][+-]?exp)?`) decodes into a [`Decimal`] LOSSLESSLY, unlike an `f64` (which
-//! loses precision) or a rational (which would need gcd reduction and cannot preserve scale). Exact
+//! [`etude_bigint::Big`]. Pure over `alloc`, no I/O, no dependency but `etude-bigint`. A decimal
+//! preserves every significant digit and its scale exactly, unlike an `f64` (which loses precision) or a
+//! rational (which would need gcd reduction and cannot distinguish `0.1` from `0.10` by scale). Exact
 //! arithmetic ([`Decimal::add`]/[`Decimal::sub`]/[`Decimal::mul`]) never rounds a digit away; division
 //! (which needs a rounding policy) is a later addition. Correctness is pinned by a differential test
 //! against `bigdecimal` (a dev-dependency) as the reference.
+//!
+//! A value is built either from its already-separated pieces — sign, coefficient digits, and exponent —
+//! via [`Decimal::from_parts`] / [`Decimal::from_components`] (the path a text decoder that has already
+//! scanned a number token uses: no string is re-scanned), or from a decimal-literal string via
+//! [`Decimal::from_ascii`] / [`Decimal::from_str`] (a self-contained parser, convenient for standalone
+//! use).
 //!
 //! # Representation and the canonical-form invariant
 //! A [`Decimal`] is the exact value `coeff * 10^exp`, where `coeff` is an [`etude_bigint::Big`] signed
@@ -24,7 +30,8 @@
 //!
 //! The fields are PRIVATE and not part of the stable API — the coefficient repr and the exponent width
 //! may change. Construct through [`Decimal::zero`], [`Decimal::from_i64`], [`Decimal::from_bigint`],
-//! [`Decimal::new`], [`Decimal::from_ascii`]/[`Decimal::from_str`]; inspect through
+//! [`Decimal::new`], [`Decimal::from_parts`]/[`Decimal::from_components`], or
+//! [`Decimal::from_ascii`]/[`Decimal::from_str`]; inspect through
 //! [`Decimal::coefficient`], [`Decimal::exponent`], [`Decimal::is_zero`], [`Decimal::is_negative`],
 //! [`Decimal::is_integer`], [`Decimal::to_f64`], the [`Ord`]/[`PartialOrd`] comparison, and `Display` /
 //! [`Decimal::write_to`] (the allocation-conscious rendering path — write straight into a
@@ -191,17 +198,55 @@ impl Decimal {
         Decimal::new(self.coeff.mul(&other.coeff), exp)
     }
 
-    /// Parse a decimal number literal from ASCII bytes into an exact `Decimal`, or `None` if the bytes
-    /// are not a well-formed decimal literal. The accepted grammar is:
+    /// Build a `Decimal` from its already-separated pieces: `negative` (the sign), the coefficient's
+    /// significant decimal digits split into an integer part and a fractional part (each ASCII
+    /// `b'0'..=b'9'`, no sign and no `.`), and `exp` (an explicit base-10 exponent). The value is
+    ///
+    /// ```text
+    /// (-1)^negative * (int_digits ++ frac_digits as an integer) * 10^(exp - frac_digits.len())
+    /// ```
+    ///
+    /// i.e. the fractional digits shift the point, then `exp` scales — exactly the pieces a decoder that
+    /// has already scanned a number token holds, so no string is re-scanned. The result is canonicalized
+    /// (trailing zeros stripped). Either slice may be empty (an empty coefficient is zero). Returns
+    /// `None` if a byte is not an ASCII digit, or if `exp - frac_digits.len()` would underflow `i64`.
+    pub fn from_parts(
+        negative: bool,
+        int_digits: &[u8],
+        frac_digits: &[u8],
+        exp: i64,
+    ) -> Option<Decimal> {
+        if !int_digits.iter().all(u8::is_ascii_digit) || !frac_digits.iter().all(u8::is_ascii_digit)
+        {
+            return None;
+        }
+        let mag = big_from_ascii_digits(int_digits, frac_digits);
+        let final_exp = exp.checked_sub(frac_digits.len() as i64)?;
+        let coeff = if negative { mag.neg() } else { mag };
+        Some(Decimal::new(coeff, final_exp))
+    }
+
+    /// Build a `Decimal` from a sign, a single run of coefficient digits, and an exponent —
+    /// `(-1)^negative * digits * 10^exp`. A convenience over [`Decimal::from_parts`] for a caller whose
+    /// coefficient is not split into integer/fractional parts. `digits` are ASCII `b'0'..=b'9'` (no sign,
+    /// no `.`); returns `None` on a non-digit byte.
+    pub fn from_components(negative: bool, digits: &[u8], exp: i64) -> Option<Decimal> {
+        Decimal::from_parts(negative, digits, &[], exp)
+    }
+
+    /// Parse a decimal-literal string from ASCII bytes into an exact `Decimal`, or `None` if the bytes
+    /// are not a well-formed literal. This is a self-contained parser, convenient for standalone use; a
+    /// decoder that has already scanned a number's pieces should use [`Decimal::from_parts`] instead
+    /// (no re-scan). The accepted grammar is
     ///
     /// ```text
     /// -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
     /// ```
     ///
-    /// so a leading `+`, a leading zero (`01`), a bare `.5`, a trailing `1.`, a lone `-`, an empty
-    /// exponent (`1e`), and any surrounding whitespace or trailing garbage are all REJECTED. The decode
-    /// is LOSSLESS: every significant digit becomes part of the coefficient and the decimal-point /
-    /// exponent set `exp`. An exponent literal with more than 18 digits (beyond `i64` range) is
+    /// so a leading `+`, a redundant leading zero (`01`), a bare `.5`, a trailing `1.`, a lone `-`, an
+    /// empty exponent (`1e`), and any surrounding whitespace or trailing garbage are all REJECTED. The
+    /// decode is LOSSLESS: every significant digit becomes part of the coefficient and the decimal-point
+    /// / exponent set `exp`. An exponent literal with more than 18 digits (beyond `i64` range) is
     /// rejected (returns `None`) rather than silently wrapping.
     pub fn from_ascii(bytes: &[u8]) -> Option<Decimal> {
         let mut i = 0;
@@ -282,12 +327,9 @@ impl Decimal {
             return None;
         }
 
-        // The coefficient is the concatenation of the integer and fractional digits; each fractional
-        // digit shifts the point right, i.e. lowers the exponent by one.
-        let mag = big_from_ascii_digits(int_digits, frac_digits);
-        let exp = exp_val.checked_sub(frac_digits.len() as i64)?;
-        let coeff = if neg { mag.neg() } else { mag };
-        Some(Decimal::new(coeff, exp))
+        // The grammar is validated; hand the scanned pieces to the shared component constructor (the
+        // digits are already known to be ASCII, so its re-check is trivially satisfied).
+        Decimal::from_parts(neg, int_digits, frac_digits, exp_val)
     }
 
     /// Convert to the nearest `f64` (correctly rounded via the standard library's float parser).
@@ -367,8 +409,8 @@ impl Decimal {
 
     /// Write the canonical decimal rendering DIRECTLY into a [`core::fmt::Write`] sink — the
     /// allocation-conscious rendering path that [`Display`](core::fmt::Display) uses (no intermediate `String` is built for
-    /// the framing). The output always re-parses via [`Decimal::from_ascii`] to the same value: a plain
-    /// (point) form for modest exponents, and a bounded `<digits>e<exp>`
+    /// the framing). The output is always a valid decimal literal and re-parses via [`Decimal::from_ascii`]
+    /// to the same value: a plain (point) form for modest exponents, and a bounded `<digits>e<exp>`
     /// scientific form for large magnitudes so the output stays small.
     ///
     /// One residual allocation remains: the coefficient's digits come from
