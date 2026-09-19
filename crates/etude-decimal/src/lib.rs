@@ -1120,6 +1120,14 @@ fn fold_digits(ds: &[u8]) -> u64 {
 }
 
 impl core::fmt::Display for Decimal {
+    /// Renders the canonical decimal form (see [`Decimal::write_to`]). Like `num-rational`'s numeric
+    /// `Display`, this streams the digits straight into the formatter and **does not honor format flags** —
+    /// width, fill, alignment, sign (`+`), zero-padding, and precision (`{:.N}`) are ignored, so
+    /// `format!("{:>8.2}", d)` renders exactly the same string as `format!("{}", d)`. Honoring flags would
+    /// require buffering the whole rendering (defeating the zero-allocation streaming path) and a deliberate
+    /// choice of precision semantics for a decimal (`N` fractional digits, not a character truncation);
+    /// it is deferred until a consumer needs it. To pad or align, render to a `String` first and format
+    /// that.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // The Formatter is itself a `core::fmt::Write` sink — write straight into it, no String.
         self.write_to(f)
