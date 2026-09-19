@@ -82,6 +82,58 @@ fn exact_addition_re_reduces() {
 }
 
 #[test]
+fn equal_denominator_add_sub() {
+    // The equal-denominator fast path must agree with the general path AND still reduce/canonicalize.
+    // 3/10 + 4/10 = 7/10 (coprime, stays).
+    assert_eq!(
+        Rational::from_ratio_i64(3, 10)
+            .unwrap()
+            .add(&Rational::from_ratio_i64(4, 10).unwrap())
+            .to_decimal_string(),
+        "7/10"
+    );
+    // 3/10 + 7/10 = 10/10 = 1 (reduces to an integer).
+    assert_eq!(
+        Rational::from_ratio_i64(3, 10)
+            .unwrap()
+            .add(&Rational::from_ratio_i64(7, 10).unwrap())
+            .to_decimal_string(),
+        "1"
+    );
+    // 1/6 + 1/6 = 2/6 = 1/3 (reduces).
+    assert_eq!(
+        Rational::from_ratio_i64(1, 6)
+            .unwrap()
+            .add(&Rational::from_ratio_i64(1, 6).unwrap())
+            .to_decimal_string(),
+        "1/3"
+    );
+    // 3/10 - 3/10 = 0 (canonical 0/1).
+    assert_eq!(
+        Rational::from_ratio_i64(3, 10)
+            .unwrap()
+            .sub(&Rational::from_ratio_i64(3, 10).unwrap())
+            .to_decimal_string(),
+        "0"
+    );
+    // 1/10 - 7/10 = -6/10 = -3/5 (sign + reduce).
+    assert_eq!(
+        Rational::from_ratio_i64(1, 10)
+            .unwrap()
+            .sub(&Rational::from_ratio_i64(7, 10).unwrap())
+            .to_decimal_string(),
+        "-3/5"
+    );
+    // Integers (den == 1) hit the same fast path: 5 + 7 = 12.
+    assert_eq!(
+        Rational::from_i64(5)
+            .add(&Rational::from_i64(7))
+            .to_decimal_string(),
+        "12"
+    );
+}
+
+#[test]
 fn integer_and_sign_predicates() {
     assert!(Rational::from_i64(7).is_integer());
     assert!(!Rational::from_ratio_i64(1, 2).unwrap().is_integer());
@@ -106,17 +158,39 @@ fn integer_and_sign_predicates() {
 
 #[test]
 fn comparison_is_exact() {
+    use core::cmp::Ordering::{Equal, Greater, Less};
+    let cmp = |n1, d1, n2, d2| {
+        Rational::from_ratio_i64(n1, d1)
+            .unwrap()
+            .cmp(&Rational::from_ratio_i64(n2, d2).unwrap())
+    };
     let a = Rational::from_ratio_i64(1, 3).unwrap();
     let b = Rational::from_ratio_i64(1, 2).unwrap();
-    assert_eq!(a.cmp(&b), core::cmp::Ordering::Less);
-    assert_eq!(b.cmp(&a), core::cmp::Ordering::Greater);
-    assert_eq!(
-        a.cmp(&Rational::from_ratio_i64(2, 6).unwrap()),
-        core::cmp::Ordering::Equal
-    );
+    assert_eq!(a.cmp(&b), Less);
+    assert_eq!(b.cmp(&a), Greater);
+    assert_eq!(a.cmp(&Rational::from_ratio_i64(2, 6).unwrap()), Equal);
     // Ord/PartialOrd delegate to cmp.
     assert!(a < b);
-    assert!(Rational::from_ratio_i64(-1, 2).unwrap() < Rational::zero());
+
+    // Sign handling (the sign short-circuit + magnitude reversal for two negatives).
+    assert_eq!(cmp(-1, 2, 0, 1), Less);
+    assert_eq!(cmp(0, 1, 1, 100), Less);
+    assert_eq!(cmp(-1, 2, 1, 100), Less); // negative < positive
+    assert_eq!(cmp(-1, 3, -1, 2), Greater); // -1/3 > -1/2 (magnitude reversed)
+    assert_eq!(cmp(-2, 6, -1, 3), Equal); // same negative value, different representation
+    assert_eq!(cmp(-5, 1, -5, 1), Equal);
+
+    // Integer part decides (unequal ⌊·⌋) and integer-vs-fraction tie-break.
+    assert_eq!(cmp(7, 2, 5, 2), Greater); // 3.5 vs 2.5
+    assert_eq!(cmp(4, 2, 5, 2), Less); // 2 (exact) vs 2.5 → integer < fraction at equal ⌊·⌋
+    assert_eq!(cmp(5, 2, 2, 1), Greater); // 2.5 vs 2 (exact) → fraction > integer
+    assert_eq!(cmp(6, 3, 2, 1), Equal); // both exactly 2
+
+    // Close values with distinct large-ish denominators (the hard cases for any comparison method).
+    assert_eq!(cmp(22, 7, 355, 113), Greater); // 22/7 > 355/113 (both ≈ π, 22/7 is larger)
+    assert_eq!(cmp(355, 113, 22, 7), Less);
+    assert_eq!(cmp(1000000, 999999, 999999, 999998), Less); // 1 + 1/999999 < 1 + 1/999998
+    assert_eq!(cmp(13, 11, 14, 12), Greater); // 1.1818… vs 1.1666…
 }
 
 #[test]

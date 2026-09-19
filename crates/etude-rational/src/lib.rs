@@ -157,6 +157,13 @@ impl Rational {
 
     /// Exact sum `self + other`. `a/b + c/d = (a*d + c*b)/(b*d)`, renormalized.
     pub fn add(&self, other: &Rational) -> Rational {
+        if self.den == other.den {
+            // Common denominator: `(a + c)/b`. Skips both cross-multiplies AND the `b*d` product — three
+            // multiplies replaced by one add. The `den` equality test is an O(limbs) limb compare that
+            // short-circuits on the first differing limb, so it is free when the denominators differ.
+            return normalize(self.num.add(&other.num), self.den.clone())
+                .expect("common denominator is positive");
+        }
         let num = self.num.mul(&other.den).add(&other.num.mul(&self.den));
         let den = self.den.mul(&other.den);
         // Both denominators are strictly positive, so the product is nonzero: normalize cannot fail.
@@ -165,6 +172,11 @@ impl Rational {
 
     /// Exact difference `self - other`.
     pub fn sub(&self, other: &Rational) -> Rational {
+        if self.den == other.den {
+            // Common denominator: `(a - c)/b` (see [`Rational::add`] for the fast-path rationale).
+            return normalize(self.num.sub(&other.num), self.den.clone())
+                .expect("common denominator is positive");
+        }
         let num = self.num.mul(&other.den).sub(&other.num.mul(&self.den));
         let den = self.den.mul(&other.den);
         normalize(num, den).expect("product of positive denominators is nonzero")

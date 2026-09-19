@@ -59,6 +59,27 @@ impl Rng {
         let den = self.big(nbytes);
         Rational::new(num, den).expect("denominator is nonzero")
     }
+    /// Two rationals that share the SAME `nbytes`-wide denominator (to exercise the equal-denominator
+    /// add/sub fast path). Numerators are RANDOM and made coprime to `den` at setup time (nudged up until
+    /// `gcd == 1`) so `new` leaves the denominator intact — the resulting `num1 + num2` has a
+    /// representative (random-cost) reduction, NOT an artificially trivial one.
+    fn rat_pair_eqden(&mut self, nbytes: usize) -> (Rational, Rational) {
+        let one = Big::from_i64(1);
+        let den = self.big(nbytes);
+        let coprime_num = |rng: &mut Self| {
+            let mut n = rng.big(nbytes);
+            while n.gcd(&den) != one {
+                n = n.add(&one);
+            }
+            n
+        };
+        let num1 = coprime_num(self);
+        let num2 = coprime_num(self);
+        let a = Rational::new(num1, den.clone()).expect("nonzero denominator");
+        let b = Rational::new(num2, den).expect("nonzero denominator");
+        assert_eq!(a.denom(), b.denom(), "eqden pair must share a denominator");
+        (a, b)
+    }
 }
 
 /// The `num-bigint` value equal to `b` (via the public two's-complement encoding).
@@ -112,6 +133,27 @@ fn bench(c: &mut Criterion) {
     binop(c, "sub", |a, b| a.sub(b), |a, b| a - b);
     binop(c, "mul", |a, b| a.mul(b), |a, b| a * b);
     binop(c, "div", |a, b| a.div(b).expect("nonzero"), |a, b| a / b);
+
+    // Equal-denominator add/sub (a common real-workload pattern: accumulating fractions over a shared
+    // denominator, or integer-valued rationals). Both implementations fast-path this, so it is a fair
+    // fast-path-vs-fast-path measurement.
+    {
+        let mut g = group(c, "add_eqden");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0xabcd_1234 ^ (nbytes as u64));
+            let (a, b) = rng.rat_pair_eqden(nbytes);
+            let (ra, rb) = (to_ref(&a), to_ref(&b));
+            g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
+                be.iter(|| black_box(a.add(black_box(b))))
+            });
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", label),
+                &(&ra, &rb),
+                |be, (a, b)| be.iter(|| black_box(*a + *b)),
+            );
+        }
+        g.finish();
+    }
 
     // Comparison: exact cross-multiplication vs num-rational's cmp.
     {
