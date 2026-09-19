@@ -815,48 +815,67 @@ fn round_up_magnitude(q: &Big, r: &Big, den: &Big, neg: bool, mode: RoundingMode
     }
 }
 
+/// Number of decimal digits per base-`10ᵏ` limb fed to [`Big::from_base_10_pow_k_limbs`]. `10¹⁹ < 2⁶⁴`,
+/// so a 19-digit chunk is the widest that fits a `u64`.
+const COEFF_CHUNK: usize = 19;
+
 /// Accumulates ASCII decimal digits fed one at a time (streaming, across chunk boundaries) into a
-/// nonnegative [`Big`] coefficient. Batches digits into ≤18-digit `i64` chunks (each flushed as one
-/// `mul`+`add`) to avoid an O(n²) per-digit multiply chain.
+/// nonnegative [`Big`] coefficient. Collects the digit values and, at [`CoeffBuilder::finish`], groups
+/// them most-significant-first into `COEFF_CHUNK`-digit base-`10ᵏ` limbs (the leading chunk carries the
+/// remainder digits, every later chunk exactly `COEFF_CHUNK`) and builds the `Big` in one Horner pass via
+/// [`Big::from_base_10_pow_k_limbs`] — a wide `u64` multiply-add per chunk, with no per-digit or
+/// per-chunk `Big` allocated.
 struct CoeffBuilder {
-    /// The accumulated high-order magnitude (everything already flushed).
-    mag: Big,
-    /// The current low-order chunk of up to 18 not-yet-flushed digits.
-    chunk: i64,
-    /// The number of digits in `chunk`.
-    len: u32,
+    /// The decimal digit values (`0..=9`), most-significant first, in read order.
+    digits: alloc::vec::Vec<u8>,
 }
 
 impl CoeffBuilder {
     fn new() -> CoeffBuilder {
         CoeffBuilder {
-            mag: Big::zero(),
-            chunk: 0,
-            len: 0,
+            digits: alloc::vec::Vec::new(),
         }
     }
 
-    /// Append one ASCII digit (`b'0'..=b'9'`), flushing the chunk into `mag` every 18 digits.
+    /// Append one ASCII digit (`b'0'..=b'9'`).
     fn push(&mut self, d: u8) {
-        self.chunk = self.chunk * 10 + (d - b'0') as i64;
-        self.len += 1;
-        if self.len == 18 {
-            self.mag = self.mag.mul(&pow10(18)).add(&Big::from_i64(self.chunk));
-            self.chunk = 0;
-            self.len = 0;
-        }
+        self.digits.push(d - b'0');
     }
 
-    /// Fold the trailing partial chunk in and return the assembled magnitude.
+    /// Group the digits into base-`10ᵏ` limbs and assemble the magnitude.
     fn finish(self) -> Big {
-        if self.len == 0 {
-            self.mag
-        } else {
-            self.mag
-                .mul(&pow10(self.len as u64))
-                .add(&Big::from_i64(self.chunk))
+        let digits = self.digits;
+        if digits.is_empty() {
+            return Big::zero();
         }
+        // Most-significant-first grouping: the leading chunk holds `len % COEFF_CHUNK` digits (or a full
+        // chunk when the count divides evenly), and every later chunk is exactly `COEFF_CHUNK` wide — so
+        // each limb is `< 10^COEFF_CHUNK` and the uniform Horner shift lands every digit in its place.
+        let mut limbs: alloc::vec::Vec<u64> =
+            alloc::vec::Vec::with_capacity(digits.len() / COEFF_CHUNK + 1);
+        let lead = digits.len() % COEFF_CHUNK;
+        let mut i = 0;
+        if lead != 0 {
+            limbs.push(fold_digits(&digits[..lead]));
+            i = lead;
+        }
+        while i < digits.len() {
+            limbs.push(fold_digits(&digits[i..i + COEFF_CHUNK]));
+            i += COEFF_CHUNK;
+        }
+        Big::from_base_10_pow_k_limbs(COEFF_CHUNK as u32, &limbs)
+            .expect("COEFF_CHUNK is in 1..=19 and every limb is < 10^COEFF_CHUNK")
     }
+}
+
+/// Fold up to 19 decimal digit values (`0..=9`) into one `u64`: the value is `< 10^len ≤ 10¹⁹ < 2⁶⁴`, so
+/// no step overflows.
+fn fold_digits(ds: &[u8]) -> u64 {
+    let mut v = 0u64;
+    for &d in ds {
+        v = v * 10 + d as u64;
+    }
+    v
 }
 
 impl core::fmt::Display for Decimal {
