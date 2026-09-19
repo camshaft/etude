@@ -657,6 +657,73 @@ fn from_iter_survives_empty_chunks_and_lying_size_hints() {
     assert_eq!(flat, want);
 }
 
+/// `Extend<Bytes>` splits on occupancy + size hint: extending an EMPTY rope from a source whose
+/// `size_hint` lower bound exceeds `PROMOTE_AT` reuses `from_iter`'s bulk bottom-up build, while a
+/// NON-EMPTY rope (or a small/unknown source) stays on the `push_back` loop. The
+/// `differential_against_model` `Op::Extend` composes `extend` with arbitrary state but rarely emits
+/// a >`PROMOTE_AT` source, so the bulk branch — and the `self.is_empty()` guard on it — needs a
+/// deterministic pin: a regression dropping that guard would make `extend` on a NON-EMPTY rope
+/// `*self = from_iter(source)` and silently DISCARD the existing content.
+#[test]
+fn extend_bytes_branches_preserve_content() {
+    let big: Vec<Bytes> = (0..(PROMOTE_AT * 2 + 5) as u16)
+        .map(|i| chunk(&[(i % 251) as u8, (i / 251) as u8]))
+        .collect();
+    let big_flat: Vec<u8> = big.iter().flat_map(|c| c.iter().copied()).collect();
+
+    // Bulk path: empty rope + exact hint > PROMOTE_AT -> from_iter bottom-up build (lands deep).
+    let mut rope = ByteVec::new();
+    rope.extend(big.clone());
+    rope.check_invariants();
+    assert_eq!(rope, big_flat[..], "extend-into-empty bulk content");
+    assert!(matches!(rope.repr, Repr::Deep(_)), "bulk extend lands deep");
+
+    // Guard path (the data-loss regression sentinel): a NON-EMPTY rope extended with the SAME large
+    // source must APPEND (prefix ++ big), never overwrite. If the `is_empty()` guard regressed this
+    // would equal `big_flat` alone.
+    let mut rope = ByteVec::new();
+    rope.push_back(chunk(b"PREFIX"));
+    rope.extend(big.clone());
+    rope.check_invariants();
+    let mut want = b"PREFIX".to_vec();
+    want.extend_from_slice(&big_flat);
+    assert_eq!(
+        rope,
+        want[..],
+        "extend of a NON-empty rope must append, not overwrite"
+    );
+
+    // Loop path: empty rope + small source (hint <= PROMOTE_AT) stays on push_back.
+    let mut rope = ByteVec::new();
+    rope.extend(vec![chunk(b"aa"), chunk(b"bb"), chunk(b"cc")]);
+    rope.check_invariants();
+    assert_eq!(rope, b"aabbcc"[..], "small extend loop content");
+
+    // Empty chunks interspersed in a bulk extend must not create empty chunks or shift content.
+    let mut rope = ByteVec::new();
+    let mixed: Vec<Bytes> = (0..(PROMOTE_AT * 2 + 5) as u16)
+        .map(|i| {
+            if i % 4 == 0 {
+                Bytes::new()
+            } else {
+                chunk(&[(i % 251) as u8])
+            }
+        })
+        .collect();
+    let mixed_flat: Vec<u8> = mixed.iter().flat_map(|c| c.iter().copied()).collect();
+    rope.extend(mixed);
+    rope.check_invariants();
+    assert_eq!(
+        rope,
+        mixed_flat[..],
+        "bulk extend with empty chunks content"
+    );
+    assert!(
+        rope.chunks().all(|c| !c.is_empty()),
+        "no empty chunk survives extend"
+    );
+}
+
 #[test]
 fn starts_ends_with_match_flat_in_both_tiers() {
     for n in [4usize, PROMOTE_AT * 3 + 7] {
@@ -1664,6 +1731,7 @@ fn differential_against_model() {
         Compact,
         CompactWith(u8),
         EqRelayoutCheck(Vec<u8>),
+        Extend(Vec<Vec<u8>>),
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -2021,6 +2089,23 @@ fn differential_against_model() {
                     let subject = trace_reader(rope.reader(), script);
                     let oracle = trace_owning_clone(rope.clone(), script);
                     assert_eq!(subject, oracle, "borrowed reader vs owning-clone trace");
+                }
+                Op::Extend(pieces) => {
+                    // `Extend<Bytes>` has a data-loss-critical branch: extending an EMPTY rope with a
+                    // large (size_hint > PROMOTE_AT) source reuses `from_iter`'s bulk build via
+                    // `*self = Self::from_iter(iter)`, while a NON-EMPTY rope (or a small/unknown
+                    // source) stays on the push_back loop. Nothing else drives `extend` — the
+                    // from_iter tests build from empty, so the `self.is_empty()` guard was unfenced: a
+                    // regression dropping it would make `extend` on a non-empty rope OVERWRITE the
+                    // existing content (silent data loss). Driving it here, on whatever tier/occupancy
+                    // the op sequence has reached, guards that (the global `rope == model` assert sees
+                    // any lost or misordered bytes); empty pieces also exercise extend's empty-skip.
+                    let chunks: Vec<Bytes> =
+                        pieces.iter().map(|p| Bytes::from(p.clone())).collect();
+                    rope.extend(chunks);
+                    for p in pieces {
+                        model.extend_from_slice(p);
+                    }
                 }
                 Op::EqRelayoutCheck(sizes) => {
                     // Rope-vs-rope `PartialEq` (chunks_content_eq: two rope chunk iterators walked
