@@ -72,14 +72,23 @@ Sample ratios at the large tiers (`ratio = etude / num-rational`; full numbers v
 | div | **0.42**| **0.46**|
 | add | **0.77**| 0.98    |
 
-`mul`/`div` **hold** their ~2× lead at 4096b because cross-reduction halves the gcd work, but `add` (and
-`sub`) **narrow to ~parity** as size grows. Both etude and num-rational compute random-operand add as
-`(a*d + c*b)/(b*d)` + a reduce — there is no algorithmic shortcut for coprime denominators — so at 4096b
-both are bound by the underlying `O(n²)` schoolbook multiply and converge. The lever to restore the
-large-tier `add`/`sub` lead (and push `mul`/`div` further) is a **sub-quadratic (Karatsuba) multiply in
-`etude-bigint`**; likewise a **Lehmer gcd** pushes the gcd-bound `normalize`/`add_eqden`@1024b below
-parity. Both are coordination items raised to etude-bigint — they are the biggest remaining perf levers
-and are multiply/gcd-bound in the bignum layer, not addressable locally.
+`mul`/`div` **hold** their ~2× lead at 4096b (cross-reduction halves the gcd work), but `add`/`sub`
+**narrow to ~parity** as size grows. This is EXPECTED, not a fixable gap: etude-bigint already has a
+Karatsuba multiply (#53, `O(n^1.585)` above a 40-limb crossover, so engaged at 4096b = 64 limbs), and so
+does num-bigint — so at 4096b both sides share the same multiply asymptotics and the random-operand add
+`(a*d + c*b)/(b*d)` + reduce converges. Reopening a large-tier `add`/`sub` LEAD would need a faster-still
+multiply than num-bigint's (Toom-3 in etude-bigint — roadmapped, later); Karatsuba alone cannot beat
+num-bigint's Karatsuba. The one remaining locally-relevant bignum lever is a **Lehmer gcd** in
+etude-bigint (its next algorithmic slice): Stein already matches num-bigint at 1024b, and Lehmer would
+push the gcd-bound `normalize`/`add_eqden`@≥1024b parity cells below 1.0.
+
+## Rendering (`to_string` / `Display`)
+
+`to_string` (our alloc-lean `Display` via `Big::write_decimal`) at 64b: **0.66** — a WIN, after
+etude-bigint's single-limb `to_decimal` fast path (#82) combined with our one-allocation render. At
+256b/1024b it is ~1.6× (multi-limb `write_decimal` is still slower than num-bigint's `Display`);
+etude-bigint is extending the alloc-free render path to a few limbs, which will move these. Render is
+bignum-render-bound, not addressable locally.
 
 ## History
 
@@ -100,3 +109,9 @@ and are multiply/gcd-bound in the bignum layer, not addressable locally.
   (cross-reduce)/`is_integer` used to allocate a fresh `Big::from_i64(1)` each call; replaced with the
   O(1) allocation-free `bit_len() == 1`, removing 1–2 heap allocations per add/sub/mul/div (~1% at 64b,
   in the noise at large tiers where the bignum ops dominate).
+- **slice 9** — `impl Display for Rational` (was missing) + alloc-lean `to_decimal_string`, both via
+  etude-bigint's sink-writing `Big::write_decimal` (#79): one `String` instead of three.
+- **slice 10** — re-add the `to_string` render bench (now a 64b WIN, 0.66, via etude-bigint's single-limb
+  `to_decimal` fast path #82 + our alloc-lean Display) + corrected the large-tier scaling analysis:
+  Karatsuba is already landed (#53), so add/sub@4096b parity is expected (num-bigint has it too) — a lead
+  needs Toom-3; Lehmer gcd is the remaining bignum lever for the ≥1024b gcd-bound cells.

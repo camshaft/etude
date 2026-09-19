@@ -218,6 +218,25 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
+    // Rendering to a decimal string: our alloc-lean Display (one String via Big::write_decimal) vs
+    // num-rational's `to_string`. Now a win at small tiers after etude-bigint's single-limb to_decimal
+    // fast path (#82); tracked to guard it.
+    {
+        let mut g = group(c, "to_string");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x0dec_1a15 ^ (nbytes as u64));
+            let a = rng.rat(nbytes);
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter(|| black_box(a.to_decimal_string()))
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
+                be.iter(|| black_box(a.to_string()))
+            });
+        }
+        g.finish();
+    }
+
     // Normalize (via construction): the gcd-normalize hot path — the single most load-bearing cell,
     // since every arithmetic result renormalizes. Operands are raw (unreduced) num/den pairs.
     {
