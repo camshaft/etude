@@ -36,9 +36,9 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | divmod                    | 256b   | 207 ns    | 392 ns     | **0.53**  |
 | divmod                    | 1024b  | 1.13 µs   | 2.09 µs    | **0.54**  |
 | divmod                    | 4096b  | 11.1 µs   | 20.5 µs    | **0.54**  |
-| gcd                       | 64b    | 1.13 µs   | 1.11 µs    | 1.02      |
-| gcd                       | 256b   | 8.23 µs   | 4.66 µs    | 1.77      |
-| gcd                       | 1024b  | 59.5 µs   | 23.2 µs    | 2.56      |
+| gcd                       | 64b    | 843 ns    | 1.13 µs    | **0.74**  |
+| gcd                       | 256b   | 4.09 µs   | 4.71 µs    | **0.87**  |
+| gcd                       | 1024b  | 23.5 µs   | 23.1 µs    | 1.02      |
 | cmp                       | 64b    | 2.63 ns   | 3.23 ns    | **0.81**  |
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
@@ -81,20 +81,27 @@ canonical map-key encode+decode; num-bigint has no matching operation.)
   |--------|--------------|---------------|---------|---------------|
   | 256b   | 4.34 µs      | 675 ns        | 6.4×    | 2.7           |
   | 1024b  | 51.5 µs      | 4.84 µs       | 10.6×   | 2.2           |
+- **Binary (Stein) GCD** — shift-and-subtract, no division per step; replaces Euclid-over-divmod:
+
+  | tier   | before (Euclid+Knuth) | after (Stein) | speedup | vs num-bigint |
+  |--------|-----------------------|---------------|---------|---------------|
+  | 256b   | 8.23 µs               | 4.09 µs       | 2.0×    | **0.87**      |
+  | 1024b  | 59.5 µs               | 23.5 µs       | 2.5×    | 1.02          |
 
 ## Where the gaps remain (optimization order)
 
 1. **to_decimal_string — ~2.2–2.9×.** Now chunked; the residual is num-bigint's recursive/divide-and-
    conquer base conversion. A recursive split (halve by a power of ten) would close more.
-2. **gcd — up to 2.6×.** Now divmod-fast but still plain Euclid; a binary or Lehmer gcd closes the rest.
-3. **mul at 4096b (1.24×).** Schoolbook O(n·m); Karatsuba above a crossover for the large tier.
-4. **sub (1.0–1.76×).** Routes through `add(neg())`, allocating an extra magnitude; a direct signed
+2. **mul at 4096b (1.24×).** Schoolbook O(n·m); Karatsuba above a crossover for the large tier.
+3. **sub (1.0–1.76×).** Routes through `add(neg())`, allocating an extra magnitude; a direct signed
    subtract removes that.
+4. **gcd at 1024b (1.02×).** Stein now matches num-bigint; a Lehmer gcd (word-sized transforms) would
+   pull ahead at the largest tiers.
 
 ## Roadmap
 
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-binary/Lehmer gcd → Karatsuba mul → direct signed sub → recursive to_decimal_string. num-bigint stays both
+Karatsuba mul → direct signed sub → recursive to_decimal_string. num-bigint stays both
 the correctness oracle and the perf yardstick.
 
 ## Target notes: wasm / 32-bit
