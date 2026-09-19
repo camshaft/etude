@@ -409,6 +409,12 @@ impl Ord for Rational {
         if let Some(ord) = self.cmp_small(other) {
             return ord;
         }
+        // Native u128 path when every magnitude fits u64 (the ~1-limb `64b` tier, whose top magnitude bit is
+        // set so the components exceed i64 and miss `cmp_small`): the cross-products `|a|*d`, `|c|*b` fit
+        // u128, so compare magnitudes natively and apply the (equal) sign — no `Big` multiply, no allocation.
+        if let Some(ord) = self.cmp_small_u128(other) {
+            return ord;
+        }
         // Small components: the cross-multiply is two cheap multiplies and beats the continued-fraction
         // bookkeeping (measured crossover between the 256b and 1024b tiers).
         if self.is_cmp_small() && other.is_cmp_small() {
@@ -451,6 +457,27 @@ impl Rational {
         let c = other.num.to_i64_checked()? as i128;
         let d = other.den.to_i64_checked()? as i128;
         Some((a * d).cmp(&(c * b)))
+    }
+
+    /// Native comparison when every magnitude fits `u64` but a component exceeds `i64` (so `cmp_small`
+    /// misses it — the ~1-limb `64b` tier). The cross-products `|a|*d` and `|c|*b` are `u64 * u64`, which fit
+    /// `u128` with no overflow, so magnitudes compare natively. The caller has already returned on
+    /// differing signs, so `a` and `c` share a sign; denominators are strictly positive. For two negatives
+    /// the magnitude ordering is reversed. Returns `None` (fall back to the `Big`/CF path) when any magnitude
+    /// exceeds `u64`.
+    fn cmp_small_u128(&self, other: &Rational) -> Option<Ordering> {
+        let a = self.num.to_i128_checked()?;
+        let b = self.den.to_i128_checked()?;
+        let c = other.num.to_i128_checked()?;
+        let d = other.den.to_i128_checked()?;
+        let max = u64::MAX as u128;
+        // `b, d > 0` (canonical); their magnitudes are the values themselves.
+        if a.unsigned_abs() > max || b as u128 > max || c.unsigned_abs() > max || d as u128 > max {
+            return None;
+        }
+        let ord = (a.unsigned_abs() * d as u128).cmp(&(c.unsigned_abs() * b as u128));
+        // `a` and `c` share a sign; if both are negative the larger magnitude is the smaller value.
+        Some(if a < 0 { ord.reverse() } else { ord })
     }
 }
 
