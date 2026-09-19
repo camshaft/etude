@@ -1143,14 +1143,26 @@ fn knuth_divmod(a: &[u64], b: &[u64], want_rem: bool) -> (Vec<u64>, Vec<u64>) {
         un[m + n] = a[a.len() - 1] >> (64 - s);
     }
 
+    // D1 leaves `vn[n-1]` normalized (top bit set), so its 2-by-1 reciprocal (built once, amortized over
+    // all m+1 quotient digits) turns each qhat estimate's `128 ÷ 64` into a `wide_mul` — no per-digit
+    // `u128` divide (a `__udivti3` libcall on aarch64/wasm).
+    let vtop = vn[n - 1];
+    let vrecip = reciprocal_2by1(vtop);
+
     let mut q = alloc::vec![0u64; m + 1];
     // D2–D7. One quotient digit per iteration, most-significant first.
     for j in (0..=m).rev() {
         // D3. Estimate qhat = ⌊(un[j+n]·B + un[j+n-1]) / vn[n-1]⌋, then correct it down. The `||`
         // short-circuit keeps qhat < B before the multiply test, so no intermediate overflows u128.
         let num = ((un[j + n] as u128) << 64) | (un[j + n - 1] as u128);
-        let mut qhat = num / vn[n - 1] as u128;
-        let mut rhat = num % vn[n - 1] as u128;
+        // `udiv_qrnnd_preinv` needs the high word `< vtop`; after normalization `un[j+n] ≤ vtop`, and the
+        // rare equality (qhat would reach B) falls back to the exact divide — same (qhat, rhat) domain.
+        let (mut qhat, mut rhat): (u128, u128) = if un[j + n] < vtop {
+            let (qh, rh) = udiv_qrnnd_preinv(un[j + n], un[j + n - 1], vtop, vrecip);
+            (qh as u128, rh as u128)
+        } else {
+            (num / vtop as u128, num % vtop as u128)
+        };
         loop {
             if qhat >= base || qhat * (vn[n - 2] as u128) > (rhat << 64) + (un[j + n - 2] as u128) {
                 qhat -= 1;

@@ -32,10 +32,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | mul                       | 256b   | 42.3 ns   | 52.8 ns    | **0.80**  |
 | mul                       | 1024b  | 390 ns    | 389 ns     | 1.00      |
 | mul                       | 4096b  | 5.14 µs   | 4.99 µs    | 1.03      |
-| divmod                    | 64b    | 48.9 ns   | 111 ns     | **0.44**  |
-| divmod                    | 256b   | 207 ns    | 392 ns     | **0.53**  |
-| divmod                    | 1024b  | 1.13 µs   | 2.09 µs    | **0.54**  |
-| divmod                    | 4096b  | 11.1 µs   | 20.5 µs    | **0.54**  |
+| divmod                    | 64b    | 48.1 ns   | 115 ns     | **0.42**  |
+| divmod                    | 256b   | 154 ns    | 396 ns     | **0.39**  |
+| divmod                    | 1024b  | 826 ns    | 2.08 µs    | **0.40**  |
+| divmod                    | 4096b  | 9.82 µs   | 20.5 µs    | **0.48**  |
 | div_exact (quotient-only) | 64b    | 35.7 ns   | 53.6 ns    | **0.67**  |
 | div_exact (quotient-only) | 256b   | 230 ns    | 232 ns     | **0.99**  |
 | div_exact (quotient-only) | 1024b  | 1.09 µs   | 1.02 µs    | 1.06      |
@@ -53,8 +53,8 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
 | to_decimal_string         | 64b    | 61.9 ns   | 72.2 ns    | **0.86**  |
 | to_decimal_string         | 256b   | 342 ns    | 248 ns     | 1.38      |
-| to_decimal_string         | 1024b  | 3.76 µs   | 2.25 µs    | 1.67      |
-| to_decimal_string         | 4096b  | 24.1 µs   | 21.1 µs    | 1.14      |
+| to_decimal_string         | 1024b  | 3.57 µs   | 2.25 µs    | 1.58      |
+| to_decimal_string         | 4096b  | 22.1 µs   | 21.2 µs    | 1.04      |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
@@ -124,6 +124,13 @@ has no matching operation.)
   2-by-1 reciprocal (Möller–Granlund; `10¹⁹` is already normalized) — a `wide_mul` + two corrections, no
   128-bit divide: to_decimal/256b 486 → 342 ns (1.95× → **1.38×**). (64b is the single-limb write path,
   unchanged; 1024b+ use the recursive multi-limb divmod, not this peel.)
+- **Reciprocal `qhat` in Knuth divmod** — the multi-limb long-division quotient-digit estimate did a
+  `u128 ÷ u64` per digit (a `__udivti3` libcall). D1 already normalizes the divisor's top limb, so its
+  2-by-1 reciprocal (built once, amortized over all `m+1` digits) turns each estimate into a `wide_mul`
+  via `udiv_qrnnd_preinv` (the rare `un[j+n] == vtop` case falls back to the exact divide). Speeds every
+  multi-limb divmod — 256b 207 → 154 ns (0.53× → **0.39×**), 1024b 1.13 → 0.83 µs (**0.40×**), 4096b 11.1
+  → 9.82 µs (**0.48×**) — and the recursive `to_decimal` that leans on it: 1024b 3.76 → 3.57 µs (**1.58×**),
+  4096b 24.1 → 22.1 µs (1.14× → **1.04×**).
 - **Reciprocal single-limb `div_rem_limb_inplace`** — a bignum ÷ a single-limb divisor (`n / small`, the
   `divmod`/`div_exact` single-limb path) did one `u128` divide *per limb* (each a `__udivti3` libcall).
   Now: a 1-limb dividend takes a native `u64 / u64`; wider dividends build one reciprocal (normalizing the
@@ -161,16 +168,15 @@ has no matching operation.)
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string at 256b/1024b (1.38× / 1.67×).** The 256b peel is now alloc-free and uses a
-   reciprocal ÷10¹⁹; 1024b's residual is the recursive conversion's multi-limb power divmods (the same
-   reciprocal trick, generalized to a runtime divisor in `div_rem_limb_inplace`, would also cut the
-   single-limb divmod path).
+1. **to_decimal_string at 256b/1024b (1.38× / 1.58×).** The peel is alloc-free with a reciprocal ÷10¹⁹,
+   and the recursive path's divmods now use the reciprocal `qhat`; the residual is the recursive
+   conversion's own constant factors (power-stack squarings, split overhead) rather than the divmod.
 2. **clone / from_i64 at 64b (2.20× / 1.77×).** The small-value construction/clone paths heap-allocate a
    one-limb `Vec`. An inline small-value magnitude repr fixes these (measured 2.20→~1.0× / 1.77→0.97×) but
    REGRESSES add/mul unless the arithmetic kernels emit inline results directly — a larger change (below).
-3. **to_decimal_string at 4096b (1.14×), mul at 4096b (1.03×), sub at 4096b (1.02×), gcd at 1024b
-   (1.02×), the 64b add/sub/mul tiers (~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest
-   tiers is a subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd.
+3. **mul at 4096b (1.03×), gcd at 1024b (1.02×), sub at 4096b (1.02×), to_decimal_string at 4096b (1.04×),
+   the 64b add/sub/mul tiers (~1.1–1.25×).** At or near parity; num-bigint's edge at the largest tiers is
+   Toom-3 mul and a Lehmer gcd.
 
 ## Roadmap
 
