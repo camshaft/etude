@@ -342,10 +342,11 @@ impl core::fmt::Display for StrRope {
         // Linearize to one contiguous buffer, then view as &str (valid by the invariant). Individual
         // chunks can't be written as &str — a codepoint may straddle a chunk boundary.
         let contiguous = self.0.copy_to_bytes();
-        // SAFETY-equivalent: the invariant guarantees valid UTF-8, but use the checked path (Display is
-        // already O(n) here) to avoid any unsafe.
+        // The invariant guarantees valid UTF-8, but use the checked path (Display is already O(n) here)
+        // to avoid any unsafe. Route through `Formatter::pad` — as `str`'s own Display does — so the
+        // width, fill, alignment, and precision (char-count truncation) format parameters are honored.
         match core::str::from_utf8(&contiguous) {
-            Ok(s) => f.write_str(s),
+            Ok(s) => f.pad(s),
             Err(_) => Err(core::fmt::Error), // unreachable given the invariant
         }
     }
@@ -556,6 +557,43 @@ mod tests {
                     assert_eq!(rope.len(), model.len(), "len after {op:?}");
                 }
             });
+    }
+
+    /// Red (breaker-byterope): `Display for StrRope` writes via `f.write_str` and ignores the
+    /// formatter's width/fill/precision, so `format!("{:>6}", rope)` yields `"ab"` where the same
+    /// format over `&str` yields `"    ab"` — a silent divergence from the type StrRope models.
+    /// `str`'s own `Display` routes through `Formatter::pad`, which honors width, alignment, fill,
+    /// and precision (truncation); the fix should do the same over the linearized content. The
+    /// assertions are parity-based, so any conforming implementation passes.
+    #[test]
+    fn display_honors_format_parameters_like_str() {
+        let s = StrRope::from("ab");
+        assert_eq!(
+            format!("{:>6}", s),
+            format!("{:>6}", "ab"),
+            "right-align width"
+        );
+        assert_eq!(
+            format!("{:<6}", s),
+            format!("{:<6}", "ab"),
+            "left-align width"
+        );
+        assert_eq!(
+            format!("{:-^7}", s),
+            format!("{:-^7}", "ab"),
+            "center with fill"
+        );
+        let t = StrRope::from("héllo");
+        assert_eq!(
+            format!("{:.3}", t),
+            format!("{:.3}", "héllo"),
+            "precision truncates by chars"
+        );
+        assert_eq!(
+            format!("{:>8.2}", t),
+            format!("{:>8.2}", "héllo"),
+            "width plus precision"
+        );
     }
 
     #[test]
