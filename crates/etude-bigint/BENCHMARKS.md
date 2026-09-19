@@ -89,3 +89,17 @@ canonical map-key encode+decode; num-bigint has no matching operation.)
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
 chunked to_decimal_string → binary/Lehmer gcd → Karatsuba mul → direct signed sub. num-bigint stays both
 the correctness oracle and the perf yardstick.
+
+## Target notes: wasm / 32-bit
+
+The limb STORAGE is `u64` on every target — `wasm32` has native 64-bit integers, so add/sub/shift/cmp
+over u64 limbs are native there and the u64-limb win (half the limbs) holds. The one operation that
+would otherwise pay for emulation is the widening multiply: `u64 * u64 -> u128` lowers to a `__multi3`
+libcall on wasm. `wide_mul` avoids it — on 64-bit targets it is one native `u128` multiply, and on
+wasm32 / 32-bit targets it is synthesized from four native `u32 * u32 -> u64` partials (no 128-bit
+intrinsic). Both paths are covered by the differential oracle (the `synth-mul` feature runs the
+synthesized path on a 64-bit host). The three-way wasm comparison the operator asked for —
+{native-u128 emulation} vs {u64 limbs + synthesized mul} vs {u32 limbs} — is pending a wasm benchmark
+runner (`wasmtime`); the numbers here are native `aarch64`, where `wide_mul` is the u128 path and mul is
+unchanged. The divmod inner loop still uses `u128`; de-emulating it (a 128÷64 step from 64-bit ops) is a
+follow-up.
