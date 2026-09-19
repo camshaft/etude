@@ -391,8 +391,10 @@ impl Ord for Rational {
 }
 
 /// A component width (in significant magnitude bytes) at or below which a cross-multiply comparison beats
-/// the continued-fraction method. Measured: cross-multiply wins the 64b/256b tiers, loses at 1024b.
-const CMP_SMALL_BYTES: usize = 64;
+/// the continued-fraction method. Measured crossover after the CF `q ∈ {0,1}` fast path (which made CF
+/// cheap): cross-multiply still wins at ~1 limb (the 64b tier, 8-byte components), but CF wins from ~32
+/// bytes up (256b: 62 ns via CF vs 94 ns cross-multiply). 16 bytes sits in the crossover gap.
+const CMP_SMALL_BYTES: usize = 16;
 
 impl Rational {
     /// Whether both components are small enough (by `Big::byte_len`, an O(1) probe) that a cross-multiply

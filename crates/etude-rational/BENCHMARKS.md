@@ -44,9 +44,9 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | normalize  | 64b    | 894 ns    | 1.22 µs      | **0.74**  |
 | normalize  | 256b   | 4.16 µs   | 4.97 µs      | **0.84**  |
 | normalize  | 1024b  | 24.8 µs   | 24.5 µs      | 1.01      |
-| cmp        | 64b    | 50.9 ns   | 54.3 ns      | **0.94**  |
-| cmp        | 256b   | 94.5 ns   | 145 ns       | **0.65**  |
-| cmp        | 1024b  | 78.2 ns   | 179 ns       | **0.44**  |
+| cmp        | 64b    | 50.5 ns   | 54.3 ns      | **0.93**  |
+| cmp        | 256b   | 62.4 ns   | 146 ns       | **0.43**  |
+| cmp        | 1024b  | 80.3 ns   | 180 ns       | **0.45**  |
 | cmp        | 2048b  | 812 ns    | 1.27 µs      | **0.64**  |
 | cmp        | 4096b  | 146 ns    | 561 ns       | **0.26**  |
 | add_eqden  | 64b    | 935 ns    | 1.36 µs      | **0.69**  |
@@ -255,6 +255,11 @@ they are attacking next — re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 24** — lower `CMP_SMALL_BYTES` 64 → 16: the slice-22 `q ∈ {0,1}` fast path made the
+  continued-fraction comparison cheap enough to beat cross-multiply from ~32 bytes up, so route 256b+
+  operands to CF (previously cross-multiply). `cmp` 256b **0.65× → 0.43×** (94 ns → 62 ns); 64b (8-byte,
+  1-limb) stays on cross-multiply (50 ns, unchanged); 1024b+ already CF. A re-tuned crossover after the CF
+  speedup — no new code path, just the threshold.
 - **slice 23** — `add`/`sub` reduce over `gcd(b, d)` (denominators, n-bit) instead of the full
   `gcd(a*d ± c*b, b*d)` (2n-bit). Coprime denominators (common) ⇒ the result is already lowest-terms, skip
   the reduce gcd; shared factor ⇒ work over the lcm and reduce against the small `g` (`gcd(N, lcm) =
