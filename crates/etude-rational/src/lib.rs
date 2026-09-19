@@ -369,17 +369,15 @@ impl Ord for Rational {
             return self.num.mul(&other.den).cmp(&other.num.mul(&self.den));
         }
         // Large components: continued-fraction magnitude comparison. Signs are equal here (differing
-        // signs returned above), so compare magnitudes and flip the result for two negatives.
-        let ord = cmp_magnitude(
-            self.num.abs(),
-            self.den.clone(),
-            other.num.abs(),
-            other.den.clone(),
-        );
+        // signs returned above), so compare magnitudes and flip the result for two negatives. Denominators
+        // are canonical (strictly positive), so only the numerators can need `abs` — and only when both
+        // operands are negative. In the common non-negative case we borrow the components directly, so the
+        // first Euclidean step allocates nothing (it usually decides on the integer parts alone).
         if self.num.is_negative() {
-            ord.reverse()
+            let (na, nc) = (self.num.abs(), other.num.abs());
+            cmp_magnitude(&na, &self.den, &nc, &other.den).reverse()
         } else {
-            ord
+            cmp_magnitude(&self.num, &self.den, &other.num, &other.den)
         }
     }
 }
@@ -409,12 +407,41 @@ impl Rational {
 }
 
 /// Compare `a/b` vs `c/d` for non-negative `a`, `c` and strictly positive `b`, `d`, by the
-/// continued-fraction method. Iterative: compare integer parts `⌊a/b⌋` vs `⌊c/d⌋`; on a tie compare the
-/// fractional remainders `r1/b` vs `r2/d`, which — being in `[0, 1)` — reverse order under reciprocation,
-/// so the next step compares `b/r1` vs `d/r2` with the running result negated. Terminates because the
-/// remainders strictly shrink (Euclid).
-fn cmp_magnitude(mut a: Big, mut b: Big, mut c: Big, mut d: Big) -> Ordering {
-    let mut reverse = false;
+/// continued-fraction method. Compares integer parts `⌊a/b⌋` vs `⌊c/d⌋`; on a tie compare the fractional
+/// remainders `r1/b` vs `r2/d`, which — being in `[0, 1)` — reverse order under reciprocation, so the next
+/// step compares `b/r1` vs `d/r2` with the running result negated.
+///
+/// The first Euclidean step takes the components by reference so it allocates nothing beyond the `divmod`
+/// results — and for operands that differ in integer part (the common case) it decides immediately, never
+/// touching the owned loop. Only a same-integer-part tie with fractional remainders on both sides recurses,
+/// and only then are the (owned) denominators needed as the next step's numerators.
+fn cmp_magnitude(a: &Big, b: &Big, c: &Big, d: &Big) -> Ordering {
+    let (q1, r1) = a.divmod(b).expect("b > 0");
+    let (q2, r2) = c.divmod(d).expect("d > 0");
+    let qc = q1.cmp(&q2);
+    if qc != Ordering::Equal {
+        return qc; // top level: reverse == false
+    }
+    match (r1.is_zero(), r2.is_zero()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less, // a/b is an exact integer, c/d has a fraction ⇒ a/b < c/d
+        (false, true) => Ordering::Greater, // a/b has a fraction, c/d is an exact integer ⇒ a/b > c/d
+        // Recurse on reciprocals b/r1 vs d/r2 (order reverses): the old denominators become the new
+        // numerators (clone them once — this is the only allocation of an operand), remainders the new
+        // denominators.
+        (false, false) => cmp_magnitude_owned(b.clone(), r1, d.clone(), r2, true),
+    }
+}
+
+/// The owned continuation of [`cmp_magnitude`] once it has recursed at least once (so every value is
+/// already an owned `divmod` result or a one-time denominator clone). Iterative to reuse the buffers.
+fn cmp_magnitude_owned(
+    mut a: Big,
+    mut b: Big,
+    mut c: Big,
+    mut d: Big,
+    mut reverse: bool,
+) -> Ordering {
     loop {
         let (q1, r1) = a.divmod(&b).expect("b > 0");
         let (q2, r2) = c.divmod(&d).expect("d > 0");
@@ -422,14 +449,11 @@ fn cmp_magnitude(mut a: Big, mut b: Big, mut c: Big, mut d: Big) -> Ordering {
         if qc != Ordering::Equal {
             return if reverse { qc.reverse() } else { qc };
         }
-        // Integer parts equal — decide on the fractional parts r1/b vs r2/d.
         let frac = match (r1.is_zero(), r2.is_zero()) {
             (true, true) => Ordering::Equal,
-            (true, false) => Ordering::Less, // a/b is an exact integer, c/d has a fraction ⇒ a/b < c/d
-            (false, true) => Ordering::Greater, // a/b has a fraction, c/d is an exact integer ⇒ a/b > c/d
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
             (false, false) => {
-                // Recurse on reciprocals b/r1 vs d/r2 (order reverses), reusing the current denominators
-                // as the new numerators.
                 a = b;
                 b = r1;
                 c = d;
