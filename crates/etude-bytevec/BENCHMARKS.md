@@ -39,6 +39,30 @@ accepted exception (cache locality — see below). The levers that could shrink 
 gaps (a node arena, a single-allocation/DST leaf) each break a core guarantee (O(1) structural-sharing
 clone, or in-place bounded copy-on-write), so the gaps are the expected persistent-structure tradeoff.
 
+### String / UTF-8 path — rope vs a contiguous `&[u8]` (runnable: `cargo bench -p etude-bytevec -- 'starts_with|ends_with|validate_utf8'`)
+
+These functions scan bytes rather than move chunk handles, so the fair reference is a contiguous
+`Vec<u8>` (a `&[u8]` compare, or `core::str::from_utf8`), not the chunk deque. `starts_with`/`ends_with`
+use a literal spanning ~2 chunks; `validate_utf8` benches `Rope<Utf8>::try_from_bytes` on valid ascii.
+Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4):
+
+| op | shape | rope | contiguous `&[u8]` | ratio |
+|----|-------|------|--------------------|-------|
+| starts_with | shallow | 87.2 ns | 67.9 ns | 1.28 |
+| starts_with | deep | 122 ns | 67.9 ns | 1.80 |
+| ends_with | shallow | 97.6 ns | 74.1 ns | 1.32 |
+| ends_with | deep | 151 ns | 74.5 ns | 2.03 |
+| validate_utf8 (try_from_bytes) | shallow | 308 ns | 236 ns | 1.30 |
+| validate_utf8 (try_from_bytes) | deep | 78.1 µs | 60.8 µs | 1.28 |
+
+The scan functions trail a contiguous buffer by **1.28×–2.03×** — the cost of crossing chunk boundaries
+(iterator setup + per-chunk compares/validation), the same chunking overhead as the rest of the deep
+tier. Two points worth keeping: `ends_with/deep` is 151 ns, close to `ends_with/shallow` rather than
+scaling with length — confirming it is O(suffix) (it walks only the last chunks from the back via the
+double-ended chunk iterator, not the whole buffer); and `validate_utf8` streams the validation over the
+chunks with no full-content allocation, so it beats the former copy-then-validate path (which allocated
+an O(n) contiguous buffer) on the valid ingest path despite the 1.28× vs an already-contiguous slice.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
