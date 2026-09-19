@@ -229,6 +229,60 @@ fn differential_bolero() {
         });
 }
 
+/// `write_decimal` (the sink-writing, allocation-free core) must produce EXACTLY the same digits as
+/// `to_decimal_string` — and hence match num-bigint — for every sign and width, including the wide
+/// recursive path. Also confirms it drives an arbitrary `core::fmt::Write` sink (not only `String`).
+#[test]
+fn write_decimal_matches_to_decimal_string_and_num_bigint() {
+    let mut rng = Rng(0xed17_dec1_a110_c1ce);
+    let check = |b: &Big| {
+        let mut s = alloc::string::String::new();
+        b.write_decimal(&mut s).unwrap();
+        assert_eq!(
+            s,
+            b.to_decimal_string(),
+            "write_decimal == to_decimal_string {b:?}"
+        );
+        assert_eq!(
+            s,
+            to_ref(b).to_string(),
+            "write_decimal == num-bigint {b:?}"
+        );
+    };
+    // Zero, small signed values, and a few exact/boundary values.
+    for &v in &[0i64, 1, -1, 9, -9, 10, -10, 42, -42, i64::MAX, i64::MIN] {
+        check(&Big::from_i64(v));
+    }
+    // Random widths straddling the recursive threshold (10 limbs), both signs.
+    for &n in &[1usize, 5, 10, 11, 17, 40, 100] {
+        for &neg in &[false, true] {
+            let mut mag: Vec<u64> = (0..n).map(|_| rng.next()).collect();
+            if let Some(top) = mag.last_mut() {
+                *top |= 0x8000_0000_0000_0000;
+            }
+            let mut b = Big { neg, mag };
+            b.normalize();
+            check(&b);
+        }
+    }
+    // Drives a non-String sink: a `core::fmt::Write` wrapper that records the total byte length.
+    struct CountingSink(usize);
+    impl core::fmt::Write for CountingSink {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            self.0 += s.len();
+            Ok(())
+        }
+    }
+    let big = from_i128(i128::MIN); // negative, multi-limb
+    let mut sink = CountingSink(0);
+    big.write_decimal(&mut sink).unwrap();
+    assert_eq!(
+        sink.0,
+        big.to_decimal_string().len(),
+        "sink byte count matches"
+    );
+}
+
 #[test]
 fn canonical_form_invariants() {
     // Zero is unique and non-negative.

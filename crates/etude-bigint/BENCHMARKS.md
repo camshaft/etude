@@ -43,10 +43,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
-| to_decimal_string         | 64b    | 186 ns    | 72.3 ns    | 2.58      |
-| to_decimal_string         | 256b   | 623 ns    | 248 ns     | 2.51      |
-| to_decimal_string         | 1024b  | 4.03 µs   | 2.25 µs    | 1.79      |
-| to_decimal_string         | 4096b  | 25.3 µs   | 21.3 µs    | 1.19      |
+| to_decimal_string         | 64b    | 151 ns    | 73.3 ns    | 2.06      |
+| to_decimal_string         | 256b   | 545 ns    | 248 ns     | 2.19      |
+| to_decimal_string         | 1024b  | 3.76 µs   | 2.25 µs    | 1.67      |
+| to_decimal_string         | 4096b  | 24.1 µs   | 21.1 µs    | 1.14      |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
@@ -105,6 +105,12 @@ has no matching operation.)
   |--------|-----------------|-------------------|---------|---------------|
   | 1024b  | 4.37 µs         | 4.03 µs           | 1.08×   | 1.95 → 1.79   |
   | 4096b  | ~77 µs (est.)   | 25.3 µs           | ~3×     | — → 1.19      |
+- **Sink-writing `write_decimal`** — the emitter writes into a `core::fmt::Write` sink (one `write_str`
+  per 19-digit chunk) instead of pushing bytes one at a time into a `Vec<u8>`; `to_decimal_string` is a
+  thin wrapper that writes into a fresh `String`. Fewer sink calls + a single grow per chunk cut every
+  tier: 64b 186 → 151 ns (2.58 → 2.06), 256b 623 → 545 ns (2.51 → 2.19), 1024b 4.03 → 3.76 µs
+  (1.79 → 1.67), 4096b 25.3 → 24.1 µs (1.19 → 1.14). It also lets a downstream `Display` render a `Big`
+  with no intermediate allocation.
 
 ## Where the gaps remain (optimization order)
 
