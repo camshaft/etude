@@ -237,19 +237,33 @@ impl Decimal {
         if other.is_zero() {
             return self.clone();
         }
+        self.combine(other, Big::add)
+    }
+
+    /// Exact difference `self - other`. Subtracts the coefficients directly (after aligning exponents),
+    /// rather than adding a negated clone of `other`, so no intermediate negated value is allocated.
+    pub fn sub(&self, other: &Decimal) -> Decimal {
+        if self.is_zero() {
+            return other.neg(); // 0 - other = -other
+        }
+        if other.is_zero() {
+            return self.clone();
+        }
+        self.combine(other, Big::sub)
+    }
+
+    /// Align two nonzero operands to the smaller exponent — scaling the larger-exponent coefficient by
+    /// the matching power of ten — combine their coefficients with `op` (`Big::add` or `Big::sub`), and
+    /// canonicalize. Shared by [`Decimal::add`] and [`Decimal::sub`].
+    fn combine(&self, other: &Decimal, op: impl Fn(&Big, &Big) -> Big) -> Decimal {
         if self.exp == other.exp {
             // Already aligned — the common fast path (e.g. equal-scale sums).
-            return Decimal::new(self.coeff.add(&other.coeff), self.exp);
+            return Decimal::new(op(&self.coeff, &other.coeff), self.exp);
         }
         let e = self.exp.min(other.exp);
         let a = scale_pow10(&self.coeff, (self.exp - e) as u64);
         let b = scale_pow10(&other.coeff, (other.exp - e) as u64);
-        Decimal::new(a.add(&b), e)
-    }
-
-    /// Exact difference `self - other`.
-    pub fn sub(&self, other: &Decimal) -> Decimal {
-        self.add(&other.neg())
+        Decimal::new(op(&a, &b), e)
     }
 
     /// Exact product `self * other`: multiply the coefficients and add the exponents. Exact — a decimal

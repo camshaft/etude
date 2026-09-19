@@ -44,13 +44,16 @@ cargo bench -p etude-decimal --bench arith
 
 ### `sub` — exact aligned difference
 
+Subtracts coefficients directly (`Big::sub`) after aligning exponents, rather than adding a negated clone
+of the operand — no intermediate negated value is allocated.
+
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 80.98 ns  | 64.87 ns  | 1.25 |
-| 256b  | 98.88 ns  | 77.57 ns  | 1.27 |
-| 1024b | 131.38 ns | 99.97 ns  | 1.31 |
-| 2048b | 243.74 ns | 129.19 ns | 1.89 |
-| 4096b | 460.00 ns | 156.54 ns | 2.94 |
+| 64b   | 72.61 ns  | 56.73 ns  | 1.28 |
+| 256b  | 88.64 ns  | 69.95 ns  | 1.27 |
+| 1024b | 114.02 ns | 95.16 ns  | 1.20 |
+| 2048b | 222.58 ns | 122.51 ns | 1.82 |
+| 4096b | 438.18 ns | 151.13 ns | 2.90 |
 
 ### `mul` — exact product
 
@@ -182,8 +185,9 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
   scalar primitives (`is_even`, `rem_u64`, `divmod_u64` — #133). Canonicalization used to divide the
   coefficient by ten on every result; now an odd result is rejected in `O(1)` and only a result ending in
   zero is divided. `add` now wins at 256b–1024b; the residual at large tiers is the underlying `Big`
-  add/mul cost, which is `etude-bigint`'s to shave. `sub` trails `add` because `sub` is `add(neg)` and the
-  `neg` allocates a negated coefficient clone — a direct `sub` would remove that (next).
+  add/mul cost, which is `etude-bigint`'s to shave. `sub` now subtracts coefficients directly (`Big::sub`)
+  instead of `add(neg)`, so no negated clone is allocated — it edges below `add` at large tiers because a
+  difference of same-magnitude operands can cancel to a shorter result.
 - **`cmp`** is a flat ~24–40 ns via the equal-exponent coefficient compare; the residual ~4–7× over
   `bigdecimal`'s cached-length ~6 ns is the two `abs()` clones plus the unequal-exponent path (which still
   renders decimal strings). A magnitude-only `Big` compare and an exact `decimal_digit_count()` (requested
@@ -200,10 +204,8 @@ that simple getters need no bench). `parse`/`parse_prefix` share their work with
 
 ## Next optimizations (ranked by scoreboard leverage)
 
-1. **Direct `sub`** — subtract coefficients in place instead of `add(neg)`, dropping the `neg` clone that
-   makes `sub` trail `add`.
-2. **`to_string`** — adopt `Big::write_decimal` for the coefficient digits (drop the intermediate
+1. **`to_string`** — adopt `Big::write_decimal` for the coefficient digits (drop the intermediate
    `to_decimal_string` allocation) to match `bigdecimal` at the small tiers.
-3. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) and an exact
+2. **`cmp` residual** — a magnitude-only `Big` compare (no `abs()` clone) and an exact
    `decimal_digit_count()` so the unequal-exponent path drops its decimal-string render.
-4. **`to_f64` small-magnitude fast path** — close the 64b gap (we already win 3×–13× at 1024b+).
+3. **`to_f64` small-magnitude fast path** — close the 64b gap (we already win 3×–13× at 1024b+).
