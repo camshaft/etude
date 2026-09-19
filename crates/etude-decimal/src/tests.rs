@@ -5,7 +5,7 @@
 //!
 //! The safety net is a DIFFERENTIAL ORACLE against `bigdecimal`'s `BigDecimal` (the arbitrary-precision
 //! reference): a single growing harness generates candidate byte-strings, parses them with BOTH our
-//! [`Decimal::from_ascii`] and `BigDecimal`, and asserts they agree on the exact value (compared as the
+//! [`Decimal::parse`] and `BigDecimal`, and asserts they agree on the exact value (compared as the
 //! canonical `(sign, magnitude-digits, exponent)` triple), that our output re-parses to the same value
 //! (round-trip), and that our comparison sign matches the reference's on every pair. When a case can't
 //! be expressed here, GROW this harness rather than adding a one-off test.
@@ -106,7 +106,7 @@ fn rejects_malformed() {
         "1.2e3.4", "0..1", "+0",
     ] {
         assert!(
-            Decimal::from_ascii(bad.as_bytes()).is_none(),
+            Decimal::parse(bad.bytes()).is_none(),
             "{bad:?} must be rejected"
         );
     }
@@ -117,55 +117,54 @@ fn rejects_malformed() {
 }
 
 #[test]
-fn from_parts_and_components() {
-    // Component construction matches the equivalent literal parse (the decoder path == the string path).
-    // value = (-1)^neg * (int ++ frac) * 10^(exp - frac.len())
+fn parse_over_non_contiguous_bytes() {
+    // The parser consumes any Iterator<Item = u8>, so a NON-CONTIGUOUS (chunk-backed) source parses in
+    // place with no flattening — the whole point of the API. Feed each literal as split chunks and check
+    // it equals the contiguous parse.
+    for s in [
+        "1.5", "-3.14", "1500", "0.001", "123e4", "-7", "1e-1000", "0", "-0.0",
+    ] {
+        let contiguous = Decimal::from_str(s).unwrap();
+        // Split the bytes into arbitrary chunks and chain their iterators (a stand-in for rope leaves).
+        let bytes = s.as_bytes();
+        for split in 1..bytes.len().max(2) {
+            let (a, b) = bytes.split_at(split.min(bytes.len()));
+            let chunked = a.iter().copied().chain(b.iter().copied());
+            assert_eq!(
+                Decimal::parse(chunked).unwrap(),
+                contiguous,
+                "chunked parse of {s:?} split at {split} differs"
+            );
+        }
+    }
+}
+
+#[test]
+fn parse_prefix_stops_at_delimiter() {
+    // parse_prefix reads the maximal number and STOPS at (does not consume) the first non-number byte,
+    // leaving the cursor positioned there — the entry point for embedding a number in a larger stream.
+    let mut it = b"12.5,rest".iter().copied().peekable();
+    let d = Decimal::parse_prefix(&mut it).unwrap();
+    assert_eq!(d, Decimal::from_str("12.5").unwrap());
+    // The delimiter and the remainder are still available to the caller.
+    assert_eq!(it.next(), Some(b','));
+    let rest: alloc::vec::Vec<u8> = it.collect();
+    assert_eq!(&rest, b"rest");
+
+    // Stops at a space, an exponent-less number, and end-of-stream alike.
+    let mut it = b"42 ".iter().copied().peekable();
     assert_eq!(
-        Decimal::from_parts(false, b"1", b"5", 0).unwrap(),
-        Decimal::from_str("1.5").unwrap()
+        Decimal::parse_prefix(&mut it).unwrap(),
+        Decimal::from_i64(42)
     );
-    assert_eq!(
-        Decimal::from_parts(true, b"3", b"14", 0).unwrap(),
-        Decimal::from_str("-3.14").unwrap()
-    );
-    // Explicit exponent folds with the fractional shift: 1.5e3 = 1500, and 15 with exp -1 = 1.5.
-    assert_eq!(
-        Decimal::from_parts(false, b"1", b"5", 3).unwrap(),
-        Decimal::from_str("1500").unwrap()
-    );
-    assert_eq!(
-        Decimal::from_parts(false, b"15", b"", -1).unwrap(),
-        Decimal::from_str("1.5").unwrap()
-    );
-    // Empty coefficient is zero; sign on zero is dropped (canonical).
-    assert_eq!(
-        Decimal::from_parts(true, b"", b"", 5).unwrap(),
-        Decimal::zero()
-    );
-    assert_eq!(
-        Decimal::from_parts(true, b"0", b"", 0).unwrap(),
-        Decimal::zero()
-    );
-    // from_components: (-1)^neg * digits * 10^exp (no fractional part).
-    assert_eq!(
-        Decimal::from_components(false, b"123", 4).unwrap(),
-        Decimal::from_str("123e4").unwrap()
-    );
-    assert_eq!(
-        Decimal::from_components(true, b"7", 0).unwrap(),
-        Decimal::from_str("-7").unwrap()
-    );
-    // A big coefficient survives exactly.
-    assert_eq!(
-        Decimal::from_components(false, b"123456789012345678901234567890", 0)
-            .unwrap()
-            .to_string(),
-        "123456789012345678901234567890"
-    );
-    // Non-digit bytes are rejected (defensive — the caller is expected to pass validated digits).
-    assert!(Decimal::from_parts(false, b"1a", b"", 0).is_none());
-    assert!(Decimal::from_parts(false, b"1", b"2.3", 0).is_none());
-    assert!(Decimal::from_components(false, b"-5", 0).is_none()); // sign belongs in the flag, not digits
+    assert_eq!(it.next(), Some(b' '));
+
+    // A leading non-number yields None without consuming anything meaningful.
+    let mut it = b"abc".iter().copied().peekable();
+    assert!(Decimal::parse_prefix(&mut it).is_none());
+
+    // `parse` (whole-stream) rejects the trailing bytes that parse_prefix would leave.
+    assert!(Decimal::parse(b"12.5,rest".iter().copied()).is_none());
 }
 
 #[test]
@@ -361,14 +360,14 @@ fn map_to_charset(raw: &[u8]) -> String {
 /// Parse `s` with both implementations and, when we accept it, assert the reference agrees on the value
 /// and that our rendering round-trips. Returns the parsed pair when both accept, for downstream cmp.
 fn check_parse(s: &str) -> Option<(Decimal, BigDecimal)> {
-    let ours = Decimal::from_ascii(s.as_bytes());
+    let ours = Decimal::parse(s.bytes());
     let refs = BigDecimal::from_str(s).ok();
     match (ours, refs) {
         (Some(d), Some(b)) => {
             assert_same(&d, &b);
             // Round-trip: our own output re-parses to the same value in both implementations.
             let rendered = d.to_string();
-            let reparsed = Decimal::from_ascii(rendered.as_bytes())
+            let reparsed = Decimal::parse(rendered.bytes())
                 .unwrap_or_else(|| panic!("our output {rendered:?} must re-parse (from {s:?})"));
             assert_eq!(
                 d, reparsed,
@@ -460,15 +459,14 @@ fn differential_structured_numbers() {
                     has_exp.then_some(exp as i64),
                 );
                 if let Some(pair) = check_parse(&s) {
-                    // The component path (what a decoder feeds) must match the string parse exactly:
-                    // from_parts(neg, int_digits, frac_digits, raw eE exp).
-                    let int_s = int.to_string();
-                    let frac_s = frac.to_string();
-                    let frac_bytes: &[u8] = if has_frac { frac_s.as_bytes() } else { b"" };
-                    let raw_exp = if has_exp { exp as i64 } else { 0 };
-                    let via_parts = Decimal::from_parts(neg, int_s.as_bytes(), frac_bytes, raw_exp)
-                        .expect("valid components");
-                    assert_eq!(via_parts, pair.0, "from_parts != from_ascii for {s}");
+                    // Parsing the SAME literal over a non-contiguous (split) byte stream must match the
+                    // contiguous parse exactly — the chunk-cursor path a decoder feeds.
+                    let bytes = s.as_bytes();
+                    let mid = bytes.len() / 2;
+                    let (a, b) = bytes.split_at(mid);
+                    let chunked = Decimal::parse(a.iter().copied().chain(b.iter().copied()))
+                        .expect("valid literal parses over chunks");
+                    assert_eq!(chunked, pair.0, "chunked parse != contiguous for {s}");
                     parsed.push(pair);
                 }
             }

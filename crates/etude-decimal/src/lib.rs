@@ -9,11 +9,13 @@
 //! (which needs a rounding policy) is a later addition. Correctness is pinned by a differential test
 //! against `bigdecimal` (a dev-dependency) as the reference.
 //!
-//! A value is built either from its already-separated pieces — sign, coefficient digits, and exponent —
-//! via [`Decimal::from_parts`] / [`Decimal::from_components`] (the path a text decoder that has already
-//! scanned a number token uses: no string is re-scanned), or from a decimal-literal string via
-//! [`Decimal::from_ascii`] / [`Decimal::from_str`] (a self-contained parser, convenient for standalone
-//! use).
+//! A value is built either numerically from a [`etude_bigint::Big`] coefficient and an exponent via
+//! [`Decimal::new`] (and the [`Decimal::from_i64`] / [`Decimal::from_bigint`] conveniences), or PARSED
+//! from a decimal number literal via [`Decimal::parse`] / [`Decimal::from_str`]. Parsing owns exactly the
+//! decimal-number-literal grammar and consumes any `Iterator<Item = u8>`, so a rope- or chunk-backed
+//! (non-contiguous) byte source is parsed in place with no flattening; [`Decimal::parse_prefix`] parses a
+//! number embedded in a larger byte stream (a text decoder such as a JSON tokenizer hands its chunk
+//! cursor straight in — this crate parses the *number*, the decoder owns the surrounding structure).
 //!
 //! # Representation and the canonical-form invariant
 //! A [`Decimal`] is the exact value `coeff * 10^exp`, where `coeff` is an [`etude_bigint::Big`] signed
@@ -30,8 +32,8 @@
 //!
 //! The fields are PRIVATE and not part of the stable API — the coefficient repr and the exponent width
 //! may change. Construct through [`Decimal::zero`], [`Decimal::from_i64`], [`Decimal::from_bigint`],
-//! [`Decimal::new`], [`Decimal::from_parts`]/[`Decimal::from_components`], or
-//! [`Decimal::from_ascii`]/[`Decimal::from_str`]; inspect through
+//! [`Decimal::new`], or by parsing via [`Decimal::parse`]/[`Decimal::parse_prefix`]/[`Decimal::from_str`];
+//! inspect through
 //! [`Decimal::coefficient`], [`Decimal::exponent`], [`Decimal::is_zero`], [`Decimal::is_negative`],
 //! [`Decimal::is_integer`], [`Decimal::to_f64`], the [`Ord`]/[`PartialOrd`] comparison, and `Display` /
 //! [`Decimal::write_to`] (the allocation-conscious rendering path — write straight into a
@@ -197,123 +199,118 @@ impl Decimal {
         Decimal::new(self.coeff.mul(&other.coeff), exp)
     }
 
-    /// Build a `Decimal` from its already-separated pieces: `negative` (the sign), the coefficient's
-    /// significant decimal digits split into an integer part and a fractional part (each ASCII
-    /// `b'0'..=b'9'`, no sign and no `.`), and `exp` (an explicit base-10 exponent). The value is
-    ///
-    /// ```text
-    /// (-1)^negative * (int_digits ++ frac_digits as an integer) * 10^(exp - frac_digits.len())
-    /// ```
-    ///
-    /// i.e. the fractional digits shift the point, then `exp` scales — exactly the pieces a decoder that
-    /// has already scanned a number token holds, so no string is re-scanned. The result is canonicalized
-    /// (trailing zeros stripped). Either slice may be empty (an empty coefficient is zero). Returns
-    /// `None` if a byte is not an ASCII digit, or if `exp - frac_digits.len()` would underflow `i64`.
-    pub fn from_parts(
-        negative: bool,
-        int_digits: &[u8],
-        frac_digits: &[u8],
-        exp: i64,
-    ) -> Option<Decimal> {
-        if !int_digits.iter().all(u8::is_ascii_digit) || !frac_digits.iter().all(u8::is_ascii_digit)
-        {
-            return None;
-        }
-        let mag = big_from_ascii_digits(int_digits, frac_digits);
-        let final_exp = exp.checked_sub(frac_digits.len() as i64)?;
-        let coeff = if negative { mag.neg() } else { mag };
-        Some(Decimal::new(coeff, final_exp))
-    }
-
-    /// Build a `Decimal` from a sign, a single run of coefficient digits, and an exponent —
-    /// `(-1)^negative * digits * 10^exp`. A convenience over [`Decimal::from_parts`] for a caller whose
-    /// coefficient is not split into integer/fractional parts. `digits` are ASCII `b'0'..=b'9'` (no sign,
-    /// no `.`); returns `None` on a non-digit byte.
-    pub fn from_components(negative: bool, digits: &[u8], exp: i64) -> Option<Decimal> {
-        Decimal::from_parts(negative, digits, &[], exp)
-    }
-
-    /// Parse a decimal-literal string from ASCII bytes into an exact `Decimal`, or `None` if the bytes
-    /// are not a well-formed literal. This is a self-contained parser, convenient for standalone use; a
-    /// decoder that has already scanned a number's pieces should use [`Decimal::from_parts`] instead
-    /// (no re-scan). The accepted grammar is
+    /// Parse a decimal number literal from a byte stream into an exact `Decimal`, or `None` if the whole
+    /// stream is not a well-formed literal. The stream need NOT be contiguous — any `IntoIterator<Item =
+    /// u8>` works, so a rope- or chunk-backed byte source is parsed in place with no flattening. The
+    /// grammar is
     ///
     /// ```text
     /// -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
     /// ```
     ///
     /// so a leading `+`, a redundant leading zero (`01`), a bare `.5`, a trailing `1.`, a lone `-`, an
-    /// empty exponent (`1e`), and any surrounding whitespace or trailing garbage are all REJECTED. The
-    /// decode is LOSSLESS: every significant digit becomes part of the coefficient and the decimal-point
-    /// / exponent set `exp`. An exponent literal with more than 18 digits (beyond `i64` range) is
-    /// rejected (returns `None`) rather than silently wrapping.
-    pub fn from_ascii(bytes: &[u8]) -> Option<Decimal> {
-        let mut i = 0;
-        let n = bytes.len();
-        if n == 0 {
-            return None;
+    /// empty exponent (`1e`), and any surrounding whitespace or trailing bytes are all REJECTED. The
+    /// decode is LOSSLESS. An exponent of more than 18 digits (beyond `i64`) is rejected rather than
+    /// silently wrapping. To parse a number embedded in a larger stream — stopping at the first byte that
+    /// is not part of the number — use [`Decimal::parse_prefix`].
+    pub fn parse<I: IntoIterator<Item = u8>>(bytes: I) -> Option<Decimal> {
+        let mut it = bytes.into_iter().peekable();
+        let d = Decimal::parse_prefix(&mut it)?;
+        if it.peek().is_some() {
+            return None; // trailing bytes after the number literal
         }
+        Some(d)
+    }
 
+    /// Parse the maximal decimal-number-literal PREFIX from a peekable byte iterator, stopping at (and NOT
+    /// consuming) the first byte that is not part of the number — leaving the iterator positioned right
+    /// after the literal. This is the entry point for a decoder embedding a number in a larger chunked
+    /// byte stream (e.g. a JSON tokenizer): it advances the shared cursor across chunk boundaries with no
+    /// flattening. Returns `None` if no well-formed number literal starts at the cursor. Grammar and
+    /// losslessness are as for [`Decimal::parse`].
+    pub fn parse_prefix<I: Iterator<Item = u8>>(
+        it: &mut core::iter::Peekable<I>,
+    ) -> Option<Decimal> {
         // Optional leading minus (a leading plus is not accepted).
-        let neg = bytes[0] == b'-';
-        if neg {
-            i += 1;
-        }
-
-        // Integer part: "0" alone, or [1-9] followed by any digits. No leading zeros.
-        let int_start = i;
-        if i >= n || !bytes[i].is_ascii_digit() {
-            return None;
-        }
-        if bytes[i] == b'0' {
-            i += 1;
-            // A "0" may not be followed by another digit (no "00", "01").
-            if i < n && bytes[i].is_ascii_digit() {
-                return None;
-            }
+        let neg = if it.peek() == Some(&b'-') {
+            it.next();
+            true
         } else {
-            while i < n && bytes[i].is_ascii_digit() {
-                i += 1;
+            false
+        };
+
+        let mut coeff = CoeffBuilder::new();
+
+        // Integer part: "0" alone, or [1-9] followed by any digits. No redundant leading zeros.
+        match it.peek() {
+            Some(&b'0') => {
+                it.next();
+                coeff.push(b'0');
+                // A leading "0" may not be followed by another digit ("00", "01").
+                if matches!(it.peek(), Some(c) if c.is_ascii_digit()) {
+                    return None;
+                }
             }
+            Some(&c) if (b'1'..=b'9').contains(&c) => {
+                it.next();
+                coeff.push(c);
+                while let Some(&c) = it.peek() {
+                    if !c.is_ascii_digit() {
+                        break;
+                    }
+                    it.next();
+                    coeff.push(c);
+                }
+            }
+            _ => return None, // an integer digit is required
         }
-        let int_digits = &bytes[int_start..i];
 
         // Optional fractional part: a dot followed by at least one digit.
-        let mut frac_digits: &[u8] = &[];
-        if i < n && bytes[i] == b'.' {
-            i += 1;
-            let frac_start = i;
-            while i < n && bytes[i].is_ascii_digit() {
-                i += 1;
+        let mut frac_len: i64 = 0;
+        if it.peek() == Some(&b'.') {
+            it.next();
+            while let Some(&c) = it.peek() {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                it.next();
+                coeff.push(c);
+                frac_len += 1;
             }
-            if i == frac_start {
+            if frac_len == 0 {
                 return None; // a dot must be followed by at least one digit
             }
-            frac_digits = &bytes[frac_start..i];
         }
 
         // Optional exponent: e/E, optional sign, at least one digit.
         let mut exp_val: i64 = 0;
-        if i < n && (bytes[i] == b'e' || bytes[i] == b'E') {
-            i += 1;
-            let exp_neg = if i < n && (bytes[i] == b'+' || bytes[i] == b'-') {
-                let s = bytes[i] == b'-';
-                i += 1;
-                s
-            } else {
-                false
+        if matches!(it.peek(), Some(&b'e') | Some(&b'E')) {
+            it.next();
+            let exp_neg = match it.peek() {
+                Some(&b'+') => {
+                    it.next();
+                    false
+                }
+                Some(&b'-') => {
+                    it.next();
+                    true
+                }
+                _ => false,
             };
-            let exp_start = i;
-            while i < n && bytes[i].is_ascii_digit() {
-                // An exponent with more than 18 digits cannot be reasoned about in an i64; reject it
-                // rather than silently wrapping. (18 nines ≈ 1e18 < i64::MAX.)
-                if i - exp_start >= 18 {
+            let mut exp_digits = 0u32;
+            while let Some(&c) = it.peek() {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                // More than 18 exponent digits cannot be reasoned about in i64; reject rather than wrap.
+                if exp_digits >= 18 {
                     return None;
                 }
-                exp_val = exp_val * 10 + (bytes[i] - b'0') as i64;
-                i += 1;
+                it.next();
+                exp_val = exp_val * 10 + (c - b'0') as i64;
+                exp_digits += 1;
             }
-            if i == exp_start {
+            if exp_digits == 0 {
                 return None; // an exponent marker must be followed by at least one digit
             }
             if exp_neg {
@@ -321,14 +318,11 @@ impl Decimal {
             }
         }
 
-        // No trailing garbage.
-        if i != n {
-            return None;
-        }
-
-        // The grammar is validated; hand the scanned pieces to the shared component constructor (the
-        // digits are already known to be ASCII, so its re-check is trivially satisfied).
-        Decimal::from_parts(neg, int_digits, frac_digits, exp_val)
+        // Each fractional digit lowered the exponent by one; fold that in.
+        let exp = exp_val.checked_sub(frac_len)?;
+        let mag = coeff.finish();
+        let coeff = if neg { mag.neg() } else { mag };
+        Some(Decimal::new(coeff, exp))
     }
 
     /// Convert to the nearest `f64` — correctly rounded (round-to-nearest, ties-to-even), computed
@@ -505,7 +499,7 @@ impl Decimal {
 
     /// Write the canonical decimal rendering DIRECTLY into a [`core::fmt::Write`] sink — the
     /// allocation-conscious rendering path that [`Display`](core::fmt::Display) uses (no intermediate `String` is built for
-    /// the framing). The output is always a valid decimal literal and re-parses via [`Decimal::from_ascii`]
+    /// the framing). The output is always a valid decimal literal and re-parses via [`Decimal::parse`]
     /// to the same value: a plain (point) form for modest exponents, and a bounded `<digits>e<exp>`
     /// scientific form for large magnitudes so the output stays small.
     ///
@@ -594,32 +588,48 @@ fn pow2(k: u32) -> Big {
     Big::from_le_twos_complement_bytes(&buf)
 }
 
-/// Build a nonnegative [`Big`] from the concatenation of two ASCII digit slices (integer part, then
-/// fractional part). Accumulates in ≤18-digit chunks (each fits an `i64`) to avoid an O(n²) per-digit
-/// multiply chain.
-fn big_from_ascii_digits(int_digits: &[u8], frac_digits: &[u8]) -> Big {
-    let mut acc = Big::zero();
-    let mut chunk_val: i64 = 0;
-    let mut chunk_len: u32 = 0;
-    let flush = |acc: &mut Big, chunk_val: &mut i64, chunk_len: &mut u32| {
-        if *chunk_len == 0 {
-            return;
-        }
-        // acc = acc * 10^chunk_len + chunk_val
-        let scale = Big::from_i64(10i64.pow(*chunk_len));
-        *acc = acc.mul(&scale).add(&Big::from_i64(*chunk_val));
-        *chunk_val = 0;
-        *chunk_len = 0;
-    };
-    for &d in int_digits.iter().chain(frac_digits.iter()) {
-        chunk_val = chunk_val * 10 + (d - b'0') as i64;
-        chunk_len += 1;
-        if chunk_len == 18 {
-            flush(&mut acc, &mut chunk_val, &mut chunk_len);
+/// Accumulates ASCII decimal digits fed one at a time (streaming, across chunk boundaries) into a
+/// nonnegative [`Big`] coefficient. Batches digits into ≤18-digit `i64` chunks (each flushed as one
+/// `mul`+`add`) to avoid an O(n²) per-digit multiply chain.
+struct CoeffBuilder {
+    /// The accumulated high-order magnitude (everything already flushed).
+    mag: Big,
+    /// The current low-order chunk of up to 18 not-yet-flushed digits.
+    chunk: i64,
+    /// The number of digits in `chunk`.
+    len: u32,
+}
+
+impl CoeffBuilder {
+    fn new() -> CoeffBuilder {
+        CoeffBuilder {
+            mag: Big::zero(),
+            chunk: 0,
+            len: 0,
         }
     }
-    flush(&mut acc, &mut chunk_val, &mut chunk_len);
-    acc
+
+    /// Append one ASCII digit (`b'0'..=b'9'`), flushing the chunk into `mag` every 18 digits.
+    fn push(&mut self, d: u8) {
+        self.chunk = self.chunk * 10 + (d - b'0') as i64;
+        self.len += 1;
+        if self.len == 18 {
+            self.mag = self.mag.mul(&pow10(18)).add(&Big::from_i64(self.chunk));
+            self.chunk = 0;
+            self.len = 0;
+        }
+    }
+
+    /// Fold the trailing partial chunk in and return the assembled magnitude.
+    fn finish(self) -> Big {
+        if self.len == 0 {
+            self.mag
+        } else {
+            self.mag
+                .mul(&pow10(self.len as u64))
+                .add(&Big::from_i64(self.chunk))
+        }
+    }
 }
 
 impl core::fmt::Display for Decimal {
@@ -630,7 +640,7 @@ impl core::fmt::Display for Decimal {
 }
 
 /// Parse error for [`Decimal::from_str`] / [`str::parse`]. Carries no detail — the input was not a
-/// well-formed decimal literal (see [`Decimal::from_ascii`] for the grammar).
+/// well-formed decimal literal (see [`Decimal::parse`] for the grammar).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ParseDecimalError;
 
@@ -644,7 +654,7 @@ impl FromStr for Decimal {
     type Err = ParseDecimalError;
 
     fn from_str(s: &str) -> Result<Decimal, ParseDecimalError> {
-        Decimal::from_ascii(s.as_bytes()).ok_or(ParseDecimalError)
+        Decimal::parse(s.bytes()).ok_or(ParseDecimalError)
     }
 }
 
