@@ -41,7 +41,7 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | abs        | 64b    | 25.6 ns   | 16.1 ns      | 1.59      |
 | abs        | 256b   | 23.8 ns   | 34.8 ns      | **0.69**  |
 | abs        | 1024b  | 25.5 ns   | 37.3 ns      | **0.68**  |
-| normalize  | 64b    | 0.33 µs   | 1.21 µs      | **0.27**  |
+| normalize  | 64b    | 0.16 µs   | 1.24 µs      | **0.13**  |
 | normalize  | 256b   | 1.91 µs   | 5.02 µs      | **0.38**  |
 | normalize  | 1024b  | 15.4 µs   | 24.6 µs      | **0.63**  |
 | normalize  | 2048b  | 46.4 µs   | 65.2 µs      | **0.71**  |
@@ -124,8 +124,11 @@ set, so they exceed `i64` and miss the `to_i64` paths, but whose magnitudes stil
 arithmetic runs natively — `cmp` compares them directly (`cmp_small_u128`); `mul`/`div` cross-reduce on the
 u64 magnitudes and box the (possibly `> i128`) products via a sign + `u128`→`Big` encode (`big_from_u128`).
 This took the `64b` binop tier from the `Big` path to native: **`mul` 0.41× → 0.054×** (2.08 µs → 0.27 µs),
-**`div` 0.36× → 0.045×** (1.86 µs → 0.24 µs), **`cmp` 0.93× → 0.18×**. The `mul_div_native_u64_magnitude`
-and `cmp_native_u64_magnitude` tests cover the band (the i64-seeded oracle can't reach it).
+**`div` 0.36× → 0.045×** (1.86 µs → 0.24 µs), **`cmp` 0.93× → 0.18×**. `normalize` (small-rational
+construction) takes the same band: a `u64` hardware-divide gcd + `big_from_u128` box instead of the `Big`
+gcd/`div_exact`, **`normalize` 64b 0.27× → 0.13×** (0.32 µs → 0.16 µs). The `mul_div_native_u64_magnitude`
+and `cmp_native_u64_magnitude` tests cover the band (the i64-seeded oracle can't reach it; both build via
+`Rational::new`, so they also exercise the `normalize` u64 path).
 
 `normalize` also takes this native path for i64-fitting components, so **small-rational construction**
 (`from_ratio_i64`, `new` on small `Big`s) reduces with a native gcd instead of a `Big` gcd. The native
@@ -287,6 +290,13 @@ very wide renders are unaffected. Re-bench on each render land.
   (added the 2048b/4096b rows). Closes the last gcd-bound parity/loss class — the only remaining non-wins
   are `recip`/`neg`/`abs`@64b (etude-bigint small-`Big` inline-repr). Scoreboard refresh only, no local
   change. etude-bigint has consequently deprioritized Lehmer/HGCD (no longer needed to close a gap).
+- **slice 35** — extended the native `u64`-magnitude band to `normalize` (small-rational construction).
+  Its native path used `to_i64_checked`, so the `64b` construction tier (magnitudes fit u64 but exceed
+  i64) fell to the `Big` gcd + `div_exact`. Added a `to_i128_checked` + `≤ u64::MAX` guard branch: sign
+  fixup, one `gcd_u64` (hardware divide), and `big_from_u128` box — no `Big` gcd. **`normalize` 64b 0.32 µs
+  → 0.16 µs (0.27× → 0.13×)**, ~1.9×. The i64 path (`from_ratio_i64`, 117 ns) is tried first and unchanged;
+  256b+ (magnitudes > u64) still take the `Big` path. Covered by the existing u64-band tests, which build
+  via `Rational::new` → `normalize`. Completes the `64b` native band across cmp/mul/div/normalize.
 - **slice 32** — native `u128` `mul`/`div` for the `64b` band (`mul_small_u128`/`div_small_u128`),
   generalizing slice 31's `cmp` win to arithmetic: `~1-limb` components with the top magnitude bit set
   exceed `i64` (missing the `to_i64` paths) but their magnitudes fit `u64`, so after cross-reducing on the
