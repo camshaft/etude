@@ -227,6 +227,62 @@ fn byte_at_matches_flat_in_both_tiers() {
 
 /// `starts_with` / `ends_with` against a `Vec<u8>` oracle, in both tiers, with the literal spanning
 /// chunk boundaries. Covers empty literals, exact-length, and longer-than-buffer.
+/// The `FromIterator` bulk path (exact `size_hint` above `PROMOTE_AT` routes into the bottom-up
+/// tree build) must survive hostile-but-safe inputs: empty chunks (the `extend_blocks` filter is
+/// load-bearing — without it the no-empty-chunks invariant corrupts), and a LYING `size_hint`
+/// (correctness must follow the actually-yielded items, with the tree/demote path normalizing tiny
+/// or empty results back to a valid rope).
+#[test]
+fn from_iter_survives_empty_chunks_and_lying_size_hints() {
+    // Bulk collect of ONLY empty chunks (exact hint 100 > PROMOTE_AT): a valid empty rope.
+    let rope: ByteVec = vec![Bytes::new(); 100].into_iter().collect();
+    rope.check_invariants();
+    assert!(rope.is_empty());
+    assert_eq!(rope.chunks().len(), 0);
+    assert_eq!(rope, ByteVec::new());
+
+    // An iterator whose size_hint lower bound lies high: routing must not affect correctness.
+    struct Liar(alloc::vec::IntoIter<Bytes>);
+    impl Iterator for Liar {
+        type Item = Bytes;
+        fn next(&mut self) -> Option<Bytes> {
+            self.0.next()
+        }
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (1000, None)
+        }
+    }
+    let rope: ByteVec =
+        Liar(vec![Bytes::from_static(b"ab"), Bytes::from_static(b"cd")].into_iter()).collect();
+    rope.check_invariants();
+    assert_eq!(rope, b"abcd"[..]);
+    assert_eq!(rope.chunks().len(), 2);
+
+    let rope: ByteVec = Liar(vec![].into_iter()).collect();
+    rope.check_invariants();
+    assert!(rope.is_empty());
+    assert_eq!(rope, ByteVec::new());
+
+    // Bulk build with interleaved empties: content, chunk count, and flatten follow the
+    // non-empty chunks only.
+    let chunks: Vec<Bytes> = (0..100u8)
+        .map(|i| {
+            if i % 3 == 0 {
+                Bytes::new()
+            } else {
+                Bytes::copy_from_slice(&[i])
+            }
+        })
+        .collect();
+    let want: Vec<u8> = (0..100u8).filter(|i| i % 3 != 0).collect();
+    let rope: ByteVec = chunks.into_iter().collect();
+    rope.check_invariants();
+    assert_eq!(rope, want[..]);
+    assert_eq!(rope.chunks().len(), want.len());
+    let flat: Vec<u8> = rope.chunks().flat_map(|c| c.iter().copied()).collect();
+    assert_eq!(flat, want);
+}
+
 #[test]
 fn starts_ends_with_match_flat_in_both_tiers() {
     for n in [4usize, PROMOTE_AT * 3 + 7] {
