@@ -38,6 +38,15 @@ impl<T: bytes::BufMut> Buffer for BufMut<'_, T> {
         // make sure the current chunk is capable of reading the entire slice
         ensure!(chunk.len() >= payload_len, Ok(false));
 
+        // Zero-initialize the exposed region before the safe closure runs: on `Ok(())` we commit
+        // `payload_len` bytes via the unsafe `advance_mut`, so a closure that fills fewer bytes (or
+        // none) must not leave uninitialized heap to be exposed as content. A short fill now yields
+        // zeros, not stale memory.
+        // SAFETY: `payload_len <= chunk.len()` (checked above), so the whole written region is in bounds.
+        unsafe {
+            core::ptr::write_bytes(chunk.as_mut_ptr(), 0, payload_len);
+        }
+
         f(&mut chunk[..payload_len])?;
 
         unsafe {
@@ -80,6 +89,15 @@ macro_rules! impl_buf_mut {
 
                 let chunk = self.chunk_mut();
                 ensure!(chunk.len() >= payload_len, Ok(false));
+
+                // Zero-initialize the exposed region before the safe closure runs: on `Ok(())` we
+                // commit `payload_len` bytes via the unsafe `advance_mut`, so a closure that fills
+                // fewer bytes (or none) must not leave uninitialized memory to be exposed as content.
+                // A short fill now yields zeros, not stale heap.
+                // SAFETY: `payload_len <= chunk.len()` (checked above), so the region is in bounds.
+                unsafe {
+                    core::ptr::write_bytes(chunk.as_mut_ptr(), 0, payload_len);
+                }
 
                 f(&mut chunk[..payload_len])?;
 
