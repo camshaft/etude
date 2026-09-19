@@ -23,6 +23,13 @@
 //!   `false` (the common case), or
 //! - call [`Token::decode_string`] to materialize the unescaped `String` when escapes are present.
 //!
+//! # Strictness
+//! By default ([`Strictness::Strict`], via [`Tokenizer::new`]) the tokenizer enforces full JSON
+//! string correctness — content must be valid UTF-8 and every `\u` surrogate must be paired — so its
+//! accept/reject matches `serde_json`. [`Tokenizer::with_strictness`] can instead select
+//! [`Strictness::Lenient`], which accepts a documented superset (non-UTF-8 content and lone
+//! surrogates pass, to be resolved lossily on decode). See [`Strictness`].
+//!
 //! # Spans reference the input
 //! Every [`Span`] is a half-open byte range `[start, end)` into the same rope the tokenizer was
 //! created over. A span is meaningless against any other rope.
@@ -183,6 +190,13 @@ pub enum ErrorKind {
     InvalidEscape,
     /// A `\u` escape is not followed by exactly four hexadecimal digits.
     InvalidUnicodeEscape,
+    /// A `\u` escape names a surrogate that is not part of a valid high-then-low pair — a lone or
+    /// unpaired surrogate. Only reported in [`Strictness::Strict`]; in [`Strictness::Lenient`] a
+    /// lone surrogate is accepted (and decoded lossily to U+FFFD).
+    LoneSurrogate,
+    /// A string's raw content bytes are not valid UTF-8. Only reported in [`Strictness::Strict`]; in
+    /// [`Strictness::Lenient`] non-UTF-8 content is accepted (and decoded lossily).
+    InvalidUtf8,
     /// A raw control byte (`< 0x20`) appeared inside a string, where it must be escaped.
     ControlCharInString,
     /// A numeric literal does not match the JSON number grammar.
@@ -217,6 +231,8 @@ impl fmt::Display for Error {
             ErrorKind::UnterminatedString => "unterminated string",
             ErrorKind::InvalidEscape => "invalid escape",
             ErrorKind::InvalidUnicodeEscape => "invalid unicode escape",
+            ErrorKind::LoneSurrogate => "lone or unpaired surrogate in unicode escape",
+            ErrorKind::InvalidUtf8 => "string content is not valid UTF-8",
             ErrorKind::ControlCharInString => "unescaped control character in string",
             ErrorKind::InvalidNumber => "invalid number",
             ErrorKind::InvalidKeyword => "invalid keyword",
@@ -227,6 +243,28 @@ impl fmt::Display for Error {
 
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
+
+/// How strictly the tokenizer enforces JSON string correctness.
+///
+/// The only axis on which JSON parsers legitimately differ is how they treat two malformed-string
+/// conditions the byte-oriented scan can otherwise wave through: string content that is not valid
+/// UTF-8, and a `\u` escape naming a lone (unpaired) surrogate. This selects between matching
+/// `serde_json` / RFC 8259 §8.1 exactly and accepting a documented lenient superset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Strictness {
+    /// Enforce full string correctness at lex time (the default): string content must be valid UTF-8
+    /// and every `\u` surrogate must form a high-then-low pair. Accept/reject matches `serde_json`.
+    ///
+    /// Because a `Strict` tokenizer guarantees a [`TokenKind::String`] token's content span is valid
+    /// UTF-8, a consumer may read that span with an unchecked O(1) conversion (no re-validation).
+    #[default]
+    Strict,
+    /// Accept a lenient superset of JSON strings: string content that is not valid UTF-8 and lone
+    /// `\u` surrogates are tolerated (a decoder resolves both lossily to U+FFFD).
+    ///
+    /// A consumer must NOT assume a string token's content is valid UTF-8 under this mode.
+    Lenient,
+}
 
 /// An iterator of [`Token`]s over a [`ByteVec`].
 ///
@@ -241,14 +279,23 @@ impl std::error::Error for Error {}
 pub struct Tokenizer<'a> {
     cursor: Cursor<'a>,
     done: bool,
+    strictness: Strictness,
 }
 
 impl<'a> Tokenizer<'a> {
-    /// Create a tokenizer over `input`. Iterating it yields the JSON tokens of the rope's bytes.
+    /// Create a tokenizer over `input` in the default ([`Strictness::Strict`]) mode. Iterating it
+    /// yields the JSON tokens of the rope's bytes.
     pub fn new(input: &'a ByteVec) -> Self {
+        Self::with_strictness(input, Strictness::Strict)
+    }
+
+    /// Create a tokenizer over `input` with an explicit [`Strictness`] mode (see its variants for
+    /// what each accepts).
+    pub fn with_strictness(input: &'a ByteVec, strictness: Strictness) -> Self {
         Tokenizer {
             cursor: Cursor::new(input),
             done: false,
+            strictness,
         }
     }
 
@@ -279,6 +326,13 @@ impl<'a> Tokenizer<'a> {
         let start = self.cursor.offset();
         self.cursor.bump(); // past the opening quote
         let mut has_escapes = false;
+        let strict = self.strictness == Strictness::Strict;
+        // In Strict mode the raw content bytes must be valid UTF-8. Content is delivered in leaf-sized
+        // ordinary-byte runs; a multi-byte char can straddle a rope-leaf boundary but never one of the
+        // significant bytes (`"`, `\`, control), which are all ASCII (`< 0x80`) and so never a piece of
+        // a multi-byte sequence. `Utf8Check` therefore validates run-by-run, carrying an incomplete
+        // trailing char only across leaf boundaries.
+        let mut utf8 = Utf8Check::default();
         loop {
             // Bulk-skip a run of ordinary bytes within the current leaf up to the next significant
             // byte (`"`, `\`, or a control byte `< 0x20`). This one contiguous-slice scan replaces a
@@ -288,13 +342,39 @@ impl<'a> Tokenizer<'a> {
                 .iter()
                 .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
             {
-                Some(k) => self.cursor.skip_in_chunk(k),
+                Some(k) => {
+                    if strict {
+                        let run_start = self.cursor.offset();
+                        utf8.feed(&tail[..k]).map_err(|off| Error {
+                            offset: run_start + off,
+                            kind: ErrorKind::InvalidUtf8,
+                        })?;
+                        // The upcoming significant byte is ASCII, so a still-pending multi-byte char
+                        // was cut short by it — that is invalid UTF-8.
+                        if !utf8.is_clean() {
+                            return Err(Error {
+                                offset: run_start + k,
+                                kind: ErrorKind::InvalidUtf8,
+                            });
+                        }
+                    }
+                    self.cursor.skip_in_chunk(k);
+                }
                 None => {
                     if tail.is_empty() {
+                        // End of input with a pending incomplete char is also invalid UTF-8, but the
+                        // missing closing quote is the more fundamental defect — report that.
                         return Err(Error {
                             offset: start,
                             kind: ErrorKind::UnterminatedString,
                         });
+                    }
+                    if strict {
+                        let run_start = self.cursor.offset();
+                        utf8.feed(tail).map_err(|off| Error {
+                            offset: run_start + off,
+                            kind: ErrorKind::InvalidUtf8,
+                        })?;
                     }
                     // No significant byte in this leaf — skip to its end, continue in the next leaf.
                     self.cursor.skip_in_chunk(tail.len());
@@ -334,16 +414,9 @@ impl<'a> Tokenizer<'a> {
                         }
                         b'u' => {
                             self.cursor.bump(); // past the `u`
-                            for _ in 0..4 {
-                                match self.cursor.peek() {
-                                    Some(h) if h.is_ascii_hexdigit() => self.cursor.bump(),
-                                    _ => {
-                                        return Err(Error {
-                                            offset: esc_start,
-                                            kind: ErrorKind::InvalidUnicodeEscape,
-                                        });
-                                    }
-                                }
+                            let hi = self.read_hex4(esc_start)?;
+                            if strict {
+                                self.check_surrogate(hi, esc_start)?;
                             }
                         }
                         _ => {
@@ -362,6 +435,59 @@ impl<'a> Tokenizer<'a> {
                     });
                 }
             }
+        }
+    }
+
+    /// Read exactly four hexadecimal digits at the cursor, consuming them, and return their value.
+    /// `esc_start` is the offset of the escape's `\`, used to locate an [`ErrorKind::InvalidUnicodeEscape`].
+    fn read_hex4(&mut self, esc_start: usize) -> Result<u32, Error> {
+        let mut v = 0u32;
+        for _ in 0..4 {
+            match self.cursor.peek() {
+                Some(h) if h.is_ascii_hexdigit() => {
+                    v = (v << 4) | (h as char).to_digit(16).expect("ascii hex digit");
+                    self.cursor.bump();
+                }
+                _ => {
+                    return Err(Error {
+                        offset: esc_start,
+                        kind: ErrorKind::InvalidUnicodeEscape,
+                    });
+                }
+            }
+        }
+        Ok(v)
+    }
+
+    /// In Strict mode, enforce `\u` surrogate pairing for a just-read escape value `hi` (the escape's
+    /// `\` at `esc_start`): a high surrogate must be immediately followed by a `\u` low surrogate, and
+    /// a lone low surrogate is rejected. A BMP scalar is fine and consumes nothing further.
+    fn check_surrogate(&mut self, hi: u32, esc_start: usize) -> Result<(), Error> {
+        let lone = Err(Error {
+            offset: esc_start,
+            kind: ErrorKind::LoneSurrogate,
+        });
+        if (0xD800..=0xDBFF).contains(&hi) {
+            // High surrogate: require a following `\uXXXX` naming a low surrogate.
+            if self.cursor.peek() != Some(b'\\') {
+                return lone;
+            }
+            let lo_start = self.cursor.offset();
+            self.cursor.bump(); // `\`
+            if self.cursor.peek() != Some(b'u') {
+                return lone;
+            }
+            self.cursor.bump(); // `u`
+            let lo = self.read_hex4(lo_start)?;
+            if !(0xDC00..=0xDFFF).contains(&lo) {
+                return lone;
+            }
+            Ok(())
+        } else if (0xDC00..=0xDFFF).contains(&hi) {
+            // A low surrogate with no preceding high surrogate.
+            lone
+        } else {
+            Ok(())
         }
     }
 
@@ -515,6 +641,63 @@ impl Iterator for Tokenizer<'_> {
 }
 
 impl core::iter::FusedIterator for Tokenizer<'_> {}
+
+/// Incremental UTF-8 validator over a string's ordinary-content byte runs, used only in
+/// [`Strictness::Strict`]. Runs arrive one rope-leaf piece at a time; because a run boundary that is
+/// not a leaf boundary falls on an ASCII significant byte (`"`, `\`, control), a multi-byte char can
+/// only be split across a leaf boundary — so at most a 3-byte incomplete-trailing `carry` need
+/// survive between [`Utf8Check::feed`] calls. All of the hard validation (overlong forms, surrogate
+/// range, `> U+10FFFF`) is delegated to `core::str::from_utf8`; this only manages the carry.
+#[derive(Default)]
+struct Utf8Check {
+    carry: [u8; 4],
+    carry_len: usize,
+}
+
+impl Utf8Check {
+    /// Validate the next ordinary-content run. `Err(off)` on invalid UTF-8, where `off` is the byte
+    /// offset within `run` at which the defect was detected (best-effort, for diagnostics).
+    fn feed(&mut self, run: &[u8]) -> Result<(), usize> {
+        let mut i = 0;
+        // First, complete a char carried (incomplete) from the previous run's tail.
+        while self.carry_len > 0 {
+            if i == run.len() {
+                return Ok(()); // run exhausted, char still incomplete — carry into the next run
+            }
+            self.carry[self.carry_len] = run[i];
+            self.carry_len += 1;
+            i += 1;
+            match core::str::from_utf8(&self.carry[..self.carry_len]) {
+                Ok(_) => {
+                    self.carry_len = 0; // carried char completed and is valid
+                    break;
+                }
+                // A definitively invalid sequence (not merely incomplete).
+                Err(e) if e.error_len().is_some() => return Err(i - 1),
+                // Still an incomplete-but-valid prefix; a char is at most four bytes.
+                Err(_) if self.carry_len == 4 => return Err(i - 1),
+                Err(_) => {}
+            }
+        }
+        // Then validate the rest of the run in place.
+        match core::str::from_utf8(&run[i..]) {
+            Ok(_) => Ok(()),
+            Err(e) if e.error_len().is_some() => Err(i + e.valid_up_to()),
+            Err(e) => {
+                // A valid prefix ending in an incomplete char — stash its (≤3) bytes for the next run.
+                let tail = &run[i + e.valid_up_to()..];
+                self.carry[..tail.len()].copy_from_slice(tail);
+                self.carry_len = tail.len();
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether there is no pending incomplete char — must hold at an ASCII boundary and at end.
+    fn is_clean(&self) -> bool {
+        self.carry_len == 0
+    }
+}
 
 /// Decode the (validated) content of a string token into an owned `String`, applying JSON escapes.
 ///
