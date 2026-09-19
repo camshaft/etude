@@ -17,6 +17,34 @@ Numbers below are medians from one `aarch64-linux` run and are **indicative, not
 absolute times vary by machine; what matters is the **ratio to num-rational** and its movement as
 optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (**bold**), `>1.00` = slower.
 
+## Current — equal-denominator add/sub fast path (slice 4)
+
+`add`/`sub` now fast-path a common real-world pattern: when the two denominators are equal, the result is
+`(a ± c)/b` — skipping BOTH cross-multiplies and the `b*d` product (three multiplies → one add). The
+`den == den` test is an O(limbs) compare that short-circuits when they differ, so the random-operand rows
+below are **unchanged** (no regression). Measured (`add_eqden`, random coprime numerators over a shared
+denominator — a fair fast-path-vs-fast-path comparison):
+
+| op (eq-den) | tier   | etude    | num-rational | ratio | vs our general add |
+|-------------|--------|----------|--------------|-------|--------------------|
+| add_eqden   | 64b    | 1.34 µs  | 1.34 µs      | **1.00** | 3.30 µs → 1.34 µs (2.5×) |
+| add_eqden   | 256b   | 8.71 µs  | 4.97 µs      | 1.75  | 22.8 µs → 8.71 µs (2.6×) |
+| add_eqden   | 1024b  | 60.6 µs  | 25.3 µs      | 2.40  | 158 µs → 60.6 µs (2.6×) |
+
+This is ~2.5–2.6× faster than our own general (cross-multiply) path and reaches parity at 64b. The
+residual gap to num-rational at ≥256b is now **entirely gcd-bound**: the fast path leaves only the
+`gcd`-normalize, and `etude-bigint`'s Euclidean gcd is ~1.7× slower than `num-integer`'s on random
+operands (per etude-bigint's own scoreboard). **`etude-bigint` gcd is the single shared bottleneck for
+every normalize-heavy op here (add/sub/mul/div/normalize) — the highest-leverage next win is a faster gcd
+in etude-bigint** (coordination item raised to that vertical).
+
+> Investigated but NOT landed — continued-fraction `cmp`: replacing the double cross-multiply with the
+> Euclidean/continued-fraction comparison cut `cmp @1024b` from 789 ns to ~196 ns (4.4× → 1.11×) BUT
+> regressed the 64b/256b tiers (its per-step overhead loses to two tiny multiplies), and a size-thresholded
+> hybrid regressed too because the only size probe available (`to_sign_magnitude_bytes_into`) still copies
+> all limbs when the value fits (not O(1)). A clean cmp hybrid needs an O(1) size/bit-length accessor from
+> etude-bigint (or an allocation-free continued-fraction). Reverted; coordination item raised.
+
 ## Current — gcd-free `recip` (slice 3)
 
 Reciprocal is now an O(limbs) swap+sign instead of a full gcd-normalize (a canonical rational is already
