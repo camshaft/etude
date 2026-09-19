@@ -158,15 +158,18 @@ impl Rational {
 
     /// Exact sum `self + other`. `a/b + c/d = (a*d + c*b)/(b*d)`, renormalized.
     pub fn add(&self, other: &Rational) -> Rational {
+        // Native i128 fast path FIRST: for i64-fitting operands (the common small case) this covers the
+        // equal-denominator case too — `(a*b + c*b)/(b*b)` reduces natively to `(a+c)/b` — and is faster
+        // than the Big equal-denominator path below (one native add + native gcd vs a Big add + Big gcd).
+        if let Some(r) = self.addsub_small(other, false) {
+            return r;
+        }
         if self.den == other.den {
             // Common denominator: `(a + c)/b`. Skips both cross-multiplies AND the `b*d` product — three
             // multiplies replaced by one add. The `den` equality test is an O(limbs) limb compare that
             // short-circuits on the first differing limb, so it is free when the denominators differ.
             return normalize(self.num.add(&other.num), self.den.clone())
                 .expect("common denominator is positive");
-        }
-        if let Some(r) = self.addsub_small(other, false) {
-            return r;
         }
         let num = self.num.mul(&other.den).add(&other.num.mul(&self.den));
         let den = self.den.mul(&other.den);
@@ -176,13 +179,14 @@ impl Rational {
 
     /// Exact difference `self - other`.
     pub fn sub(&self, other: &Rational) -> Rational {
+        // Native i128 fast path FIRST (covers the equal-denominator small case too — see [`Rational::add`]).
+        if let Some(r) = self.addsub_small(other, true) {
+            return r;
+        }
         if self.den == other.den {
             // Common denominator: `(a - c)/b` (see [`Rational::add`] for the fast-path rationale).
             return normalize(self.num.sub(&other.num), self.den.clone())
                 .expect("common denominator is positive");
-        }
-        if let Some(r) = self.addsub_small(other, true) {
-            return r;
         }
         let num = self.num.mul(&other.den).sub(&other.num.mul(&self.den));
         let den = self.den.mul(&other.den);
@@ -460,8 +464,9 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
         // case for freshly built pairs).
         return Some(Rational { num, den });
     }
-    let (num_reduced, _) = num.divmod(&g).expect("gcd is nonzero");
-    let (den_reduced, _) = den.divmod(&g).expect("gcd is nonzero");
+    // `div_exact` returns just the quotient — no discarded-remainder allocation (the gcd divides both).
+    let num_reduced = num.div_exact(&g).expect("gcd is nonzero");
+    let den_reduced = den.div_exact(&g).expect("gcd is nonzero");
     Some(Rational {
         num: num_reduced,
         den: den_reduced,
@@ -491,13 +496,14 @@ fn big_from_i128(v: i128) -> Big {
     }
 }
 
-/// `n / g` where `g` is a known divisor of `n`; skips the divmod when `g == 1` (an O(1), allocation-free
-/// `bit_len() == 1` check — `g` is a non-negative gcd, so `bit_len() == 1` ⟺ `g == 1`).
-fn div_exact(n: &Big, g: &Big) -> Big {
+/// `n / g` where `g` is a known divisor of `n`. Skips the division entirely when `g == 1` (an O(1),
+/// allocation-free `bit_len() == 1` check — `g` is a non-negative gcd, so `bit_len() == 1` ⟺ `g == 1`);
+/// otherwise uses `Big::div_exact` (quotient only — no discarded-remainder allocation).
+fn reduce_by(n: &Big, g: &Big) -> Big {
     if g.bit_len() == 1 {
         n.clone()
     } else {
-        n.divmod(g).expect("g is a nonzero divisor of n").0
+        n.div_exact(g).expect("g is a nonzero divisor of n")
     }
 }
 
@@ -509,8 +515,8 @@ fn div_exact(n: &Big, g: &Big) -> Big {
 fn cross_reduce_mul(a: &Big, b: &Big, c: &Big, d: &Big) -> (Big, Big) {
     let g1 = a.gcd(d); // gcd(|a|, |d|)
     let g2 = c.gcd(b); // gcd(|c|, |b|)
-    let num = div_exact(a, &g1).mul(&div_exact(c, &g2));
-    let den = div_exact(b, &g2).mul(&div_exact(d, &g1));
+    let num = reduce_by(a, &g1).mul(&reduce_by(c, &g2));
+    let den = reduce_by(b, &g2).mul(&reduce_by(d, &g1));
     (num, den)
 }
 

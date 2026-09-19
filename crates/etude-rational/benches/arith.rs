@@ -210,6 +210,32 @@ fn bench(c: &mut Criterion) {
             |be, (a, b)| be.iter(|| black_box(a.cmp(black_box(b)))),
         );
         g.finish();
+
+        // Small equal-denominator add: two i64-fitting rationals sharing a denominator. The native i128
+        // fast path now covers this (it is tried before the Big equal-denominator path), so it stays
+        // allocation-light on the arithmetic. `d` is prime, so any `0 < n < d` is coprime to it and
+        // `from_ratio_i64` leaves the denominator intact — a genuine (non-trivial) shared-denominator sum.
+        let d: i64 = 1_000_003;
+        let ne = rng.i64_small().rem_euclid(d - 1) + 1;
+        let nf = rng.i64_small().rem_euclid(d - 1) + 1;
+        let e = Rational::from_ratio_i64(ne, d).expect("nonzero den");
+        let f = Rational::from_ratio_i64(nf, d).expect("nonzero den");
+        assert_eq!(
+            e.denom(),
+            f.denom(),
+            "small eqden pair must share a denominator"
+        );
+        let (re, rf) = (to_ref(&e), to_ref(&f));
+        let mut g = group(c, "add_eqden_i64");
+        g.bench_with_input(BenchmarkId::new("etude", "48b"), &(&e, &f), |be, (e, f)| {
+            be.iter(|| black_box(e.add(black_box(f))))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-rational", "48b"),
+            &(&re, &rf),
+            |be, (e, f)| be.iter(|| black_box(*e + *f)),
+        );
+        g.finish();
     }
 
     // Equal-denominator add/sub (a common real-workload pattern: accumulating fractions over a shared
