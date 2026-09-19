@@ -1716,6 +1716,9 @@ fn builder_differential_against_model() {
         Split,
         WriteWithLenPrefix(Vec<u8>),
         SetInlineThreshold(usize),
+        SocketRead(Vec<u8>, u8),
+        ReadChunk(usize),
+        NestedLenPrefix(Vec<u8>),
     }
 
     check!()
@@ -1769,6 +1772,38 @@ fn builder_differential_against_model() {
                     }
                     BuilderOp::SetInlineThreshold(t) => {
                         builder = builder.with_inline_threshold(t % 32);
+                    }
+                    BuilderOp::SocketRead(d, extra) => {
+                        // A well-behaved socket read: asks for a few bytes more than it fills
+                        // (exercising flush_and_reserve and short reads), fills a prefix, and
+                        // reports exactly what it filled.
+                        let preferred = d.len() + usize::from(extra % 8);
+                        builder.for_socket_read(preferred, |slice| {
+                            slice[..d.len()].copy_from_slice(d);
+                            d.len()
+                        });
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::ReadChunk(n) => {
+                        use etude_buffer::reader::Buffer as _;
+                        let watermark = n % (model.len() + 2);
+                        let chunk = builder.read_chunk(watermark).unwrap();
+                        assert!(chunk.len() <= watermark, "read_chunk over watermark");
+                        assert_eq!(&chunk[..], &model[..chunk.len()], "read_chunk front bytes");
+                        let taken = chunk.len();
+                        model.drain(..taken);
+                    }
+                    BuilderOp::NestedLenPrefix(d) => {
+                        builder.write_with_len_prefix(|w| {
+                            w.put_slice(d);
+                            w.write_with_len_prefix(|w2| w2.put_slice(d));
+                        });
+                        let inner_len = d.len() as u64;
+                        let outer_len = (d.len() * 2 + 8) as u64;
+                        model.extend_from_slice(&outer_len.to_be_bytes());
+                        model.extend_from_slice(d);
+                        model.extend_from_slice(&inner_len.to_be_bytes());
+                        model.extend_from_slice(d);
                     }
                 }
                 assert_eq!(builder.len(), model.len(), "len after {op:?}");
