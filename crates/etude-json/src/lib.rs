@@ -77,12 +77,27 @@ struct StringInfo {
     has_escapes: bool,
 }
 
-/// Cheap flags recorded for a [`TokenKind::Number`] token during the mandatory boundary scan, so a
-/// later decoder need not re-inspect the bytes to know the number's shape.
+/// The parts of a [`TokenKind::Number`] lexeme, recorded during the mandatory boundary scan as
+/// byte-offset [`Span`]s into the input rope. This is representation-neutral: no value is parsed and
+/// no digits are copied — a decoder reads the digit spans and folds them into whatever numeric type
+/// it wants (e.g. `etude-decimal`) without re-scanning the bytes.
+///
+/// For `-12.34e-5`: `negative` is `true`, `integer` spans `12`, `fraction` spans `34`, `exponent`
+/// spans `5`, and `exponent_negative` is `true`. The coefficient digits are `integer` then
+/// `fraction`; the effective power of ten is `±exponent − fraction.len()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct NumberInfo {
-    has_fraction: bool,
-    has_exponent: bool,
+pub struct NumberParts {
+    /// The lexeme has a leading `-`.
+    pub negative: bool,
+    /// The integer-part digits, without the sign. Always a non-empty span.
+    pub integer: Span,
+    /// The fraction digits after `.` (the digits only, no `.`), or `None` if there is no fraction.
+    pub fraction: Option<Span>,
+    /// The exponent digits after `e`/`E` and its optional sign (digits only), or `None` if there is
+    /// no exponent.
+    pub exponent: Option<Span>,
+    /// The exponent carries an explicit `-`. `false` when there is no exponent or it is `+`/unsigned.
+    pub exponent_negative: bool,
 }
 
 /// A single JSON token: its class and the span of its bytes in the input rope.
@@ -94,7 +109,7 @@ pub struct Token {
     kind: TokenKind,
     span: Span,
     string: Option<StringInfo>,
-    number: Option<NumberInfo>,
+    number: Option<NumberParts>,
 }
 
 impl Token {
@@ -139,10 +154,21 @@ impl Token {
     /// For a [`TokenKind::Number`] token, whether the literal is an integer — no fraction and no
     /// exponent, so its bytes are a plain `-?[0-9]+`; `None` for any other kind.
     ///
-    /// This is derived from flags recorded during the scan the tokenizer already had to perform, so a
-    /// decoder can pick an integer fast path without re-reading the number's bytes.
+    /// This is derived from the parts recorded during the scan the tokenizer already had to perform,
+    /// so a decoder can pick an integer fast path without re-reading the number's bytes.
     pub fn number_is_integer(&self) -> Option<bool> {
-        self.number.map(|n| !n.has_fraction && !n.has_exponent)
+        self.number
+            .map(|n| n.fraction.is_none() && n.exponent.is_none())
+    }
+
+    /// For a [`TokenKind::Number`] token, its decomposition into sign / integer / fraction / exponent
+    /// digit [`Span`]s (see [`NumberParts`]); `None` for any other kind.
+    ///
+    /// The parts are recorded during the mandatory scan, so a decoder builds its numeric value
+    /// directly from the digit spans — resolve each span against the originating rope for its bytes —
+    /// with no re-scan and no digits copied by the tokenizer.
+    pub fn number_parts(&self) -> Option<NumberParts> {
+        self.number
     }
 }
 
@@ -344,11 +370,14 @@ impl<'a> Tokenizer<'a> {
     fn scan_number(&mut self) -> Result<Token, Error> {
         let start = self.cursor.offset();
 
-        if self.cursor.peek() == Some(b'-') {
+        let negative = self.cursor.peek() == Some(b'-');
+        if negative {
             self.cursor.bump();
         }
 
-        // Integer part: a lone `0`, or a nonzero digit followed by more digits.
+        // Integer part: a lone `0`, or a nonzero digit followed by more digits. Record its span (no
+        // sign) — always non-empty for a valid number.
+        let int_start = self.cursor.offset();
         match self.cursor.peek() {
             Some(b'0') => self.cursor.bump(),
             Some(b'1'..=b'9') => {
@@ -364,12 +393,13 @@ impl<'a> Tokenizer<'a> {
                 });
             }
         }
+        let integer = Span::new(int_start, self.cursor.offset());
 
-        // Optional fraction: `.` then at least one digit.
-        let mut has_fraction = false;
+        // Optional fraction: `.` then at least one digit. Record the digit span (no `.`).
+        let mut fraction = None;
         if self.cursor.peek() == Some(b'.') {
-            has_fraction = true;
             self.cursor.bump();
+            let frac_start = self.cursor.offset();
             if !matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
                 return Err(Error {
                     offset: self.cursor.offset(),
@@ -379,16 +409,24 @@ impl<'a> Tokenizer<'a> {
             while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
                 self.cursor.bump();
             }
+            fraction = Some(Span::new(frac_start, self.cursor.offset()));
         }
 
-        // Optional exponent: `e`/`E`, optional sign, at least one digit.
-        let mut has_exponent = false;
+        // Optional exponent: `e`/`E`, optional sign, at least one digit. Record the sign and the
+        // digit span (no `e`/sign).
+        let mut exponent = None;
+        let mut exponent_negative = false;
         if matches!(self.cursor.peek(), Some(b'e') | Some(b'E')) {
-            has_exponent = true;
             self.cursor.bump();
-            if matches!(self.cursor.peek(), Some(b'+') | Some(b'-')) {
-                self.cursor.bump();
+            match self.cursor.peek() {
+                Some(b'-') => {
+                    exponent_negative = true;
+                    self.cursor.bump();
+                }
+                Some(b'+') => self.cursor.bump(),
+                _ => {}
             }
+            let exp_start = self.cursor.offset();
             if !matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
                 return Err(Error {
                     offset: self.cursor.offset(),
@@ -398,15 +436,19 @@ impl<'a> Tokenizer<'a> {
             while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
                 self.cursor.bump();
             }
+            exponent = Some(Span::new(exp_start, self.cursor.offset()));
         }
 
         Ok(Token {
             kind: TokenKind::Number,
             span: Span::new(start, self.cursor.offset()),
             string: None,
-            number: Some(NumberInfo {
-                has_fraction,
-                has_exponent,
+            number: Some(NumberParts {
+                negative,
+                integer,
+                fraction,
+                exponent,
+                exponent_negative,
             }),
         })
     }
