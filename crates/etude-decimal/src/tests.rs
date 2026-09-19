@@ -19,7 +19,7 @@ fn our_parts(d: &Decimal) -> (bool, String, i64) {
     (
         d.is_negative(),
         d.coefficient().abs().to_decimal_string(),
-        d.exponent() as i64,
+        d.exponent(),
     )
 }
 
@@ -192,6 +192,42 @@ fn scientific_render_round_trips_large_exponents() {
     assert_eq!(Decimal::from_str(&small.to_string()).unwrap(), small);
 }
 
+#[test]
+fn exact_arithmetic() {
+    let d = |s: &str| Decimal::from_str(s).unwrap();
+    // The Float pitfall done exactly: 0.1 + 0.2 = 0.3.
+    assert_eq!(d("0.1").add(&d("0.2")).to_string(), "0.3");
+    // Different scales align (smaller exponent wins).
+    assert_eq!(d("1.5").add(&d("2.25")).to_string(), "3.75");
+    assert_eq!(d("100").add(&d("0.001")).to_string(), "100.001");
+    // Subtraction: cancellation to canonical zero, and crossing zero.
+    assert_eq!(d("1.5").sub(&d("1.5")), Decimal::zero());
+    assert_eq!(d("0.3").sub(&d("0.1")).to_string(), "0.2");
+    assert_eq!(d("1").sub(&d("0.9")).to_string(), "0.1");
+    assert_eq!(d("0.1").sub(&d("0.3")).to_string(), "-0.2");
+    // Multiplication: exponents add, coefficients multiply, result re-canonicalizes trailing zeros.
+    assert_eq!(d("1.5").mul(&d("2")).to_string(), "3"); // 3.0 -> 3
+    assert_eq!(d("0.1").mul(&d("0.1")).to_string(), "0.01");
+    assert_eq!(d("12").mul(&d("12")).to_string(), "144");
+    assert_eq!(d("2.5").mul(&d("4")).to_string(), "10"); // 10.0 -> 10
+    assert_eq!(d("-1.5").mul(&d("2")).to_string(), "-3");
+    assert_eq!(d("-1.5").mul(&d("-2")).to_string(), "3");
+    // Identities with zero.
+    assert_eq!(d("1.23").mul(&Decimal::zero()), Decimal::zero());
+    assert_eq!(d("3.14").add(&Decimal::zero()).to_string(), "3.14");
+    assert_eq!(Decimal::zero().sub(&d("3.14")).to_string(), "-3.14");
+    // Exact well beyond f64/i64 range.
+    let big = d("123456789012345678901234567890");
+    assert_eq!(
+        big.add(&d("1")).to_string(),
+        "123456789012345678901234567891"
+    );
+    assert_eq!(
+        big.mul(&d("10")).to_string(),
+        "1234567890123456789012345678900"
+    );
+}
+
 // ─── the differential harness (the growing oracle) ────────────────────────────────────────────────
 
 /// The JSON-number character set. Random strings over it hit valid numbers, near-misses (leading zeros,
@@ -263,6 +299,25 @@ fn differential_parse_and_cmp() {
         });
 }
 
+/// Build a guaranteed-valid JSON number string from typed components. `int` (a `u64`) has no leading
+/// zero by construction; `frac`/`exp` are appended only when present.
+fn make_num(neg: bool, int: u64, frac: Option<u32>, exp: Option<i64>) -> String {
+    let mut s = String::new();
+    if neg {
+        s.push('-');
+    }
+    s.push_str(&int.to_string());
+    if let Some(f) = frac {
+        s.push('.');
+        s.push_str(&f.to_string());
+    }
+    if let Some(e) = exp {
+        s.push('e');
+        s.push_str(&e.to_string()); // Display carries its own sign
+    }
+    s
+}
+
 #[test]
 fn differential_structured_numbers() {
     // Guaranteed-valid JSON numbers built from typed fields, for dense cmp/round-trip coverage across
@@ -272,19 +327,12 @@ fn differential_structured_numbers() {
         .for_each(|specs| {
             let mut parsed: alloc::vec::Vec<(Decimal, BigDecimal)> = alloc::vec::Vec::new();
             for &(neg, int, frac, has_frac, exp, has_exp) in specs.iter().take(16) {
-                let mut s = String::new();
-                if neg {
-                    s.push('-');
-                }
-                s.push_str(&int.to_string()); // u64 Display never has a leading zero
-                if has_frac {
-                    s.push('.');
-                    s.push_str(&frac.to_string());
-                }
-                if has_exp {
-                    s.push('e');
-                    s.push_str(&exp.to_string()); // i16 Display carries its own sign
-                }
+                let s = make_num(
+                    neg,
+                    int,
+                    has_frac.then_some(frac),
+                    has_exp.then_some(exp as i64),
+                );
                 if let Some(pair) = check_parse(&s) {
                     parsed.push(pair);
                 }
@@ -293,6 +341,73 @@ fn differential_structured_numbers() {
                 for (db, bb) in &parsed {
                     assert_eq!(da.cmp(db), ba.cmp(bb), "cmp mismatch: {da} ? {db}");
                 }
+            }
+        });
+}
+
+/// Apply one arithmetic op over a small register file, in lockstep with the reference, asserting the
+/// results agree exactly. Binary ops read registers `i`,`j`; the unary negate reads `i`.
+fn apply_op(
+    code: u8,
+    i: usize,
+    j: usize,
+    ours: &mut alloc::vec::Vec<Decimal>,
+    refs: &mut alloc::vec::Vec<BigDecimal>,
+) {
+    let a = ours[i].clone();
+    let b = ours[j].clone();
+    let ra = refs[i].clone();
+    let rb = refs[j].clone();
+    let (r, rr) = match code % 4 {
+        0 => (a.add(&b), &ra + &rb),
+        1 => (a.sub(&b), &ra - &rb),
+        2 => (a.mul(&b), &ra * &rb),
+        _ => (a.neg(), -ra),
+    };
+    assert_same(&r, &rr);
+    // Bound register growth so a long op sequence stays O(cap) in memory.
+    if ours.len() < 64 {
+        ours.push(r);
+        refs.push(rr);
+    } else {
+        ours[i] = r;
+        refs[i] = rr;
+    }
+}
+
+#[test]
+fn differential_arithmetic() {
+    // Seeds are valid JSON numbers (exponent bounded to i8 so exponent-alignment scaling stays modest);
+    // ops are (opcode, reg_a, reg_b) triples. add/sub/mul are all EXACT in bigdecimal too, so the
+    // oracle asserts exact agreement after every operation.
+    bolero::check!()
+        .with_type::<(
+            alloc::vec::Vec<(bool, u64, u32, bool, i8, bool)>,
+            alloc::vec::Vec<(u8, u8, u8)>,
+        )>()
+        .for_each(|(seeds, ops)| {
+            let mut ours: alloc::vec::Vec<Decimal> = alloc::vec::Vec::new();
+            let mut refs: alloc::vec::Vec<BigDecimal> = alloc::vec::Vec::new();
+            // Always keep at least one register so indexing never divides by zero.
+            ours.push(Decimal::zero());
+            refs.push(BigDecimal::from_str("0").unwrap());
+            for &(neg, int, frac, has_frac, exp, has_exp) in seeds.iter().take(16) {
+                let s = make_num(
+                    neg,
+                    int,
+                    has_frac.then_some(frac),
+                    has_exp.then_some(exp as i64),
+                );
+                if let Some(pair) = check_parse(&s) {
+                    ours.push(pair.0);
+                    refs.push(pair.1);
+                }
+            }
+            for &(code, a, b) in ops.iter() {
+                let len = ours.len();
+                let i = (a as usize) % len;
+                let j = (b as usize) % len;
+                apply_op(code, i, j, &mut ours, &mut refs);
             }
         });
 }

@@ -5,8 +5,9 @@
 //! [`etude_bigint::Big`]. Pure over `alloc`, no I/O, no dependency but `etude-bigint`. Built for the
 //! JSON decoder: a JSON number literal (`-?int(.frac)?([eE][+-]?exp)?`) decodes into a [`Decimal`]
 //! LOSSLESSLY, unlike an `f64` (which loses precision) or a rational (which would need gcd reduction and
-//! cannot preserve scale). Correctness is pinned by a differential test against `bigdecimal` (a
-//! dev-dependency) as the reference.
+//! cannot preserve scale). Exact arithmetic ([`Decimal::add`]/[`Decimal::sub`]/[`Decimal::mul`]) never
+//! rounds a digit away; division (which needs a rounding policy) is a later addition. Correctness is
+//! pinned by a differential test against `bigdecimal` (a dev-dependency) as the reference.
 //!
 //! # Representation and the canonical-form invariant
 //! A [`Decimal`] is the exact value `coeff * 10^exp`, where `coeff` is an [`etude_bigint::Big`] signed
@@ -47,8 +48,10 @@ pub struct Decimal {
     /// The signed coefficient (significand); carries the sign of the whole value. Canonical: not
     /// divisible by 10 unless it is zero.
     coeff: Big,
-    /// The base-10 exponent: the value is `coeff * 10^exp`. Canonical zero has `exp == 0`.
-    exp: i32,
+    /// The base-10 exponent: the value is `coeff * 10^exp`. Canonical zero has `exp == 0`. It is an
+    /// `i64` (not `i32`) so that `mul` — which adds the two operands' exponents — has ample headroom and
+    /// so the width matches the reference `bigdecimal`'s `i64` scale.
+    exp: i64,
 }
 
 impl Decimal {
@@ -81,7 +84,7 @@ impl Decimal {
     /// Construct `coeff * 10^exp` and canonicalize it (strip trailing zero digits from the coefficient,
     /// raising `exp`; collapse a zero coefficient to the canonical zero). Total — every `(coeff, exp)`
     /// names a representable value.
-    pub fn new(coeff: Big, exp: i32) -> Decimal {
+    pub fn new(coeff: Big, exp: i64) -> Decimal {
         let mut d = Decimal { coeff, exp };
         d.normalize();
         d
@@ -96,7 +99,7 @@ impl Decimal {
             return;
         }
         let ten = Big::from_i64(10);
-        while self.exp < i32::MAX {
+        while self.exp < i64::MAX {
             // divmod by 10 is None only for a zero divisor, which `ten` is not.
             let (q, r) = self.coeff.divmod(&ten).expect("divisor 10 is nonzero");
             if !r.is_zero() {
@@ -113,7 +116,7 @@ impl Decimal {
     }
 
     /// The base-10 exponent: the value is `coefficient() * 10^exponent()`.
-    pub fn exponent(&self) -> i32 {
+    pub fn exponent(&self) -> i64 {
         self.exp
     }
 
@@ -149,6 +152,43 @@ impl Decimal {
         }
     }
 
+    /// Exact sum `self + other`. Aligns the exponents to the smaller of the two — scaling the
+    /// larger-exponent operand's coefficient by the matching power of ten — adds the coefficients, and
+    /// canonicalizes. Exact: no digit is ever rounded away.
+    pub fn add(&self, other: &Decimal) -> Decimal {
+        if self.is_zero() {
+            return other.clone();
+        }
+        if other.is_zero() {
+            return self.clone();
+        }
+        if self.exp == other.exp {
+            // Already aligned — the common fast path (e.g. equal-scale sums).
+            return Decimal::new(self.coeff.add(&other.coeff), self.exp);
+        }
+        let e = self.exp.min(other.exp);
+        let a = scale_pow10(&self.coeff, (self.exp - e) as u64);
+        let b = scale_pow10(&other.coeff, (other.exp - e) as u64);
+        Decimal::new(a.add(&b), e)
+    }
+
+    /// Exact difference `self - other`.
+    pub fn sub(&self, other: &Decimal) -> Decimal {
+        self.add(&other.neg())
+    }
+
+    /// Exact product `self * other`: multiply the coefficients and add the exponents. Exact — a decimal
+    /// product is always representable (unlike a quotient).
+    pub fn mul(&self, other: &Decimal) -> Decimal {
+        if self.is_zero() || other.is_zero() {
+            return Decimal::zero();
+        }
+        // Exponents come from parsing bounded to ≤18 digits, so their sum fits i64 for any realistic
+        // input; saturate only in the astronomically-extreme case rather than wrap.
+        let exp = self.exp.saturating_add(other.exp);
+        Decimal::new(self.coeff.mul(&other.coeff), exp)
+    }
+
     /// Parse a JSON number from ASCII bytes into an exact `Decimal`, or `None` if the bytes are not a
     /// well-formed JSON number. The accepted grammar is exactly JSON's:
     ///
@@ -159,7 +199,7 @@ impl Decimal {
     /// so a leading `+`, a leading zero (`01`), a bare `.5`, a trailing `1.`, a lone `-`, an empty
     /// exponent (`1e`), and any surrounding whitespace or trailing garbage are all REJECTED. The decode
     /// is LOSSLESS: every significant digit becomes part of the coefficient and the decimal-point /
-    /// exponent set `exp`. An exponent so large it would overflow the internal `i32` exponent is
+    /// exponent set `exp`. An exponent literal with more than 18 digits (beyond `i64` range) is
     /// rejected (returns `None`) rather than silently wrapping.
     pub fn from_ascii(bytes: &[u8]) -> Option<Decimal> {
         let mut i = 0;
@@ -219,10 +259,12 @@ impl Decimal {
             };
             let exp_start = i;
             while i < n && bytes[i].is_ascii_digit() {
-                // Accumulate with saturation; the real bound-check against i32 happens below.
-                exp_val = exp_val
-                    .saturating_mul(10)
-                    .saturating_add((bytes[i] - b'0') as i64);
+                // An exponent with more than 18 digits cannot be reasoned about in an i64; reject it
+                // rather than silently wrapping. (18 nines ≈ 1e18 < i64::MAX.)
+                if i - exp_start >= 18 {
+                    return None;
+                }
+                exp_val = exp_val * 10 + (bytes[i] - b'0') as i64;
                 i += 1;
             }
             if i == exp_start {
@@ -242,11 +284,8 @@ impl Decimal {
         // digit shifts the point right, i.e. lowers the exponent by one.
         let mag = big_from_ascii_digits(int_digits, frac_digits);
         let exp = exp_val.checked_sub(frac_digits.len() as i64)?;
-        if exp > i32::MAX as i64 || exp < i32::MIN as i64 {
-            return None; // exponent out of representable range
-        }
         let coeff = if neg { mag.neg() } else { mag };
-        Some(Decimal::new(coeff, exp as i32))
+        Some(Decimal::new(coeff, exp))
     }
 
     /// Convert to the nearest `f64` (correctly rounded via the standard library's float parser).
@@ -299,9 +338,10 @@ impl Decimal {
     fn cmp_magnitude(&self, other: &Decimal) -> Ordering {
         let da = self.coeff.abs().to_decimal_string();
         let db = other.coeff.abs().to_decimal_string();
-        // Adjusted exponent = position of the most-significant digit = (#digits - 1) + exp.
-        let adj_a = da.len() as i64 - 1 + self.exp as i64;
-        let adj_b = db.len() as i64 - 1 + other.exp as i64;
+        // Adjusted exponent = position of the most-significant digit = (#digits - 1) + exp. Computed in
+        // i128 so a near-`i64::MAX` exponent cannot overflow the addition.
+        let adj_a = da.len() as i128 - 1 + self.exp as i128;
+        let adj_b = db.len() as i128 - 1 + other.exp as i128;
         if adj_a != adj_b {
             return adj_a.cmp(&adj_b);
         }
@@ -334,23 +374,26 @@ impl Decimal {
         if neg {
             out.push('-');
         }
-        // Threshold that bounds the plain-form length; beyond it, fall back to scientific notation.
-        const PLAIN_PAD: usize = 30;
+        // Threshold that bounds the plain-form length; beyond it, fall back to scientific notation. All
+        // comparisons stay in i64 (narrowing to usize only once bounded ≤ PLAIN_PAD) so a large
+        // exponent cannot truncate on a 32-bit-usize target like wasm32.
+        const PLAIN_PAD: i64 = 30;
         if self.exp == 0 {
             out.push_str(&mag);
-        } else if self.exp > 0 && (self.exp as usize) <= PLAIN_PAD {
+        } else if self.exp > 0 && self.exp <= PLAIN_PAD {
             out.push_str(&mag);
             for _ in 0..self.exp {
                 out.push('0');
             }
         } else if self.exp < 0 {
-            let k = (-(self.exp as i64)) as usize;
-            let l = mag.len();
+            let k = -self.exp; // positive point shift, in i64
+            let l = mag.len() as i64;
             if k < l {
                 // Point sits inside the digit string: "ddd.ddd".
-                out.push_str(&mag[..l - k]);
+                let cut = (l - k) as usize;
+                out.push_str(&mag[..cut]);
                 out.push('.');
-                out.push_str(&mag[l - k..]);
+                out.push_str(&mag[cut..]);
             } else if k <= l + PLAIN_PAD {
                 // "0.00…ddd" — leading zeros before the significant digits.
                 out.push_str("0.");
@@ -365,6 +408,33 @@ impl Decimal {
             let _ = write!(out, "{mag}e{}", self.exp);
         }
         out
+    }
+}
+
+/// `10^k` as a nonnegative [`Big`], by binary exponentiation (base-10, squaring). `10^0 == 1`.
+fn pow10(k: u64) -> Big {
+    let mut result = Big::from_i64(1);
+    let mut base = Big::from_i64(10);
+    let mut e = k;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = result.mul(&base);
+        }
+        e >>= 1;
+        if e > 0 {
+            base = base.mul(&base);
+        }
+    }
+    result
+}
+
+/// Multiply the signed `coeff` by `10^k` (shift its decimal point left by `k`), preserving sign. `k == 0`
+/// is the identity.
+fn scale_pow10(coeff: &Big, k: u64) -> Big {
+    if k == 0 {
+        coeff.clone()
+    } else {
+        coeff.mul(&pow10(k))
     }
 }
 
