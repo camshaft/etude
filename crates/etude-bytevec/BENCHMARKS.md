@@ -93,6 +93,30 @@ than the table suggests; and the `full path` column carries `Builder` routing be
 isolated `memset only` column is the honest zero-init cost. Net: measurable and size-scaling, material
 for large or high-throughput reads, diluted by the syscall on a real socket.
 
+### `Rope<Utf8>` mutation — `append_bytes` / `insert_bytes` vs `std::String` (runnable: `cargo bench -p etude-bytevec -- 'append_bytes|insert_bytes'`)
+
+The typed `Rope<Utf8>` string mutators take pre-validated bytes and stitch chunks; the fair reference
+is `String::push_str` / `String::insert_str`, which memcpy/memmove into one contiguous buffer. `append`
+repeats a 6-byte fragment `n` times from empty; `insert` builds a `6·n`-byte buffer once and inserts a
+3-byte literal at the midpoint. Latest run (aarch64, jemalloc, release; `deep` = 1000, `shallow` = 4):
+
+| op | shape | `Rope<Utf8>` | `std::String` | ratio |
+|----|-------|--------------|---------------|-------|
+| append_bytes | shallow | 84.2 ns | 87.9 ns | 0.96 |
+| append_bytes | deep | 29.0 µs | 2.16 µs | 13.4 |
+| insert_bytes | shallow | 111 ns | 43.0 ns | 2.6 |
+| insert_bytes | deep | 226 ns | 645 ns | **0.35 (2.9× faster)** |
+
+The split is exactly the persistent-structure story. `append_bytes/deep` is the rope's worst case: each
+6-byte fragment becomes its own chunk, so `n` tiny appends build a 1000-node tree while `String`
+amortizes into one contiguous push — a 13× gap that is the tiny-fragment amplification of the deep-tier
+per-chunk `Arc` cost already documented above (appending _chunk handles_, the rope's actual job, is the
+`append`/`extend` rows in the main scoreboard, not this). `insert_bytes/shallow` also trails: for a
+few-byte buffer a memmove is cheaper than the split-and-stitch bookkeeping. But `insert_bytes/deep`
+inverts it — inserting into a `6 KB` buffer splits the chunk into two zero-copy `Bytes` slices plus the
+inserted middle, no payload copy, so the rope is **2.9× faster** than `String`'s O(n) midpoint memmove,
+and (like `ends_with`) is near-flat in the buffer length rather than scaling with it.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
