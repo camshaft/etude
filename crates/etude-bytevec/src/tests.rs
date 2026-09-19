@@ -205,6 +205,35 @@ fn starts_ends_with_match_flat_in_both_tiers() {
     }
 }
 
+/// `chunks_rev` yields exactly the forward chunks in reverse order, in both tiers, with an exact
+/// `ExactSizeIterator::len`.
+#[test]
+fn chunks_rev_reverses_chunks_in_both_tiers() {
+    for n in [1usize, 4, PROMOTE_AT * 3 + 7] {
+        let mut rope = ByteVec::new();
+        let mut fwd: Vec<Vec<u8>> = Vec::new();
+        for i in 0..n {
+            let b = [(i % 251) as u8, (i % 241) as u8];
+            rope.push_back(chunk(&b));
+            fwd.push(b.to_vec());
+        }
+        // reverse iterator == forward chunks reversed
+        let rev: Vec<Vec<u8>> = rope.chunks_rev().map(|c| c.to_vec()).collect();
+        let mut fwd_rev = fwd.clone();
+        fwd_rev.reverse();
+        assert_eq!(rev, fwd_rev, "n={n}");
+        // ExactSizeIterator::len is exact
+        assert_eq!(rope.chunks_rev().len(), rope.chunks().count(), "n={n} len");
+        // Re-reversing the reverse walk reconstructs the original byte content.
+        let flat: Vec<u8> = fwd.iter().flatten().copied().collect();
+        let mut round: Vec<u8> = Vec::new();
+        for c in rope.chunks_rev() {
+            round.splice(0..0, c.iter().copied());
+        }
+        assert_eq!(round, flat, "n={n} roundtrip");
+    }
+}
+
 #[test]
 fn set_byte_in_both_tiers_and_cow_preserves_shared() {
     for n in [3usize, PROMOTE_AT * 3 + 11] {

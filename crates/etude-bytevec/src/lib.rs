@@ -506,6 +506,46 @@ impl ByteVec {
         }
     }
 
+    /// Iterates the chunks from last to first — the reverse of [`chunks`](Self::chunks).
+    ///
+    /// Cheap tail access on the tiered rope: it descends the *rightmost* spine, so consuming only
+    /// the last `k` chunks touches O(k) nodes rather than walking the whole buffer. This is what
+    /// makes [`ends_with`](Self::ends_with) O(suffix) instead of O(len). Exposed as its own method
+    /// (not `DoubleEndedIterator` / `.rev()`): a single DFS cursor cannot correctly serve both ends
+    /// of the relaxed-radix tree, so a dedicated reverse walk is the correct, allocation-light form.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use etude_bytevec::ByteVec;
+    /// use bytes::Bytes;
+    ///
+    /// let v: ByteVec = [Bytes::from_static(b"ab"), Bytes::from_static(b"cd")].into_iter().collect();
+    /// let rev: Vec<_> = v.chunks_rev().map(|c| c.to_vec()).collect();
+    /// assert_eq!(rev, vec![b"cd".to_vec(), b"ab".to_vec()]);
+    /// ```
+    pub fn chunks_rev(&self) -> RevChunks<'_> {
+        let remaining = self.chunk_count();
+        match &self.repr {
+            Repr::Small { head, additional } => RevChunks {
+                remaining,
+                inner: RevChunksInner::Small {
+                    head: if head.is_empty() { None } else { Some(head) },
+                    rest: additional.iter(),
+                },
+            },
+            Repr::Deep(d) => RevChunks {
+                remaining,
+                inner: RevChunksInner::Deep {
+                    head: d.head.iter(),
+                    tree: d.tree.chunks_rev(),
+                    tail: d.tail.iter(),
+                    phase: 0,
+                },
+            },
+        }
+    }
+
     /// Creates an empty rope, pre-reserving space for `cap` chunks.
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
@@ -593,8 +633,10 @@ impl ByteVec {
 
     /// Returns `true` if the byte content ends with `suffix`.
     ///
-    /// Chunk-aware and copy-free: skips whole leading chunks by length, then compares the trailing
-    /// `suffix.len()` bytes chunk-by-chunk — the buffer is never linearized.
+    /// Chunk-aware and copy-free, and **O(suffix), not O(len)**: walks the buffer's chunks from the
+    /// back via [`chunks_rev`](Self::chunks_rev), comparing `suffix` from its end, and stops as soon
+    /// as `suffix` is consumed — touching only the last chunks, never the leading ones, and never
+    /// linearizing.
     ///
     /// # Examples
     ///
@@ -609,26 +651,21 @@ impl ByteVec {
     /// assert!(v.ends_with(b"")); // every buffer ends with the empty literal
     /// ```
     pub fn ends_with(&self, suffix: &[u8]) -> bool {
-        // Bytes to skip before the compared tail; `None` ⇒ `suffix` is longer than the buffer.
-        let Some(mut skip) = self.len.checked_sub(suffix.len()) else {
+        if suffix.len() > self.len {
             return false;
-        };
+        }
         let mut rest = suffix;
-        for chunk in self.chunks() {
-            let mut chunk: &[u8] = chunk;
-            if skip > 0 {
-                let s = skip.min(chunk.len());
-                chunk = &chunk[s..];
-                skip -= s;
-                if chunk.is_empty() {
-                    continue;
-                }
+        for chunk in self.chunks_rev() {
+            if rest.is_empty() {
+                break;
             }
+            let chunk: &[u8] = chunk;
+            // Compare the tail of this chunk against the still-unmatched tail of `suffix`.
             let n = chunk.len().min(rest.len());
-            if chunk[..n] != rest[..n] {
+            if chunk[chunk.len() - n..] != rest[rest.len() - n..] {
                 return false;
             }
-            rest = &rest[n..];
+            rest = &rest[..rest.len() - n];
         }
         rest.is_empty()
     }
@@ -1365,6 +1402,81 @@ impl<'a> Iterator for Chunks<'a> {
 }
 
 impl ExactSizeIterator for Chunks<'_> {}
+
+enum RevChunksInner<'a> {
+    Small {
+        // Yielded last (the front chunk comes out after `rest` is drained from the back).
+        head: Option<&'a Bytes>,
+        rest: alloc::collections::vec_deque::Iter<'a, Bytes>,
+    },
+    Deep {
+        head: alloc::collections::vec_deque::Iter<'a, Bytes>,
+        tree: tree::RevChunks<'a>,
+        tail: alloc::collections::vec_deque::Iter<'a, Bytes>,
+        /// Which section is being drained, back to front: 0 = tail, 1 = tree, 2 = head.
+        phase: u8,
+    },
+}
+
+/// Reverse iterator over a rope's `Bytes` chunks, last to first. See [`ByteVec::chunks_rev`].
+///
+/// Reports its exact remaining chunk count via [`ExactSizeIterator::len`].
+pub struct RevChunks<'a> {
+    /// Chunks not yet yielded; drives `size_hint`/`len`.
+    remaining: usize,
+    inner: RevChunksInner<'a>,
+}
+
+impl<'a> RevChunks<'a> {
+    #[inline]
+    fn next_chunk(&mut self) -> Option<&'a Bytes> {
+        match &mut self.inner {
+            RevChunksInner::Small { head, rest } => match rest.next_back() {
+                some @ Some(_) => some,
+                None => head.take(),
+            },
+            RevChunksInner::Deep {
+                head,
+                tree,
+                tail,
+                phase,
+            } => loop {
+                match phase {
+                    0 => match tail.next_back() {
+                        some @ Some(_) => return some,
+                        None => *phase = 1,
+                    },
+                    // `tree` is already a reverse (last-to-first) iterator.
+                    1 => match tree.next() {
+                        some @ Some(_) => return some,
+                        None => *phase = 2,
+                    },
+                    _ => return head.next_back(),
+                }
+            },
+        }
+    }
+}
+
+impl<'a> Iterator for RevChunks<'a> {
+    type Item = &'a Bytes;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.next_chunk();
+        if item.is_some() {
+            self.remaining -= 1;
+        }
+        item
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for RevChunks<'_> {}
 
 /// Batches `chunks` into blocks of up to `FANOUT` and pushes each onto `tree`.
 fn extend_blocks(tree: &mut Tree, chunks: impl Iterator<Item = Bytes>) {
