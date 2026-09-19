@@ -975,14 +975,14 @@ impl<K> Rope<K> {
         let mut coalesced_len = 0usize;
         let mut any_skipped = false;
         let mut n_chunks = 0usize;
-        for chunk in self.chunks() {
+        self.for_each_chunk(|chunk| {
             n_chunks += 1;
             if config.skips(chunk) {
                 any_skipped = true;
             } else {
                 coalesced_len += chunk.len();
             }
-        }
+        });
 
         // Collapse fast path: nothing is skipped, so the whole rope becomes ONE contiguous chunk. No
         // segment list is allocated and no chunk is pushed one-at-a-time — a single pre-sized buffer is
@@ -1002,9 +1002,7 @@ impl<K> Rope<K> {
                 return;
             }
             let mut buf = bytes::BytesMut::with_capacity(coalesced_len);
-            for chunk in self.chunks() {
-                buf.extend_from_slice(chunk);
-            }
+            self.extend_into(&mut buf);
             debug_assert_eq!(buf.len(), self.len, "collapse preserves the byte length");
             self.repr = Repr::Small {
                 head: buf.freeze(),
@@ -1020,7 +1018,7 @@ impl<K> Rope<K> {
         // sequence in a single bottom-up pass rather than pushing chunk-by-chunk.
         let mut segments: Vec<Bytes> = Vec::new();
         let mut run = bytes::BytesMut::with_capacity(coalesced_len);
-        for chunk in self.chunks() {
+        self.for_each_chunk(|chunk| {
             if config.skips(chunk) {
                 if !run.is_empty() {
                     segments.push(run.split().freeze());
@@ -1029,7 +1027,7 @@ impl<K> Rope<K> {
             } else {
                 run.extend_from_slice(chunk);
             }
-        }
+        });
         if !run.is_empty() {
             segments.push(run.freeze());
         }
@@ -1725,29 +1723,40 @@ impl<K> Rope<K> {
 
     // --- internal helpers -------------------------------------------------
 
-    /// Appends every byte of the rope to `out`, in order, via a direct traversal of the underlying
-    /// storage — bypassing the [`Chunks`] iterator's per-chunk bookkeeping (and, in the deep tier, its
-    /// resumable tree walk). The hot path behind flatten (`copy_to_bytes`/`copy_to_bytes_mut`).
-    fn extend_into(&self, out: &mut bytes::BytesMut) {
+    /// Visits every chunk in order via a direct traversal of the underlying storage, bypassing the
+    /// [`Chunks`] iterator's per-chunk bookkeeping (and, in the deep tier, its resumable save/restore
+    /// tree walk in favour of a straight recursive DFS). Slightly cheaper than `chunks()` and the
+    /// preferred internal primitive for forward-only, whole-rope reads that need neither early exit
+    /// nor reverse/zip/adapter iteration (for those, `chunks()` — an `ExactSize` + `DoubleEnded`
+    /// iterator — is still the right tool).
+    #[inline]
+    fn for_each_chunk(&self, mut f: impl FnMut(&Bytes)) {
         match &self.repr {
             Repr::Small { head, additional } => {
                 if !head.is_empty() {
-                    out.extend_from_slice(head);
+                    f(head);
                 }
                 for c in additional {
-                    out.extend_from_slice(c);
+                    f(c);
                 }
             }
             Repr::Deep(d) => {
                 for c in &d.head {
-                    out.extend_from_slice(c);
+                    f(c);
                 }
-                d.tree.for_each_chunk(&mut |c| out.extend_from_slice(c));
+                d.tree.for_each_chunk(&mut f);
                 for c in &d.tail {
-                    out.extend_from_slice(c);
+                    f(c);
                 }
             }
         }
+    }
+
+    /// Appends every byte of the rope to `out`, in order, via the direct [`for_each_chunk`] traversal
+    /// (no [`Chunks`] iterator bookkeeping). The hot path behind flatten
+    /// (`copy_to_bytes`/`copy_to_bytes_mut`).
+    fn extend_into(&self, out: &mut bytes::BytesMut) {
+        self.for_each_chunk(|c| out.extend_from_slice(c));
     }
 
     #[inline]
@@ -1855,8 +1864,9 @@ impl<K> Rope<K> {
         if !should {
             return;
         }
-        // flatten everything back into a head + additional deque
-        let mut additional: VecDeque<Bytes> = self.chunks().cloned().collect();
+        // flatten everything back into a head + additional deque (direct traversal, not the iterator)
+        let mut additional: VecDeque<Bytes> = VecDeque::new();
+        self.for_each_chunk(|c| additional.push_back(c.clone()));
         let head = additional.pop_front().unwrap_or_default();
         self.repr = Repr::Small { head, additional };
     }

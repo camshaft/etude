@@ -183,7 +183,7 @@ stable signal):
 | op | shape | time |
 |----|-------|------|
 | compact_full | shallow | ~2 µs |
-| compact_full | deep | 344 µs |
+| compact_full | deep | 293 µs |
 | compact_skip_large | shallow | 1.3 µs |
 | compact_skip_large | deep | 300 µs |
 | compact_single_chunk | shared_released (64 KiB) | 2.0 µs |
@@ -192,8 +192,12 @@ stable signal):
 Things the numbers pin down. The full `compact()` scans the chunks once to size the coalesce buffer to the
 exact total, then fills that one pre-sized buffer (it never reallocates mid-fill) and swaps it in as the
 sole chunk — no intermediate segment list and no per-chunk rebuild when the whole rope collapses to one
-chunk (the common case); pre-sizing alone took `compact()/deep` from 457 µs to the ~340 µs copy-bound floor
-(about 25–30% faster) versus a naive grow-as-you-go buffer. `skip_above` saves the large-chunk memcpy
+chunk (the common case). Two levers got it there: pre-sizing the buffer (no grow-as-you-go realloc/recopy),
+and running the scan and the fill over the direct `for_each_chunk` traversal — a straight recursive DFS
+that skips the `Chunks` iterator's per-chunk save/restore bookkeeping — instead of the iterator. Together
+they took `compact()/deep` from 457 µs (naive buffer + iterator) to ~293 µs, roughly a third faster; the
+traversal switch alone accounted for about the last ~344 → ~293 µs of that (the same primitive backs
+`copy_to_bytes`, which is unchanged at ~62 µs). `skip_above` saves the large-chunk memcpy
 (here ~2 MB of the 2.56 MB is left in place) but only edges out full compact at `deep` (300 vs 344 µs),
 because leaving the large chunks in place means the result still has ~2000 segments to rebuild, and that
 rebuild offsets most of the copy saved — so `skip_above` is most worthwhile when it keeps a *few* genuinely
