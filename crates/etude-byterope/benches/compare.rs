@@ -593,6 +593,39 @@ fn bench_clear(c: &mut Criterion) {
     }
 }
 
+/// Content equality — `PartialEq` for equal buffers (the worst case: every byte must be compared).
+/// Exercises the chunk-aware `memcmp`-per-run comparison (vs a byte-at-a-time flatten compare) for
+/// both `rope == rope` and `rope == [Bytes]`.
+fn bench_eq(c: &mut Criterion) {
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+
+        let mut g = group(c, "eq_self");
+        let ra = template.iter().cloned().collect::<ByteRope>();
+        let rb = template.iter().cloned().collect::<ByteRope>();
+        let va = template.iter().cloned().collect::<ByteVec>();
+        let vb = template.iter().cloned().collect::<ByteVec>();
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| black_box(black_box(&ra) == black_box(&rb)))
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| black_box(black_box(&va) == black_box(&vb)))
+        });
+        g.finish();
+
+        let mut g = group(c, "eq_chunks_slice");
+        let chunks = template.clone();
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| black_box(black_box(&ra) == black_box(&chunks[..])))
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| black_box(black_box(&va) == black_box(&chunks[..])))
+        });
+        g.finish();
+    }
+}
+
 fn byte_via_walk(v: &ByteVec, mut offset: usize) -> Option<u8> {
     for chunk in v.chunks() {
         if offset < chunk.len() {
@@ -621,6 +654,7 @@ criterion_group!(
     bench_from_iter,
     bench_io_write,
     bench_io_read,
-    bench_clear
+    bench_clear,
+    bench_eq
 );
 criterion_main!(benches);

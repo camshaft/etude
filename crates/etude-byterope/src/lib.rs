@@ -1644,11 +1644,51 @@ impl ByteRope {
     }
 }
 
+/// Chunk-aware content equality between two byte-chunk sequences: advances two cursors and compares
+/// each overlapping run as a slice (a `memcmp`), instead of comparing one byte at a time through
+/// flattened iterator adapters. Empty chunks are skipped; the sequences are equal iff they yield the
+/// same bytes in order and both end together. Callers should length-check first for a cheap reject.
+fn chunks_content_eq<'a, 'b>(
+    mut left: impl Iterator<Item = &'a [u8]>,
+    mut right: impl Iterator<Item = &'b [u8]>,
+) -> bool {
+    let mut a: &[u8] = &[];
+    let mut b: &[u8] = &[];
+    loop {
+        while a.is_empty() {
+            match left.next() {
+                Some(c) => a = c,
+                None => break,
+            }
+        }
+        while b.is_empty() {
+            match right.next() {
+                Some(c) => b = c,
+                None => break,
+            }
+        }
+        if a.is_empty() || b.is_empty() {
+            // one side is exhausted — equal iff the other is too
+            return a.is_empty() && b.is_empty();
+        }
+        let n = a.len().min(b.len());
+        if a[..n] != b[..n] {
+            return false;
+        }
+        a = &a[n..];
+        b = &b[n..];
+    }
+}
+
 impl PartialEq for ByteRope {
     /// Two ropes are equal iff their byte content is equal, regardless of how it is chunked.
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.len == other.len && self.chunks().flatten().eq(other.chunks().flatten())
+        self.len == other.len
+            && chunks_content_eq(
+                self.chunks().map(|c| &c[..]),
+                other.chunks().map(|c| &c[..]),
+            )
     }
 }
 
@@ -1691,18 +1731,15 @@ impl<const N: usize> PartialEq<&[u8; N]> for ByteRope {
     }
 }
 
-// Equality against a slice/array of `Bytes` chunks (chunking-independent — compares flattened byte
-// content), mirroring `etude_bytevec::ByteVec` for a drop-in swap.
+// Equality against a slice/array of `Bytes` chunks (chunking-independent — compares byte content),
+// mirroring `etude_bytevec::ByteVec` for a drop-in swap. Chunk-aware (`memcmp` per overlapping run),
+// not a byte-at-a-time flatten compare.
 impl PartialEq<[Bytes]> for ByteRope {
     #[inline]
     fn eq(&self, other: &[Bytes]) -> bool {
-        if self.is_empty() != other.is_empty() {
-            return false;
-        }
-        if other.len() == 1 {
-            return self.eq(&other[0][..]);
-        }
-        self.chunks().flatten().eq(other.iter().flatten())
+        let other_len: usize = other.iter().map(Bytes::len).sum();
+        self.len == other_len
+            && chunks_content_eq(self.chunks().map(|c| &c[..]), other.iter().map(|c| &c[..]))
     }
 }
 
