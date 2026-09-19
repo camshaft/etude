@@ -189,6 +189,13 @@ fn utf8_streaming_rejects_truncated_and_malformed() {
 /// `try_from_bytes` agrees EXACTLY with `core::str::from_utf8` over the concatenation (no false
 /// accept, no false reject) and preserves the content when it accepts.
 #[test]
+// The bolero property harness spins forever under miri (its slow interpreter times many generated
+// iterations); the streaming-validation path is covered under miri by the deterministic unit tests
+// above (`utf8_streaming_validates_*` / `utf8_streaming_rejects_*`). Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; path covered by deterministic unit tests"
+)]
 fn utf8_streaming_matches_from_utf8_oracle() {
     use bolero::check;
     check!()
@@ -1321,6 +1328,14 @@ fn io_read_write() {
 ///   the end of every run),
 /// - self-sharing appends, `bytes::Buf` reads, `split_to_copy`, and flatten/chunks roundtrips.
 #[test]
+// The bolero property harness spins forever under miri (its slow interpreter times many generated
+// op sequences over the rope, a persistent structure miri is already pathologically slow over); the
+// rope ops it drives are covered under miri by the deterministic oracle/unit tests
+// (`public_api_matches_oracle_in_both_tiers`, `concat_matches_oracle`, etc.). Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; rope ops covered by deterministic oracle tests"
+)]
 fn differential_against_model() {
     use bolero::check;
     use bolero_generator::TypeGenerator;
@@ -1872,6 +1887,12 @@ fn get_index_matches_chunk_iterator_after_count_perturbing_mutations() {
 /// invariant that the example tests stopped short of; this drives it under arbitrary op sequences.
 /// The tag is dedicated to this test, so the global budget it reads is not shared with other tests.
 #[test]
+// The bolero property harness spins forever under miri; the tagged-budget accounting it drives is
+// covered under miri by the deterministic tagged unit tests. Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; covered by deterministic tagged unit tests"
+)]
 fn tagged_budget_conservation_differential() {
     use bolero::check;
     use bolero_generator::TypeGenerator;
@@ -1953,6 +1974,12 @@ fn tagged_budget_conservation_differential() {
 }
 
 #[test]
+// The bolero property harness spins forever under miri; the Builder write path it drives is covered
+// under miri by the deterministic builder unit tests. Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; covered by deterministic builder unit tests"
+)]
 fn builder_differential_against_model() {
     use bolero::check;
     use bolero_generator::TypeGenerator;
