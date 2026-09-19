@@ -269,8 +269,8 @@ fn write_to_renders_into_a_stack_sink() {
 
 // ─── the differential harness (the growing oracle) ────────────────────────────────────────────────
 
-/// The JSON-number character set. Random strings over it hit valid numbers, near-misses (leading zeros,
-/// stray dots/signs), and pure garbage — exercising both the acceptance and the rejection paths.
+/// The decimal-literal character set. Random strings over it hit valid numbers, near-misses (leading
+/// zeros, stray dots/signs), and pure garbage — exercising both the acceptance and the rejection paths.
 const CHARSET: &[u8] = b"0123456789.-+eE";
 
 fn map_to_charset(raw: &[u8]) -> String {
@@ -304,7 +304,7 @@ fn check_parse(s: &str) -> Option<(Decimal, BigDecimal)> {
             Some((d, b))
         }
         (Some(d), None) => {
-            // We accept a strict JSON number; the lenient reference should accept a superset. If this
+            // We accept a strict decimal literal; the lenient reference should accept a superset. If this
             // ever fires, our acceptance diverged from a real decimal — surface it.
             panic!("we accepted {s:?} as {d:?} but bigdecimal rejected it");
         }
@@ -338,7 +338,7 @@ fn differential_parse_and_cmp() {
         });
 }
 
-/// Build a guaranteed-valid JSON number string from typed components. `int` (a `u64`) has no leading
+/// Build a guaranteed-valid decimal literal string from typed components. `int` (a `u64`) has no leading
 /// zero by construction; `frac`/`exp` are appended only when present.
 fn make_num(neg: bool, int: u64, frac: Option<u32>, exp: Option<i64>) -> String {
     let mut s = String::new();
@@ -359,7 +359,7 @@ fn make_num(neg: bool, int: u64, frac: Option<u32>, exp: Option<i64>) -> String 
 
 #[test]
 fn differential_structured_numbers() {
-    // Guaranteed-valid JSON numbers built from typed fields, for dense cmp/round-trip coverage across
+    // Guaranteed-valid decimal literals built from typed fields, for dense cmp/round-trip coverage across
     // sign, integer, fractional, and exponent components.
     bolero::check!()
         .with_type::<alloc::vec::Vec<(bool, u64, u32, bool, i16, bool)>>()
@@ -416,7 +416,7 @@ fn apply_op(
 
 #[test]
 fn differential_arithmetic() {
-    // Seeds are valid JSON numbers (exponent bounded to i8 so exponent-alignment scaling stays modest);
+    // Seeds are valid decimal literals (exponent bounded to i8 so exponent-alignment scaling stays modest);
     // ops are (opcode, reg_a, reg_b) triples. add/sub/mul are all EXACT in bigdecimal too, so the
     // oracle asserts exact agreement after every operation.
     bolero::check!()
