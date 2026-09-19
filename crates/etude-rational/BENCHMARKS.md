@@ -38,9 +38,9 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | normalize  | 64b    | 894 ns    | 1.22 µs      | **0.74**  |
 | normalize  | 256b   | 4.16 µs   | 4.97 µs      | **0.84**  |
 | normalize  | 1024b  | 24.8 µs   | 24.5 µs      | 1.01      |
-| cmp        | 64b    | 44.6 ns   | 55.2 ns      | **0.81**  |
-| cmp        | 256b   | 88.9 ns   | 143 ns       | **0.62**  |
-| cmp        | 1024b  | 776 ns    | 179 ns       | 4.33      |
+| cmp        | 64b    | 51.0 ns   | 54.3 ns      | **0.94**  |
+| cmp        | 256b   | 95.2 ns   | 143 ns       | **0.67**  |
+| cmp        | 1024b  | 192 ns    | 181 ns       | 1.06      |
 | add_eqden  | 64b    | 935 ns    | 1.36 µs      | **0.69**  |
 | add_eqden  | 256b   | 4.20 µs   | 4.99 µs      | **0.84**  |
 | add_eqden  | 1024b  | 25.2 µs   | 25.3 µs      | 1.00      |
@@ -49,14 +49,14 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | cmp_eqden  | 1024b  | 11.5 ns   | 14.2 ns      | **0.81**  |
 
 **We now beat num-rational on add, sub, mul, div, cmp (64b/256b), recip (256b/1024b), normalize
-(64b/256b), and the equal-denominator add/cmp fast paths** — a decisive across-the-board lead. The
-remaining non-wins are all minor or externally-gated:
+(64b/256b), and the equal-denominator add/cmp fast paths** — a decisive across-the-board lead. There are
+no remaining hard losses; the non-wins are at parity or minor:
 
-1. **`cmp` @1024b — 4.33× (the one real loss).** The general path is a double full-width cross-multiply.
-   A continued-fraction/Euclidean comparison wins at 1024b but regresses the small tiers, and a clean
-   size-thresholded hybrid needs an **O(1) size/bit-length accessor on `etude_bigint::Big`** (the current
-   `to_sign_magnitude_bytes_into` probe copies all limbs when the value fits — not O(1)). Coordination
-   item raised to etude-bigint; blocked until that lands.
+1. **`cmp` @1024b — 1.06× (near parity).** The size-thresholded hybrid routes large operands to the
+   continued-fraction comparison (via the O(1) `Big::byte_len` probe), collapsing this from 4.33× to
+   ~parity. The residual ~11 ns is the CF setup (the `abs`/clone of the four components before the loop);
+   a borrow-first-iteration specialization could shave it. The small tiers stay wins (the probe adds ~6 ns
+   but 64b/256b remain 0.94/0.67).
 2. **`recip` @64b — 2.04× (clone-bound).** recip is already O(limbs) (gcd-free swap+sign); at 64b the two
    small `Vec` clones dominate. A clone/alloc-avoiding path could reach parity. Minor.
 3. **`normalize`/`add_eqden` @1024b — ~1.00 (parity).** Both bottom out on a single large gcd; parity
@@ -73,10 +73,6 @@ remaining non-wins are all minor or externally-gated:
 - **slice 6** — cmp fast paths (sign short-circuit + equal-denominator direct numerator compare) + full
   board refresh against etude-bigint's new Stein binary gcd (#51), which banked the add/sub/normalize
   wins that were previously gcd-bound.
-
-## Investigated, not landed
-
-- **Continued-fraction `cmp`** — cut `cmp@1024b` from 789 ns to ~196 ns (4.4× → 1.11×) but regressed the
-  64b/256b tiers (per-step overhead > two tiny multiplies); a size-thresholded hybrid also regressed
-  because the only size probe copies all limbs when it fits. Needs an O(1) size accessor from etude-bigint
-  (or an allocation-free continued-fraction). Reverted; coordination raised. See loss #1 above.
+- **slice 7** — size-thresholded continued-fraction `cmp` hybrid, unblocked by etude-bigint's O(1)
+  `bit_len`/`byte_len` accessors (#56): small components cross-multiply, large route to the
+  continued-fraction comparison. `cmp@1024b` 4.33× → 1.06× (near parity).

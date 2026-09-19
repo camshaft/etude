@@ -234,6 +234,50 @@ fn mul_div_cross_reduction() {
     assert_eq!(s(4, 6).mul(&s(9, 8)).to_decimal_string(), "3/4");
 }
 
+#[test]
+fn cmp_large_continued_fraction() {
+    // Force the continued-fraction cmp path with components well above the small-threshold (64 bytes),
+    // and cross-check the ordering against num-rational for many pairs, incl. negatives and equality.
+    fn from_seed(seed: u64, nbytes: usize) -> (Big, BigInt) {
+        let mut x = seed | 1;
+        let mut sm = alloc::vec![0u8]; // sign byte: non-negative
+        for _ in 0..nbytes {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            sm.push((x >> 24) as u8);
+        }
+        *sm.last_mut().unwrap() |= 0x80; // exact width
+        let big = Big::from_sign_magnitude_bytes(&sm);
+        let bi = BigInt::from_signed_bytes_le(&big.to_le_twos_complement_bytes());
+        (big, bi)
+    }
+    let nbytes = 96; // > CMP_SMALL_BYTES (64) ⇒ the continued-fraction branch
+    for i in 0..40u64 {
+        let (n1, bn1) = from_seed(i * 4 + 1, nbytes);
+        let (d1, bd1) = from_seed(i * 4 + 2, nbytes);
+        let (n2, bn2) = from_seed(i * 4 + 3, nbytes);
+        let (d2, bd2) = from_seed(i * 4 + 4, nbytes);
+        let a = Rational::new(n1, d1).unwrap();
+        let b = Rational::new(n2, d2).unwrap();
+        let ra = BigRational::new(bn1, bd1);
+        let rb = BigRational::new(bn2, bd2);
+        assert_eq!(a.cmp(&b), ra.cmp(&rb), "cmp mismatch at i={i}");
+        assert_eq!(a.cmp(&a), core::cmp::Ordering::Equal, "self-cmp at i={i}");
+        // Mixed / both-negative sign paths through the same large operands.
+        assert_eq!(
+            a.neg().cmp(&b),
+            (-ra.clone()).cmp(&rb),
+            "neg-a mismatch at i={i}"
+        );
+        assert_eq!(
+            a.neg().cmp(&b.neg()),
+            (-ra).cmp(&-rb),
+            "both-neg mismatch at i={i}"
+        );
+    }
+}
+
 // ─── the differential op-driver (the growing oracle) ──────────────────────────────────────────────
 
 /// One operation over a small register file of rationals. Binary ops read two registers and push the

@@ -241,9 +241,13 @@ impl PartialOrd for Rational {
 impl Ord for Rational {
     /// Exact three-way comparison.
     ///
-    /// Two O(1)/O(limbs) fast paths before the general cross-multiply: strictly-different signs decide
-    /// immediately, and equal denominators reduce to a direct numerator compare (both denominators are
-    /// strictly positive). Otherwise `a/b ? c/d` is decided by the cross-products `a*d ? c*b`.
+    /// Fast paths before the general comparison: strictly-different signs decide in O(1), and equal
+    /// denominators reduce to a direct numerator compare (both denominators are strictly positive). The
+    /// general comparison is a size-thresholded hybrid: for small components a plain cross-multiply
+    /// (`a*d ? c*b`) is cheapest, while for large components the continued-fraction / Euclidean method
+    /// avoids the `O(n²)` double-width multiply — its per-step `divmod` quotients are typically tiny, so
+    /// when the values differ in magnitude the answer falls out in one or two `O(n)` steps. The size probe
+    /// is `etude_bigint::Big::byte_len` (O(1)).
     fn cmp(&self, other: &Rational) -> Ordering {
         // Strictly-different signs decide immediately (zero counts as non-negative, so `0 vs positive`
         // and `0 vs 0` fall through to the exact paths below — both handle them correctly).
@@ -256,7 +260,70 @@ impl Ord for Rational {
         if self.den == other.den {
             return self.num.cmp(&other.num);
         }
-        self.num.mul(&other.den).cmp(&other.num.mul(&self.den))
+        // Small components: the cross-multiply is two cheap multiplies and beats the continued-fraction
+        // bookkeeping (measured crossover between the 256b and 1024b tiers).
+        if self.is_cmp_small() && other.is_cmp_small() {
+            return self.num.mul(&other.den).cmp(&other.num.mul(&self.den));
+        }
+        // Large components: continued-fraction magnitude comparison. Signs are equal here (differing
+        // signs returned above), so compare magnitudes and flip the result for two negatives.
+        let ord = cmp_magnitude(
+            self.num.abs(),
+            self.den.clone(),
+            other.num.abs(),
+            other.den.clone(),
+        );
+        if self.num.is_negative() {
+            ord.reverse()
+        } else {
+            ord
+        }
+    }
+}
+
+/// A component width (in significant magnitude bytes) at or below which a cross-multiply comparison beats
+/// the continued-fraction method. Measured: cross-multiply wins the 64b/256b tiers, loses at 1024b.
+const CMP_SMALL_BYTES: usize = 64;
+
+impl Rational {
+    /// Whether both components are small enough (by `Big::byte_len`, an O(1) probe) that a cross-multiply
+    /// comparison is cheaper than the continued-fraction method.
+    fn is_cmp_small(&self) -> bool {
+        self.num.byte_len() <= CMP_SMALL_BYTES && self.den.byte_len() <= CMP_SMALL_BYTES
+    }
+}
+
+/// Compare `a/b` vs `c/d` for NON-NEGATIVE `a`, `c` and STRICTLY POSITIVE `b`, `d`, by the
+/// continued-fraction method. Iterative: compare integer parts `⌊a/b⌋` vs `⌊c/d⌋`; on a tie compare the
+/// fractional remainders `r1/b` vs `r2/d`, which — being in `[0, 1)` — reverse order under reciprocation,
+/// so the next step compares `b/r1` vs `d/r2` with the running result negated. Terminates because the
+/// remainders strictly shrink (Euclid).
+fn cmp_magnitude(mut a: Big, mut b: Big, mut c: Big, mut d: Big) -> Ordering {
+    let mut reverse = false;
+    loop {
+        let (q1, r1) = a.divmod(&b).expect("b > 0");
+        let (q2, r2) = c.divmod(&d).expect("d > 0");
+        let qc = q1.cmp(&q2);
+        if qc != Ordering::Equal {
+            return if reverse { qc.reverse() } else { qc };
+        }
+        // Integer parts equal — decide on the fractional parts r1/b vs r2/d.
+        let frac = match (r1.is_zero(), r2.is_zero()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Less, // a/b is an exact integer, c/d has a fraction ⇒ a/b < c/d
+            (false, true) => Ordering::Greater, // a/b has a fraction, c/d is an exact integer ⇒ a/b > c/d
+            (false, false) => {
+                // Recurse on reciprocals b/r1 vs d/r2 (order reverses), reusing the current denominators
+                // as the new numerators.
+                a = b;
+                b = r1;
+                c = d;
+                d = r2;
+                reverse = !reverse;
+                continue;
+            }
+        };
+        return if reverse { frac.reverse() } else { frac };
     }
 }
 
