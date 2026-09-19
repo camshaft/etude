@@ -43,6 +43,70 @@ fn kind_marker_is_zero_cost_layout() {
     );
 }
 
+/// The `Rope<Utf8>` invariant is over the *concatenated* content: a multi-byte codepoint split
+/// across chunk boundaries validates (each chunk alone may be invalid), while genuinely malformed
+/// UTF-8 is rejected. This is the operator-ruled invariant (1) — codepoints may span chunks.
+#[test]
+fn utf8_validation_is_over_concatenation_not_per_chunk() {
+    // "é" = 0xC3 0xA9, deliberately split so each chunk alone is NOT valid UTF-8.
+    let split: ByteVec = [chunk(&[0xC3]), chunk(&[0xA9])].into_iter().collect();
+    assert!(
+        core::str::from_utf8(&split.get(0).unwrap()[..]).is_err(),
+        "precondition: the first chunk alone is invalid UTF-8"
+    );
+    let s = Rope::<Utf8>::try_from_bytes(split).expect("é split across chunks is valid UTF-8");
+    assert_eq!(&s.copy_to_bytes()[..], "é".as_bytes());
+
+    // Genuinely malformed (0xC3 not followed by a continuation byte) is rejected.
+    let bad: ByteVec = [chunk(&[0xC3, 0x28])].into_iter().collect();
+    assert!(Rope::<Utf8>::try_from_bytes(bad).is_err());
+}
+
+/// `ByteVec` <-> `Rope<Utf8>` round-trips: validated `try_from_bytes` in, free `into_bytes` out,
+/// content byte-identical both ways (the free conversion drops only the zero-sized kind marker).
+#[test]
+fn utf8_bytes_roundtrip_is_lossless() {
+    let original: ByteVec = [chunk(b"hello "), chunk("wörld".as_bytes())]
+        .into_iter()
+        .collect();
+    let expected = original.copy_to_bytes();
+    let s = Rope::<Utf8>::try_from_bytes(original).expect("valid UTF-8");
+    // The kind-agnostic reads are available on Rope<Utf8> (they live on impl<K> Rope<K>).
+    assert_eq!(s.len(), expected.len());
+    assert!(!s.is_empty());
+    assert_eq!(s.byte_at(0), Some(b'h'));
+    assert_eq!(s.chunks().count(), 2);
+    let back = s.into_bytes();
+    assert_eq!(
+        back.copy_to_bytes(),
+        expected,
+        "free round-trip preserves content"
+    );
+}
+
+/// The caller-trusted `Rope<Utf8>` mutators build content correctly against a `String` model,
+/// including `insert_bytes` at the front, an interior boundary, and the end.
+#[test]
+fn utf8_append_and_insert_bytes_match_string_model() {
+    let mut s = Rope::<Utf8>::default();
+    s.append_bytes("foo".as_bytes());
+    s.append_bytes("bar".as_bytes());
+    assert_eq!(&s.copy_to_bytes()[..], b"foobar");
+
+    s.insert_bytes(3, "XYZ".as_bytes()); // foo|bar -> fooXYZbar
+    assert_eq!(&s.copy_to_bytes()[..], b"fooXYZbar");
+    s.insert_bytes(0, "<".as_bytes()); // front
+    assert_eq!(&s.copy_to_bytes()[..], b"<fooXYZbar");
+    let end = s.len();
+    s.insert_bytes(end, ">".as_bytes()); // end
+    assert_eq!(&s.copy_to_bytes()[..], b"<fooXYZbar>");
+
+    // Empty fragments are no-ops.
+    s.append_bytes(b"");
+    s.insert_bytes(2, b"");
+    assert_eq!(&s.copy_to_bytes()[..], b"<fooXYZbar>");
+}
+
 #[test]
 fn single_chunk_is_flat_and_allocation_light() {
     let mut rope = ByteVec::new();
