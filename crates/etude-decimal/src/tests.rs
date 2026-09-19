@@ -342,6 +342,105 @@ fn write_to_renders_into_a_stack_sink() {
     }
 }
 
+#[test]
+fn exact_division() {
+    let d = |s: &str| Decimal::from_str(s).unwrap();
+    // Terminating quotients (reduced denominator is 2^a·5^b).
+    assert_eq!(d("1").div(&d("2")).unwrap().to_string(), "0.5");
+    assert_eq!(d("1").div(&d("8")).unwrap().to_string(), "0.125");
+    assert_eq!(d("1").div(&d("5")).unwrap().to_string(), "0.2");
+    assert_eq!(d("3").div(&d("40")).unwrap().to_string(), "0.075");
+    assert_eq!(d("10").div(&d("4")).unwrap().to_string(), "2.5");
+    assert_eq!(d("7").div(&d("1")).unwrap().to_string(), "7");
+    assert_eq!(d("0").div(&d("3")).unwrap(), Decimal::zero());
+    // Scale interplay and sign.
+    assert_eq!(d("6").div(&d("0.5")).unwrap().to_string(), "12");
+    assert_eq!(d("0.6").div(&d("0.3")).unwrap().to_string(), "2");
+    assert_eq!(d("-1").div(&d("4")).unwrap().to_string(), "-0.25");
+    assert_eq!(d("1").div(&d("-4")).unwrap().to_string(), "-0.25");
+    assert_eq!(d("-1").div(&d("-4")).unwrap().to_string(), "0.25");
+    // Non-terminating → None (a prime factor other than 2/5 remains).
+    assert!(d("1").div(&d("3")).is_none());
+    assert!(d("2").div(&d("7")).is_none());
+    assert!(d("1").div(&d("6")).is_none()); // 6 = 2·3, the 3 remains
+    // Divide by zero → None.
+    assert!(d("1").div(&Decimal::zero()).is_none());
+    assert!(Decimal::zero().div(&Decimal::zero()).is_none());
+}
+
+#[test]
+fn rounded_division() {
+    use RoundingMode::{Ceiling, Down, Floor, HalfDown, HalfEven, HalfUp, Up};
+    let d = |s: &str| Decimal::from_str(s).unwrap();
+    // 1/3, 2/3 to 4 significant digits under several modes.
+    assert_eq!(
+        d("1").div_round(&d("3"), 4, HalfEven).unwrap().to_string(),
+        "0.3333"
+    );
+    assert_eq!(
+        d("2").div_round(&d("3"), 4, HalfEven).unwrap().to_string(),
+        "0.6667"
+    );
+    assert_eq!(
+        d("2").div_round(&d("3"), 4, Down).unwrap().to_string(),
+        "0.6666"
+    );
+    assert_eq!(
+        d("2").div_round(&d("3"), 4, Ceiling).unwrap().to_string(),
+        "0.6667"
+    );
+    assert_eq!(
+        d("2").div_round(&d("3"), 4, Floor).unwrap().to_string(),
+        "0.6666"
+    );
+    // Exact halfway ties, rounding a value to 2 significant digits (divide by 1).
+    assert_eq!(
+        d("0.125")
+            .div_round(&d("1"), 2, HalfEven)
+            .unwrap()
+            .to_string(),
+        "0.12" // tie → even (2)
+    );
+    assert_eq!(
+        d("0.135")
+            .div_round(&d("1"), 2, HalfEven)
+            .unwrap()
+            .to_string(),
+        "0.14" // tie → even (4)
+    );
+    assert_eq!(
+        d("0.125")
+            .div_round(&d("1"), 2, HalfUp)
+            .unwrap()
+            .to_string(),
+        "0.13"
+    );
+    assert_eq!(
+        d("0.125")
+            .div_round(&d("1"), 2, HalfDown)
+            .unwrap()
+            .to_string(),
+        "0.12"
+    );
+    // A precision that captures a terminating value returns it exactly.
+    assert_eq!(
+        d("1").div_round(&d("4"), 5, HalfEven).unwrap().to_string(),
+        "0.25"
+    );
+    // Sign with directed rounding.
+    assert_eq!(
+        d("-2").div_round(&d("3"), 3, Up).unwrap().to_string(),
+        "-0.667"
+    );
+    assert_eq!(
+        d("-2").div_round(&d("3"), 3, Down).unwrap().to_string(),
+        "-0.666"
+    );
+    // Errors: zero divisor, zero precision.
+    assert!(d("1").div_round(&Decimal::zero(), 4, HalfEven).is_none());
+    assert!(d("1").div_round(&d("3"), 0, HalfEven).is_none());
+}
+
 // ─── the differential harness (the growing oracle) ────────────────────────────────────────────────
 
 /// The decimal-literal character set. Random strings over it hit valid numbers, near-misses (leading
@@ -541,6 +640,62 @@ fn differential_arithmetic() {
                 let i = (a as usize) % len;
                 let j = (b as usize) % len;
                 apply_op(code, i, j, &mut ours, &mut refs);
+            }
+        });
+}
+
+#[test]
+fn differential_division() {
+    // Exact `div` is self-checked (q * b == a exactly, via our own exact mul). `div_round` is checked
+    // against bigdecimal: divide (bigdecimal `/` gives an exact-or-100-digit quotient) then round to the
+    // same precision + mode — for a precision well below 100 this equals the true value rounded.
+    use bigdecimal::RoundingMode as Bd;
+    let modes = [
+        (RoundingMode::HalfEven, Bd::HalfEven),
+        (RoundingMode::Down, Bd::Down),
+        (RoundingMode::Up, Bd::Up),
+        (RoundingMode::Ceiling, Bd::Ceiling),
+        (RoundingMode::Floor, Bd::Floor),
+        (RoundingMode::HalfUp, Bd::HalfUp),
+        (RoundingMode::HalfDown, Bd::HalfDown),
+    ];
+    const P: u32 = 12;
+    let prec = core::num::NonZeroU64::new(P as u64).unwrap();
+    bolero::check!()
+        .with_type::<alloc::vec::Vec<(bool, u64, u32, bool, i16, bool)>>()
+        .for_each(|specs| {
+            let mut vals: alloc::vec::Vec<(Decimal, BigDecimal)> = alloc::vec::Vec::new();
+            for &(neg, int, frac, has_frac, exp, has_exp) in specs.iter().take(10) {
+                let s = make_num(
+                    neg,
+                    int,
+                    has_frac.then_some(frac),
+                    has_exp.then_some(exp as i64),
+                );
+                if let (Some(d), Ok(b)) = (Decimal::parse(s.bytes()), BigDecimal::from_str(&s)) {
+                    vals.push((d, b));
+                }
+            }
+            for (a, a_bd) in &vals {
+                for (b, b_bd) in &vals {
+                    if b.is_zero() {
+                        assert!(a.div(b).is_none(), "div by zero must be None");
+                        assert!(a.div_round(b, P, RoundingMode::HalfEven).is_none());
+                        continue;
+                    }
+                    // Exact division: when it succeeds, multiplying back must reproduce the dividend.
+                    if let Some(q) = a.div(b) {
+                        assert_eq!(q.mul(b), *a, "exact div self-check failed: {a} / {b} = {q}");
+                    }
+                    // Rounded division against the reference, every mode.
+                    for &(mode, bd_mode) in &modes {
+                        let our = a
+                            .div_round(b, P, mode)
+                            .expect("nonzero divisor, nonzero precision");
+                        let refv = (a_bd / b_bd).with_precision_round(prec, bd_mode);
+                        assert_same(&our, &refv);
+                    }
+                }
             }
         });
 }

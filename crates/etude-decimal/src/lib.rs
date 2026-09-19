@@ -5,9 +5,11 @@
 //! [`etude_bigint::Big`]. Pure over `alloc`, no I/O, no dependency but `etude-bigint`. A decimal
 //! preserves every significant digit and its scale exactly, unlike an `f64` (which loses precision) or a
 //! rational (which would need gcd reduction and cannot distinguish `0.1` from `0.10` by scale). Exact
-//! arithmetic ([`Decimal::add`]/[`Decimal::sub`]/[`Decimal::mul`]) never rounds a digit away; division
-//! (which needs a rounding policy) is a later addition. Correctness is pinned by a differential test
-//! against `bigdecimal` (a dev-dependency) as the reference.
+//! arithmetic ([`Decimal::add`]/[`Decimal::sub`]/[`Decimal::mul`]) never rounds a digit away; division is
+//! split by that principle — [`Decimal::div`] is exact and returns `None` when the quotient does not
+//! terminate, while [`Decimal::div_round`] rounds to a caller-chosen precision and [`RoundingMode`] (a
+//! rounding-capable operation always takes explicit rounding arguments — there is no default). Correctness
+//! is pinned by a differential test against `bigdecimal` (a dev-dependency) as the reference.
 //!
 //! A value is built either numerically from a [`etude_bigint::Big`] coefficient and an exponent via
 //! [`Decimal::new`] (and the [`Decimal::from_i64`] / [`Decimal::from_bigint`] conveniences), or PARSED
@@ -62,6 +64,27 @@ pub struct Decimal {
     /// `i64` (not `i32`) so that `mul` — which adds the two operands' exponents — has ample headroom and
     /// so the width matches the reference `bigdecimal`'s `i64` scale.
     exp: i64,
+}
+
+/// How [`Decimal::div_round`] (and any rounding-capable operation) breaks a tie / discards a remainder.
+/// Mirrors the IEEE-754 / `bigdecimal` rounding modes. There is deliberately NO default — a
+/// rounding-capable operation takes the mode as an EXPLICIT argument so the caller always chooses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RoundingMode {
+    /// Away from zero (round the magnitude up whenever anything is discarded).
+    Up,
+    /// Toward zero (truncate the discarded digits).
+    Down,
+    /// Toward positive infinity.
+    Ceiling,
+    /// Toward negative infinity.
+    Floor,
+    /// Nearest; a tie (exactly halfway) rounds away from zero.
+    HalfUp,
+    /// Nearest; a tie rounds toward zero.
+    HalfDown,
+    /// Nearest; a tie rounds to make the last kept digit even (banker's rounding).
+    HalfEven,
 }
 
 impl Decimal {
@@ -197,6 +220,114 @@ impl Decimal {
         // input; saturate only in the astronomically-extreme case rather than wrap.
         let exp = self.exp.saturating_add(other.exp);
         Decimal::new(self.coeff.mul(&other.coeff), exp)
+    }
+
+    /// EXACT division `self / other`, or `None` if the quotient does not terminate as a finite decimal
+    /// (or `other` is zero). A decimal quotient is exact exactly when the divisor's coefficient, reduced
+    /// against the dividend's, has no prime factor other than 2 and 5 (`1/2`, `1/8`, `3/40` terminate;
+    /// `1/3`, `1/7` do not). Because it cannot round, this operation takes NO rounding arguments — use
+    /// [`Decimal::div_round`] for a rounded quotient to a chosen precision.
+    pub fn div(&self, other: &Decimal) -> Option<Decimal> {
+        if other.is_zero() {
+            return None;
+        }
+        if self.is_zero() {
+            return Some(Decimal::zero());
+        }
+        let neg = self.coeff.is_negative() ^ other.coeff.is_negative();
+        // Reduce |num| / |den| to lowest terms, then strip all 2s and 5s from the denominator.
+        let g = self.coeff.gcd(&other.coeff); // gcd ignores sign (magnitude gcd)
+        let num = self.coeff.abs().divmod(&g).expect("gcd is nonzero").0;
+        let mut den = other.coeff.abs().divmod(&g).expect("gcd is nonzero").0;
+        let two = Big::from_i64(2);
+        let five = Big::from_i64(5);
+        let mut a2: u32 = 0;
+        let mut a5: u32 = 0;
+        loop {
+            let (q, r) = den.divmod(&two).expect("2 is nonzero");
+            if !r.is_zero() {
+                break;
+            }
+            den = q;
+            a2 += 1;
+        }
+        loop {
+            let (q, r) = den.divmod(&five).expect("5 is nonzero");
+            if !r.is_zero() {
+                break;
+            }
+            den = q;
+            a5 += 1;
+        }
+        if den != Big::from_i64(1) {
+            return None; // a factor other than 2 or 5 remains → non-terminating
+        }
+        // 1/(2^a2·5^a5) = (2^(m-a2)·5^(m-a5)) / 10^m, m = max(a2,a5); exactly one of the two powers is >1.
+        let m = a2.max(a5);
+        let extra = if a2 >= a5 {
+            pow5(a2 - a5)
+        } else {
+            pow2(a5 - a2)
+        };
+        let coeff = num.mul(&extra);
+        let exp = (self.exp - other.exp) - m as i64;
+        let coeff = if neg { coeff.neg() } else { coeff };
+        Some(Decimal::new(coeff, exp))
+    }
+
+    /// Divide `self / other`, rounding the quotient to `precision` significant digits with the EXPLICIT
+    /// [`RoundingMode`] (there is no default rounding — the caller always chooses). Returns `None` if
+    /// `other` is zero or `precision` is zero. Unlike [`Decimal::div`] this always yields a value, at the
+    /// cost of rounding a non-terminating (or over-long) quotient.
+    pub fn div_round(
+        &self,
+        other: &Decimal,
+        precision: u32,
+        rounding: RoundingMode,
+    ) -> Option<Decimal> {
+        if other.is_zero() || precision == 0 {
+            return None;
+        }
+        if self.is_zero() {
+            return Some(Decimal::zero());
+        }
+        let neg = self.coeff.is_negative() ^ other.coeff.is_negative();
+        let n = self.coeff.abs();
+        let d = other.coeff.abs();
+        let digits_n = n.to_decimal_string().len() as i64;
+        let digits_d = d.to_decimal_string().len() as i64;
+        // Choose k so that floor(n * 10^k / d) has `precision` digits, then round with the remainder.
+        // Start near the answer and correct by ±1 (the count is monotonic in k, so this converges).
+        let mut k = precision as i64 - 1 - (digits_n - digits_d);
+        loop {
+            let (num, den) = if k >= 0 {
+                (n.mul(&pow10(k as u64)), d.clone())
+            } else {
+                (n.clone(), d.mul(&pow10((-k) as u64)))
+            };
+            let (q, r) = num.divmod(&den).expect("denominator is nonzero");
+            let qd = if q.is_zero() {
+                0
+            } else {
+                q.to_decimal_string().len() as i64
+            };
+            if qd < precision as i64 {
+                k += 1;
+                continue;
+            }
+            if qd > precision as i64 {
+                k -= 1;
+                continue;
+            }
+            let coeff = if round_up_magnitude(&q, &r, &den, neg, rounding) {
+                q.add(&Big::from_i64(1))
+            } else {
+                q
+            };
+            let exp = (self.exp - other.exp) - k;
+            let coeff = if neg { coeff.neg() } else { coeff };
+            return Some(Decimal::new(coeff, exp));
+        }
     }
 
     /// Parse a decimal number literal from a byte stream into an exact `Decimal`, or `None` if the whole
@@ -586,6 +717,50 @@ fn pow2(k: u32) -> Big {
     let mut buf = alloc::vec![0u8; byte + 2]; // +1 for the set bit's byte, +1 zero byte = positive sign
     buf[byte] = 1u8 << (k % 8);
     Big::from_le_twos_complement_bytes(&buf)
+}
+
+/// `5^k` as a nonnegative [`Big`], by binary exponentiation. Used by exact decimal division.
+fn pow5(k: u32) -> Big {
+    let mut result = Big::from_i64(1);
+    let mut base = Big::from_i64(5);
+    let mut e = k;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = result.mul(&base);
+        }
+        e >>= 1;
+        if e > 0 {
+            base = base.mul(&base);
+        }
+    }
+    result
+}
+
+/// Decide whether a rounded division should bump the quotient magnitude `q` up by one, given the nonzero
+/// remainder `r` (`0 < r < den`) of the discarded fractional part `r/den`, the result sign, and the mode.
+fn round_up_magnitude(q: &Big, r: &Big, den: &Big, neg: bool, mode: RoundingMode) -> bool {
+    if r.is_zero() {
+        return false; // exact division at this precision — nothing to round
+    }
+    // Compare 2*r to den: Less = below ½, Equal = exactly ½, Greater = above ½.
+    let half = r.add(r).cmp(den);
+    match mode {
+        RoundingMode::Down => false,
+        RoundingMode::Up => true,
+        RoundingMode::Ceiling => !neg, // toward +∞: round the magnitude up only for a positive result
+        RoundingMode::Floor => neg, // toward −∞: round the magnitude up only for a negative result
+        RoundingMode::HalfUp => half != Ordering::Less,
+        RoundingMode::HalfDown => half == Ordering::Greater,
+        RoundingMode::HalfEven => match half {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => !q
+                .divmod(&Big::from_i64(2))
+                .expect("2 is nonzero")
+                .1
+                .is_zero(),
+        },
+    }
 }
 
 /// Accumulates ASCII decimal digits fed one at a time (streaming, across chunk boundaries) into a
