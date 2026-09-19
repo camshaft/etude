@@ -217,6 +217,32 @@ mod tests {
     use bytes::Bytes;
     use std::collections::HashMap;
 
+    /// Red (breaker-byterope): `Display for Str` writes via `f.write_str`, ignoring the formatter's
+    /// width/fill/alignment/precision — the same divergence fixed for StrRope in etude#155 (and
+    /// caught again in the #119 fast path and the #184 spike's forwarding layer). `str`'s own
+    /// `Display` routes through `Formatter::pad`. Parity-based, so any conforming fix passes. Note
+    /// for the fix: this crate is ported from cadenza's `cdz-str`, which likely carries the same
+    /// bug upstream.
+    #[test]
+    fn display_honors_format_parameters_like_str() {
+        let s = Str::from("ab");
+        assert_eq!(
+            format!("{:>6}", s),
+            format!("{:>6}", "ab"),
+            "right-align width"
+        );
+        assert_eq!(
+            format!("{:-^7}", s),
+            format!("{:-^7}", "ab"),
+            "center with fill"
+        );
+        assert_eq!(
+            format!("{:.2}", Str::from("héllo")),
+            format!("{:.2}", "héllo"),
+            "precision truncates by chars"
+        );
+    }
+
     #[test]
     fn from_and_views_round_trip() {
         let s = Str::from("cadenza");
