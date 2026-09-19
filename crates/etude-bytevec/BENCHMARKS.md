@@ -21,8 +21,10 @@ ops. Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4
 | **append_mid** | 1.44 µs | 10.3 µs | **0.14 (7× faster)** |
 | **split_to_mid** | 6.8 µs | 7.88 µs | 0.86 |
 | copy_to_bytes | 63.7 µs | 64.6 µs | 0.99 |
+| split_to_copy | 63.1 µs | 59.8 µs | 1.06 |
 | from_iter | 19.5 µs | 17.5 µs | 1.11 |
 | extend | 22.4 µs | 18.8 µs | 1.19 |
+| clear | 10.3 µs | 7.89 µs | 1.30 |
 | push_back | 22.6 µs | 17.4 µs | 1.30 |
 | advance (drain) | 16.9 µs | 11.5 µs | 1.47 |
 | pop_front (drain) | 15.2 µs | 9.04 µs | 1.68 |
@@ -33,7 +35,10 @@ ops. Latest run (aarch64, jemalloc, release; `deep` = 1000 chunks, `shallow` = 4
 **Reading it:** the rope is at parity-or-faster on the shallow path and the structural ops it exists
 for (clone/append/split/slice), and trails **1.1×–1.74×** on deep-tier *sequential per-chunk*
 build/drain — the irreducible per-node `Arc` allocation + O(log₃₂) navigation a flat deque does not
-pay. `pop_back`/`pop_front` drain already use O(1) block-buffer adoption (the leading refill cost was
+pay. The two _copy_ ops (`copy_to_bytes`, `split_to_copy`) are at parity (~0.99–1.06): both materialise
+the same contiguous bytes, so the shared memcpy dominates and the rope's per-chunk drain overhead is in
+the noise. `clear` (1.30) sits with the per-chunk build/drain group — it drops the tree's per-node
+`Arc`s one level at a time where the deque drops a single contiguous buffer. `pop_back`/`pop_front` drain already use O(1) block-buffer adoption (the leading refill cost was
 removed); the residual is the tree's per-block `pop`/`Arc::get_mut` descent. `chunks_iter` is the one
 accepted exception (cache locality — see below). The levers that could shrink the deep build/drain
 gaps (a node arena, a single-allocation/DST leaf) each break a core guarantee (O(1) structural-sharing
