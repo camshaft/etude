@@ -17,5 +17,8 @@ etude-bytevec = { version = "0.1", path = "../etude-bytevec" }
 bytes = "1"
 
 [dev-dependencies]
+# Turn on etude-bytevec's invariant checker in this crate's tests, so every rope op composition the
+# harness drives is structurally validated at its source (cached counts, tiers, no empty chunks).
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", features = ["testing"] }
 bolero = "0.13"
 bolero-generator = "0.13"

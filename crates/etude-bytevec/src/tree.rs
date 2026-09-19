@@ -450,7 +450,7 @@ impl Node {
 
     /// Recursively validates node invariants, returning `(byte_len, chunk_count)`. `height` is the
     /// number of branch levels below/at this node (0 = leaf). Test-only.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     fn check_invariants(&self, height: u32) -> (usize, usize) {
         match self {
             Node::Leaf(b) => {
@@ -540,7 +540,7 @@ impl Tree {
 
     /// Validates the tree's structural invariants and cached sizes/counts against the actual nodes.
     /// Test-only.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn check_invariants(&self) {
         match &self.root {
             Some(root) => {
