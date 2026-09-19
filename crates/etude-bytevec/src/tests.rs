@@ -251,6 +251,29 @@ fn as_contiguous_borrows_when_single_chunk() {
     assert_eq!(s.as_contiguous(), Some(&b"hello"[..]));
 }
 
+/// `From<String>`/`From<&str>` build a `Rope<Utf8>` with no validation scan (the source type is
+/// valid utf-8 by construction), and `From<String>` reuses the buffer as a single chunk (a move).
+#[test]
+fn utf8_from_string_and_str_are_scanless_typed_ctors() {
+    let owned = String::from("héllo wörld");
+    let s = Rope::<Utf8>::from(owned.clone());
+    assert_eq!(&s.copy_to_bytes()[..], owned.as_bytes());
+    // moved into a single chunk (the String's own buffer), so a contiguous borrow is available
+    assert_eq!(s.as_contiguous(), Some(owned.as_bytes()));
+    assert_eq!(s.chunks().count(), 1);
+
+    let borrowed = Rope::<Utf8>::from("café");
+    assert_eq!(&borrowed.copy_to_bytes()[..], "café".as_bytes());
+    // agrees with the validated path on content
+    let via_validate =
+        Rope::<Utf8>::try_from_bytes(ByteVec::from("café".as_bytes().to_vec())).unwrap();
+    assert_eq!(borrowed.copy_to_bytes(), via_validate.copy_to_bytes());
+
+    // empty sources produce the empty rope
+    assert!(Rope::<Utf8>::from(String::new()).is_empty());
+    assert!(Rope::<Utf8>::from("").is_empty());
+}
+
 #[test]
 fn single_chunk_is_flat_and_allocation_light() {
     let mut rope = ByteVec::new();

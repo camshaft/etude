@@ -316,6 +316,21 @@ impl Rope<kind::Utf8> {
         }
     }
 
+    /// Wraps `bytes` as a UTF-8 rope without validating — a by-move field re-wrap, no scan.
+    ///
+    /// Private: the only callers are the [`From<String>`]/[`From<&str>`] impls below, whose source
+    /// type already carries the UTF-8 invariant, so validation would be redundant. It is safe (not
+    /// `unsafe`) precisely because it is not public — no caller can hand it invalid bytes.
+    #[inline]
+    fn from_valid_bytes(bytes: ByteVec) -> Self {
+        let ByteVec { len, repr, .. } = bytes;
+        Rope {
+            len,
+            repr,
+            _kind: PhantomData,
+        }
+    }
+
     /// Appends `bytes` at the end. **Infallible and caller-trusted**: `bytes` must be valid UTF-8
     /// (e.g. `&str::as_bytes()`). A valid-UTF-8 fragment appended after valid-UTF-8 content meets it
     /// on a codepoint boundary, so the rope's invariant is preserved. Empty input is a no-op.
@@ -349,6 +364,25 @@ impl Rope<kind::Utf8> {
         front.append_bytes(bytes);
         front.append(self);
         *self = front;
+    }
+}
+
+impl From<alloc::string::String> for Rope<kind::Utf8> {
+    /// Wraps a `String` as a UTF-8 rope by *moving* its buffer: one allocation reused (via
+    /// `Bytes::from(Vec<u8>)`), no copy and no validation scan — a `String` is valid UTF-8 by type,
+    /// so the kind invariant holds without checking. The zero-cost typed constructor.
+    #[inline]
+    fn from(s: alloc::string::String) -> Self {
+        Self::from_valid_bytes(ByteVec::from(Bytes::from(s.into_bytes())))
+    }
+}
+
+impl From<&str> for Rope<kind::Utf8> {
+    /// Wraps a `&str` as a UTF-8 rope with a single copy of its bytes and no validation scan (a
+    /// `&str` is valid UTF-8 by type, so the kind invariant holds without checking).
+    #[inline]
+    fn from(s: &str) -> Self {
+        Self::from_valid_bytes(ByteVec::from(Bytes::copy_from_slice(s.as_bytes())))
     }
 }
 
