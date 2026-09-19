@@ -823,7 +823,7 @@ impl Decimal {
     }
 
     /// Compare `|self|` against `|other|`. The caller ([`Decimal::compare`]) only reaches here with both
-    /// nonzero and of the SAME sign, which lets a signed [`etude_bigint::Big`] compare stand in for a
+    /// nonzero and of the same sign, which lets a signed [`etude_bigint::Big`] compare stand in for a
     /// magnitude compare (flipped for negatives) — no `abs()` clone. Exact and allocation-light.
     ///
     /// When the exponents are equal — the common case (same-scale decimals) — the magnitude order is
@@ -1254,8 +1254,9 @@ impl core::fmt::Display for Decimal {
     ///
     /// # Format flags
     /// Honors the `Formatter` **padding** flags — width, fill, alignment, the `+` sign flag, and sign-aware
-    /// zero-padding — via [`Formatter::pad_integral`] (the value's magnitude is padded as a single integral
-    /// field, e.g. `{:>8}` on `3.14` → `"    3.14"`, `{:+}` → `"+3.14"`, `{:08}` → `"00003.14"`, `{:08}` on
+    /// zero-padding — via [`Formatter::pad_integral`](core::fmt::Formatter::pad_integral) (the value's
+    /// magnitude is padded as a single integral field, e.g. `{:>8}` on `3.14` → `"    3.14"`, `{:+}` →
+    /// `"+3.14"`, `{:08}` → `"00003.14"`, `{:08}` on
     /// `-0.5` → `"-00000.5"`). **Precision is ignored** — `{:.N}` cannot mean "`N` fractional digits"
     /// without silently choosing a rounding, and this crate never rounds without an explicit
     /// [`RoundingMode`] (use [`Decimal::div_round`], or render and reformat). This is the shared contract
