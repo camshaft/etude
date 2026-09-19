@@ -232,3 +232,8 @@ not addressable locally; re-bench on each etude-bigint render land.
   `u64` hardware-divide gcd avoids a libcall per Euclidean step. `from_ratio_i64` 0.18 µs → **0.12 µs**
   (0.16× → **0.103×**, ~9.7× faster than num-rational); no regression on the u128-path native arithmetic
   (`mul_i64`/`add_i64` products exceed `u64`, so they keep the `u128` gcd).
+- **slice 20** — `cross_reduce_mul` (the `mul`/`div` `Big` path) borrows via `Cow` instead of cloning each
+  factor when its cross-gcd is 1 (the common coprime case for random operands): removes 4 needless `Big`
+  clones per `mul`/`div`, allocating only the two products. Wall-clock is neutral at the gcd/mul-dominated
+  large tiers and ~1% better at 64b (where the 1-limb clones are the largest fraction); the win is the
+  reduced allocation count / allocator pressure. No regression on any tier.
