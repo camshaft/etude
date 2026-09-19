@@ -414,6 +414,60 @@ fn bench_replace(c: &mut Criterion) {
     }
 }
 
+/// `Builder` head-to-head: the buffered-construction path that is part of the bytevec-compat surface.
+/// Two shapes at both sizes — `put_bytes` (zero-copy chunk hand-off, held by reference) and
+/// `put_slice` (copy into the contiguous head buffer) — each finishing to the owned buffer. Builders
+/// are constructed fresh per iteration; the shared chunk template is cloned (cheap `Bytes` handles).
+fn bench_builder(c: &mut Criterion) {
+    use etude_buffer::writer::Buffer as _;
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let template: Vec<Bytes> = (0..n).map(|i| mtu_chunk(i as u8)).collect();
+
+        let mut g = group(c, "builder_put_bytes");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| {
+                let mut bld = ByteRope::builder(1 << 14);
+                for ch in &template {
+                    bld.put_bytes(ch.clone());
+                }
+                black_box(bld.finish())
+            })
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| {
+                let mut bld = ByteVec::builder(1 << 14);
+                for ch in &template {
+                    bld.put_bytes(ch.clone());
+                }
+                black_box(bld.finish())
+            })
+        });
+        g.finish();
+
+        let mut g = group(c, "builder_put_slice");
+        g.bench_function(BenchmarkId::new("ByteRope", label), |b| {
+            b.iter(|| {
+                let mut bld = ByteRope::builder(1 << 14);
+                for ch in &template {
+                    bld.put_slice(ch);
+                }
+                black_box(bld.finish())
+            })
+        });
+        g.bench_function(BenchmarkId::new("ByteVec", label), |b| {
+            b.iter(|| {
+                let mut bld = ByteVec::builder(1 << 14);
+                for ch in &template {
+                    bld.put_slice(ch);
+                }
+                black_box(bld.finish())
+            })
+        });
+        g.finish();
+    }
+}
+
 fn byte_via_walk(v: &ByteVec, mut offset: usize) -> Option<u8> {
     for chunk in v.chunks() {
         if offset < chunk.len() {
@@ -436,6 +490,7 @@ criterion_group!(
     bench_get,
     bench_slice,
     bench_set_byte,
-    bench_replace
+    bench_replace,
+    bench_builder
 );
 criterion_main!(benches);
