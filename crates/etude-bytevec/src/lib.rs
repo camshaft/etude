@@ -2807,15 +2807,21 @@ impl std::io::Write for ByteVec {
 
 impl ByteVec {
     /// Flattens the rope into a single [`bytes::BytesMut`], consuming it. Zero-copy when there is a
-    /// single chunk; otherwise copies. Prefer [`ByteVec::chunks`] when you only need to read.
+    /// single, uniquely-owned chunk — its allocation is reclaimed in place; otherwise copies. Prefer
+    /// [`ByteVec::chunks`] when you only need to read.
     pub fn copy_to_bytes_mut(self) -> bytes::BytesMut {
         if self.len == 0 {
             return bytes::BytesMut::new();
         }
-        if let Repr::Small { head, additional } = &self.repr
-            && additional.is_empty()
-        {
-            return bytes::BytesMut::from(head.clone());
+        // Single chunk: move it out by value (self is consumed) so `BytesMut::from` can reclaim its
+        // allocation when the chunk is uniquely owned. Cloning it (as this once did) forced the
+        // refcount to 2, so `From<Bytes>` could never reclaim and the documented zero-copy path always
+        // copied.
+        if matches!(&self.repr, Repr::Small { additional, .. } if additional.is_empty()) {
+            let Repr::Small { head, .. } = self.repr else {
+                unreachable!("matched Small just above")
+            };
+            return bytes::BytesMut::from(head);
         }
         let mut out = bytes::BytesMut::with_capacity(self.len);
         self.extend_into(&mut out);
