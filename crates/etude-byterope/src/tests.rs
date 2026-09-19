@@ -1133,3 +1133,38 @@ fn trait_impl_parity_with_bytevec() {
     let io_err: std::io::Error = ByteRopeError::OutOfBounds(7).into();
     assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
 }
+
+mod bytevec_tag_alias {
+    // The bytevec-compat macro alias must expand against byterope unchanged.
+    crate::static_bytevec_tag!(crate::tagged);
+}
+
+/// The `etude_bytevec` name aliases resolve to the byterope types (superset drop-in): a consumer
+/// swapping only the Cargo dep uses `ByteVec` / `ByteVecError` / `ChunkIter` / `DrainIter` /
+/// `static_bytevec_tag!` unchanged.
+#[test]
+fn bytevec_name_aliases_resolve() {
+    // ByteVec == ByteRope
+    let v: crate::ByteVec = crate::ByteVec::from(b"hello");
+    assert_eq!(v, b"hello");
+
+    // ByteVecError == ByteRopeError
+    let e: crate::ByteVecError = crate::ByteVecError::OutOfBounds(3);
+    assert_eq!(e, ByteRopeError::OutOfBounds(3));
+
+    // ChunkIter<'_> == Chunks<'_>
+    let rope: ByteRope = [chunk(b"ab"), chunk(b"cd")].into_iter().collect();
+    let it: crate::ChunkIter<'_> = rope.chunks();
+    assert_eq!(it.count(), 2);
+
+    // DrainIter == IntoChunks
+    let di: crate::DrainIter = rope.into_iter();
+    assert_eq!(di.count(), 2);
+
+    // static_bytevec_tag! machinery tracks the byte budget, like bytevec's.
+    let tagged: Tagged<bytevec_tag_alias::Tag> =
+        ByteRope::from(b"hi!").tag(&bytevec_tag_alias::Tag);
+    assert_eq!(bytevec_tag_alias::Tag::current(), 3);
+    drop(tagged);
+    assert_eq!(bytevec_tag_alias::Tag::current(), 0);
+}
