@@ -47,6 +47,23 @@ impl StrRope {
         Rope::<Utf8>::try_from_bytes(bytes).map(Self)
     }
 
+    /// Wraps `bytes` as a `StrRope` **without validating** — O(1)-structural (a by-move re-wrap, no
+    /// scan), unlike the O(n) [`from_utf8`](Self::from_utf8). For a producer that has already validated
+    /// the content (a tokenizer, a trusted codec) this skips a redundant UTF-8 scan; the rope structure
+    /// moves as-is with no copy.
+    ///
+    /// # Safety
+    /// The concatenated byte content of `bytes` must be valid UTF-8. The invariant is over the
+    /// *concatenation*, not per chunk — a codepoint may span a chunk boundary. Passing content that is
+    /// not valid UTF-8 is undefined behavior: `StrRope`'s char-boundary operations, and any future
+    /// zero-copy `&str` view of the content, rely on this invariant and would act on invalid UTF-8.
+    #[must_use]
+    pub unsafe fn from_utf8_unchecked(bytes: ByteVec) -> Self {
+        // SAFETY: the caller guarantees `bytes`' concatenated content is valid UTF-8, which is exactly
+        // the invariant `Rope::<Utf8>::from_bytes_unchecked` requires (it debug-asserts it in debug/test).
+        Self(unsafe { Rope::<Utf8>::from_bytes_unchecked(bytes) })
+    }
+
     /// Converts into the underlying [`ByteVec`] — **free** (drops the zero-size kind marker; the rope
     /// representation moves as-is, no copy).
     #[inline]
@@ -998,6 +1015,25 @@ mod tests {
         let mut bv = ByteVec::default();
         bv.push_back(bytes::Bytes::from_static(&[0xFF, 0xFE]));
         assert!(StrRope::from_utf8(bv).is_err());
+    }
+
+    #[test]
+    fn from_utf8_unchecked_matches_from_utf8_for_valid_content() {
+        // For valid UTF-8 the unchecked ctor must produce the same StrRope as the checked one, across
+        // chunk layouts (including codepoints straddling boundaries) — it skips only the O(n) scan, not
+        // the structure. The bytevec invariant checker (features=["testing"]) validates each built rope.
+        let text = "aé🦀z—ß本\u{10FFFF}";
+        for size in 1..=6 {
+            let mut bv = ByteVec::default();
+            for piece in text.as_bytes().chunks(size) {
+                bv.push_back(bytes::Bytes::copy_from_slice(piece));
+            }
+            let checked = StrRope::from_utf8(bv.clone()).unwrap();
+            // SAFETY: `bv` holds the bytes of a valid `&str`, so its concatenation is valid UTF-8.
+            let unchecked = unsafe { StrRope::from_utf8_unchecked(bv) };
+            assert_eq!(checked, unchecked, "content mismatch at chunk size {size}");
+            assert_eq!(unchecked, text, "unchecked vs str at chunk size {size}");
+        }
     }
 
     #[test]
