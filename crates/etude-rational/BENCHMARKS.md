@@ -35,6 +35,12 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | recip      | 64b    | 29.7 ns   | 14.5 ns      | 2.04      |
 | recip      | 256b   | 29.3 ns   | 32.2 ns      | **0.91**  |
 | recip      | 1024b  | 32.1 ns   | 34.7 ns      | **0.93**  |
+| neg        | 64b    | 25.8 ns   | 17.1 ns      | 1.51      |
+| neg        | 256b   | 24.0 ns   | 26.7 ns      | **0.90**  |
+| neg        | 1024b  | 25.4 ns   | 30.6 ns      | **0.83**  |
+| abs        | 64b    | 25.6 ns   | 16.1 ns      | 1.59      |
+| abs        | 256b   | 23.8 ns   | 34.8 ns      | **0.69**  |
+| abs        | 1024b  | 25.5 ns   | 37.3 ns      | **0.68**  |
 | normalize  | 64b    | 894 ns    | 1.22 µs      | **0.74**  |
 | normalize  | 256b   | 4.16 µs   | 4.97 µs      | **0.84**  |
 | normalize  | 1024b  | 24.8 µs   | 24.5 µs      | 1.01      |
@@ -53,8 +59,11 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 now a win at every tier (the 1024b cell crossed 1.06× → 0.90×). The only non-wins left are at parity or
 minor:
 
-1. **`recip` @64b — 2.04× (clone-bound).** recip is already O(limbs) (gcd-free swap+sign); at 64b the two
-   small `Vec` clones dominate. A clone/alloc-avoiding path could reach parity. Minor.
+1. **`recip`/`neg`/`abs` @64b — 1.5–2.0× (clone-bound).** All three are O(limbs) sign/swap ops that only
+   clone the components; at 64b the small `Big` clone dominates, and etude-bigint's 1-limb `Big` clone is
+   ~2× num-bigint's (its deferred inline-repr item). All three WIN at 256b and above (num-rational's clone
+   grows with size while ours stays ~flat). A single etude-bigint small-`Big` inline representation would
+   close `recip`/`neg`/`abs`@64b together — not locally addressable.
 2. **`normalize`/`add_eqden` @1024b — ~1.00 (parity), ~1.10× @4096b.** Both bottom out on a single large
    gcd; parity with num-rational's Stein gcd at 1024b, a slight loss at 4096b. The double-word-Lehmer/HGCD
    headroom in etude-bigint is deferred (a narrow, acceptable gap — see the coordination note in the log).
@@ -120,18 +129,18 @@ push the gcd-bound `normalize`/`add_eqden`@≥1024b parity cells below 1.0.
 
 | tier  | etude    | num-rational | ratio    |
 |-------|----------|--------------|----------|
-| 64b   | 201 ns   | 293 ns       | **0.69** |
-| 256b  | 664 ns   | 682 ns       | **0.97** |
-| 1024b | 7.50 µs  | 4.66 µs      | 1.61     |
-| 2048b | 18.3 µs  | 18.1 µs      | 1.01     |
-| 4096b | 48.3 µs  | 42.4 µs      | 1.14     |
+| 64b   | 199 ns   | 307 ns       | **0.65** |
+| 256b  | 667 ns   | 683 ns       | **0.98** |
+| 1024b | 7.14 µs  | 4.66 µs      | 1.53     |
+| 2048b | 16.8 µs  | 18.1 µs      | **0.93** |
+| 4096b | 44.0 µs  | 42.5 µs      | 1.04     |
 
-**64b and 256b are now WINS** — the 256b crossing (1.36× → 0.97×) was banked by etude-bigint's
-reciprocal-`÷10^19` `to_decimal` peel (#115), which removed the per-chunk `u128` divide libcall. The
-1024b/4096b tiers remain ~1.1–1.6× losses because the peel is still **O(n²)** (each `÷10^19` chunk is an
-O(n) big-divide, repeated O(n) times); closing them needs a **subquadratic (divide-and-conquer)
-`to_decimal`** in etude-bigint (their next render slice), not a further constant-factor peel. Render is
-bignum-render-bound — not addressable locally; re-bench on each etude-bigint render land.
+**64b/256b/2048b are WINS**; 1024b/4096b are the last render losses (1.53×, 1.04×). etude-bigint's
+reciprocal-`÷10^19` peel (#115) banked the 256b crossing, and the qhat-reciprocal Knuth divmod (#127) —
+which speeds the recursive `to_decimal`'s per-digit big-divide — moved 4096b 1.14× → 1.04× (near parity)
+and 2048b below 1.0. The residual 1024b/4096b gap is now the recursive `to_decimal`'s own constant factors
+(the power-stack `10^k` squarings), which etude-bigint is attacking next. Render is bignum-render-bound —
+not addressable locally; re-bench on each etude-bigint render land.
 
 ## History
 
@@ -184,3 +193,8 @@ bignum-render-bound — not addressable locally; re-bench on each etude-bigint r
   nothing and, when the integer parts differ (the common case), decides with zero operand clones. Only a
   same-integer-part tie recurses (cloning the two denominators once, via `cmp_magnitude_owned`). `abs` is
   taken only when both operands are negative. `cmp` now wins every tier; no regression (64b 0.93, 256b 0.65).
+- **slice 17** — benchmark-coverage backfill (operator directive: *every* function benchmarked) + board
+  refresh. Added differential `neg`/`abs` benches — both WIN at 256b+ but are clone-bound losses at 64b
+  (neg 1.51×, abs 1.59×), the same etude-bigint small-`Big`-clone root as recip@64b. Refreshed the render
+  board after etude-bigint's qhat-reciprocal divmod (#127): render 4096b 1.14× → 1.04×, 2048b crossed below
+  1.0. No code change to the library; measured deltas only.
