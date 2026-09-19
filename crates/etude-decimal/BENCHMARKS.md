@@ -251,19 +251,20 @@ mantissa), so it has its own cell — `12345678.9012345` (15 significant digits)
 against; this tracks the canonicalization cost (coefficient carries ≥6 trailing zeros to exercise the
 strip). `iter_batched` clones the input in unmeasured setup so only `new` is timed.
 
-| tier | etude |
-|------|------:|
-| 64b   | 146.0 ns |
-| 256b  | 186.9 ns |
-| 1024b | 371.5 ns |
-| 2048b | 463.1 ns |
-| 4096b | 817.2 ns |
+| tier | etude (before) | etude (now) |
+|------|---------------:|------------:|
+| 64b   | 146.0 ns | 70.2 ns |
+| 256b  | 186.9 ns | 142.9 ns |
+| 1024b | 371.5 ns | 371.5 ns |
+| 2048b | 463.1 ns | 463.1 ns |
+| 4096b | 817.2 ns | 817.2 ns |
 
-The 2048b/4096b cells rose slightly (`+9%`/`+8%`) when the divisibility check moved to `last_decimal_digit`:
-this bench always strips (its coefficient is built with ≥6 trailing zeros), so on that path the strip now
-pays both the cheap last-digit check *and* the `rem_u64(10^9)` peek. It is a worst case — a real value ends
-in zero only ~10% of the time, and every non-stripping construction (and every `add`/`sub`/`mul` result)
-now takes the cheap check and gets faster (see the arithmetic tiers).
+A coefficient that fits `i128` now strips its trailing zeros in native `u128` arithmetic (no `Big`
+remainder/divide), so `64b` construction with trailing zeros nearly halves (`146 → 70 ns`) — the common
+small decimal (a price/measurement like `1.50` parsed to `150` then stripped). Wider coefficients (`1024b`+)
+still take the chunked `Big` strip and are unchanged. (The `2048b`/`4096b` cells carry the earlier
+`+8–9%` from moving the divisibility check to `last_decimal_digit`; that trade favors the far more common
+non-stripping result, which takes the cheap check — see the arithmetic tiers.)
 
 ### Coverage
 

@@ -129,13 +129,13 @@ impl Decimal {
     ///
     /// The hot path is the reject: a coefficient not divisible by ten is already canonical, and
     /// divisibility by ten requires an even coefficient, so [`etude_bigint::Big::is_odd`] (`O(1)`) returns
-    /// half of all results with no work at all. The rest test the last decimal digit with
-    /// [`etude_bigint::Big::last_decimal_digit`] — a limb-sum reduction (`2^64 ≡ 6 mod 10`), several times
-    /// cheaper than a full reciprocal remainder — and an even coefficient whose last digit is nonzero is
-    /// already canonical and returns. Only a coefficient that actually ends in zero peeks the low nine
-    /// digits (a single allocation-free [`etude_bigint::Big::rem_u64`]`(10^9)`, now paid on just that
-    /// fraction) to size the strip: its trailing-zero count is the coefficient's remaining one, so the strip
-    /// is a single [`etude_bigint::Big::divmod_u64`]`(10^tz)`. A run of nine or more zeros strips whole
+    /// half of all results with no work at all. A coefficient that fits `i128` — the common small decimal
+    /// (a price/measurement like `1.50`) — then strips its trailing zeros entirely in native `u128`
+    /// arithmetic, with no `Big` remainder or divide. Only a wider coefficient falls to the `Big` path:
+    /// it tests the last decimal digit with [`etude_bigint::Big::last_decimal_digit`] (a limb-sum reduction,
+    /// `2^64 ≡ 6 mod 10`, several times cheaper than a full reciprocal remainder), and only one that ends in
+    /// zero peeks the low nine digits (a single allocation-free [`etude_bigint::Big::rem_u64`]`(10^9)`) to
+    /// size a single [`etude_bigint::Big::divmod_u64`]`(10^tz)`; a run of nine or more zeros strips whole
     /// `10^9` chunks in a loop, so trailing-zero removal is `O(zeros / 9)` divides.
     fn normalize(&mut self) {
         if self.coeff.is_zero() {
@@ -147,6 +147,26 @@ impl Decimal {
         loop {
             // Not divisible by 2 ⇒ not by 10 ⇒ already canonical. O(1), no division.
             if self.coeff.is_odd() {
+                return;
+            }
+            // Native fast path for a small coefficient: one that fits `i128` strips its trailing zeros with
+            // native `u128` divides — no `Big` remainder or divide at all. This is the common small decimal
+            // (a price or measurement such as `1.50`, parsed to `150` and stripped to `15`), and mirrors
+            // `etude-rational`'s small-value normalize (#222). A wider coefficient falls through to the
+            // chunked `Big` strip below.
+            if let Some(v) = self.coeff.to_i128_checked() {
+                if !v.unsigned_abs().is_multiple_of(10) {
+                    return; // even but not a multiple of ten → already canonical
+                }
+                let neg = v < 0;
+                let mut m = v.unsigned_abs();
+                let mut e = self.exp;
+                while m.is_multiple_of(10) && e < i64::MAX {
+                    m /= 10;
+                    e += 1;
+                }
+                self.coeff = Big::from_i128(if neg { -(m as i128) } else { m as i128 });
+                self.exp = e;
                 return;
             }
             // Divisibility by ten from the last decimal digit alone — a cheap limb-sum reduction, not the
