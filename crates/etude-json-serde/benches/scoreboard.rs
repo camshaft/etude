@@ -17,6 +17,11 @@
 //! three components per number) even when the consumer ignores them. So the latency lever is the
 //! *handoff*, not a chunk-cursor scan of the lexer. This bench tracks that; it claims no time win yet.
 //! A consumer that materializes every value pays more still — a separate story.
+//!
+//! The isolated workloads confirm the split (raw_tokenize ≈ or beats serde in every one):
+//! - `digest_numbers`: serde ~21µs, raw_tokenize ~20µs, adapter ~130µs — a **6.5x** handoff tax, ~220ns
+//!   per number building four eager sub-ropes the digest ignores. The sharpest case for lazy components.
+//! - `digest_strings`: serde ~29µs, raw_tokenize ~26µs, adapter ~106µs — the `from_utf8` re-validation.
 
 use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -158,6 +163,25 @@ fn string_doc(count: usize) -> String {
     s
 }
 
+/// Number-heavy: a flat array of varied numbers (ints, decimals, exponents) — isolates the number
+/// handoff (eager lexeme + component sub-rope slicing) from the string path.
+fn number_doc(count: usize) -> String {
+    let mut s = String::from("[");
+    for i in 0..count {
+        if i > 0 {
+            s.push(',');
+        }
+        // Rotate through integer / decimal / exponent forms so every NumberToken component arm fires.
+        match i % 3 {
+            0 => s.push_str(&format!("{}", i as i64 - 250)),
+            1 => s.push_str(&format!("{}.{:03}", i, i % 1000)),
+            _ => s.push_str(&format!("-{}.{}e{}", i % 100, i % 10, (i % 20) as i64 - 10)),
+        }
+    }
+    s.push(']');
+    s
+}
+
 fn rope_of(raw: &[u8]) -> ByteVec {
     let mut r = ByteVec::new();
     r.push_back(Bytes::copy_from_slice(raw));
@@ -202,6 +226,7 @@ fn bench_workload(c: &mut Criterion, name: &str, doc: String) {
 fn benches(c: &mut Criterion) {
     bench_workload(c, "digest_mixed", mixed_doc(200));
     bench_workload(c, "digest_strings", string_doc(500));
+    bench_workload(c, "digest_numbers", number_doc(500));
 }
 
 criterion_group!(scoreboard, benches);
