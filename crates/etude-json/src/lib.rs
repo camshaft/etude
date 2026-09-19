@@ -259,17 +259,9 @@ impl<'a> Cursor<'a> {
             pos: 0,
             base: 0,
         };
-        // Prime with the first non-empty leaf (empty leaves carry no bytes and no offset).
-        loop {
-            match cursor.chunks.next() {
-                Some(next) if !next.is_empty() => {
-                    cursor.chunk = &next[..];
-                    break;
-                }
-                Some(_) => {}
-                None => break,
-            }
-        }
+        // Prime with the first non-empty leaf (empty leaves carry no bytes and no offset). `refill`
+        // over the empty initial `chunk` adds 0 to `base` and finds the first non-empty leaf.
+        cursor.refill();
         cursor
     }
 
@@ -283,23 +275,45 @@ impl<'a> Cursor<'a> {
         self.base + self.pos
     }
 
+    /// The unread bytes of the current leaf (empty when exhausted). Borrows the input, not `self`,
+    /// so a caller can scan it and then mutate the cursor (e.g. [`Cursor::skip_in_chunk`]).
+    fn chunk_tail(&self) -> &'a [u8] {
+        &self.chunk[self.pos..]
+    }
+
     /// Advance past the current byte. The caller must have observed a byte via [`Cursor::peek`]
     /// first (so `pos < chunk.len()`); at a leaf boundary this refills to the next non-empty leaf.
     fn bump(&mut self) {
         self.pos += 1;
         if self.pos >= self.chunk.len() {
-            self.base += self.chunk.len();
-            self.pos = 0;
-            self.chunk = &[];
-            loop {
-                match self.chunks.next() {
-                    Some(next) if !next.is_empty() => {
-                        self.chunk = &next[..];
-                        break;
-                    }
-                    Some(_) => {}
-                    None => break,
+            self.refill();
+        }
+    }
+
+    /// Advance `k` bytes within the current leaf. The caller guarantees `k <= chunk_tail().len()`
+    /// (the skip stays inside the current leaf); refills when it lands exactly at the leaf end. This
+    /// is the bulk path: a run of ordinary bytes is skipped in one step instead of `k` `bump`s.
+    fn skip_in_chunk(&mut self, k: usize) {
+        self.pos += k;
+        if self.pos >= self.chunk.len() {
+            self.refill();
+        }
+    }
+
+    /// Move to the next non-empty leaf (or the exhausted state), crediting the leaving leaf's whole
+    /// length to `base` so [`Cursor::offset`] stays absolute.
+    fn refill(&mut self) {
+        self.base += self.chunk.len();
+        self.pos = 0;
+        self.chunk = &[];
+        loop {
+            match self.chunks.next() {
+                Some(next) if !next.is_empty() => {
+                    self.chunk = &next[..];
+                    break;
                 }
+                Some(_) => {}
+                None => break,
             }
         }
     }
@@ -360,15 +374,32 @@ impl<'a> Tokenizer<'a> {
         self.cursor.bump(); // past the opening quote
         let mut has_escapes = false;
         loop {
-            let b = match self.cursor.peek() {
-                Some(b) => b,
+            // Bulk-skip a run of ordinary bytes within the current leaf up to the next significant
+            // byte (`"`, `\`, or a control byte `< 0x20`). This one contiguous-slice scan replaces a
+            // per-byte peek/bump over ordinary content — the dominant cost on large strings.
+            let tail = self.cursor.chunk_tail();
+            match tail
+                .iter()
+                .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
+            {
+                Some(k) => self.cursor.skip_in_chunk(k),
                 None => {
-                    return Err(Error {
-                        offset: start,
-                        kind: ErrorKind::UnterminatedString,
-                    });
+                    if tail.is_empty() {
+                        return Err(Error {
+                            offset: start,
+                            kind: ErrorKind::UnterminatedString,
+                        });
+                    }
+                    // No significant byte in this leaf — skip to its end, continue in the next leaf.
+                    self.cursor.skip_in_chunk(tail.len());
+                    continue;
                 }
-            };
+            }
+            // The cursor now rests on a significant byte.
+            let b = self
+                .cursor
+                .peek()
+                .expect("skip landed on a significant byte");
             match b {
                 b'"' => {
                     let content = Span {
@@ -423,13 +454,13 @@ impl<'a> Tokenizer<'a> {
                         }
                     }
                 }
-                0x00..=0x1F => {
+                // `position` stops on nothing else, so the remaining case is a control byte `< 0x20`.
+                _ => {
                     return Err(Error {
                         offset: self.cursor.offset(),
                         kind: ErrorKind::ControlCharInString,
                     });
                 }
-                _ => self.cursor.bump(),
             }
         }
     }
