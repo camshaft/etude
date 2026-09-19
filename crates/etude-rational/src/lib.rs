@@ -241,16 +241,21 @@ impl Rational {
     /// `None` (fall back to the `Big` path) when any component exceeds `i64`. `self`/`other` are nonzero
     /// (the `mul` zero-guard ran first) and canonical, so `b, d > 0`.
     fn mul_small(&self, other: &Rational) -> Option<Rational> {
-        let a = self.num.to_i64_checked()? as i128;
-        let b = self.den.to_i64_checked()? as i128;
-        let c = other.num.to_i64_checked()? as i128;
-        let d = other.den.to_i64_checked()? as i128;
-        let num = a * c;
-        let den = b * d; // b, d > 0 ⇒ den > 0
-        let g = gcd_u128(num.unsigned_abs(), den as u128) as i128; // g >= 1
+        let a = self.num.to_i64_checked()?;
+        let b = self.den.to_i64_checked()?;
+        let c = other.num.to_i64_checked()?;
+        let d = other.den.to_i64_checked()?;
+        // Cross-reduce on the i64 ORIGINALS (`gcd(a,d)`, `gcd(c,b)`) rather than one gcd over the ~126-bit
+        // products: `a`/`b` and `c`/`d` are canonical (coprime), so cancelling the cross-pairs leaves the
+        // result already in lowest terms — and the gcds run on u64 (hardware divide) instead of u128 (an
+        // `__umodti3` libcall on aarch64). `b, d > 0`; `a, c` nonzero (the `mul` zero-guard ran first).
+        let g1 = gcd_u64(a.unsigned_abs(), d.unsigned_abs()) as i64; // gcd(|a|, d)
+        let g2 = gcd_u64(c.unsigned_abs(), b.unsigned_abs()) as i64; // gcd(|c|, b)
+        let num = (a / g1) as i128 * (c / g2) as i128; // |·| <= 2^126, no overflow
+        let den = (b / g2) as i128 * (d / g1) as i128; // b, d > 0 ⇒ den > 0
         Some(Rational {
-            num: big_from_i128(num / g),
-            den: big_from_i128(den / g),
+            num: big_from_i128(num),
+            den: big_from_i128(den),
         })
     }
 
@@ -283,20 +288,25 @@ impl Rational {
     /// `div` caller). `a*d` and `b*c` fit `i128`, so no overflow; the divisor's numerator `c` may be
     /// negative, so the sign is moved onto the numerator. Returns `None` to fall back to the `Big` path.
     fn div_small(&self, other: &Rational) -> Option<Rational> {
-        let a = self.num.to_i64_checked()? as i128;
-        let b = self.den.to_i64_checked()? as i128;
-        let c = other.num.to_i64_checked()? as i128;
-        let d = other.den.to_i64_checked()? as i128;
-        let mut num = a * d;
-        let mut den = b * c; // b > 0, c != 0 ⇒ sign(den) = sign(c)
+        let a = self.num.to_i64_checked()?;
+        let b = self.den.to_i64_checked()?;
+        let c = other.num.to_i64_checked()?;
+        let d = other.den.to_i64_checked()?;
+        // `a/b ÷ c/d = a*d / (b*c)`. Cross-reduce on the i64 originals (`gcd(a,c)`, `gcd(d,b)`) — u64 gcds,
+        // no gcd over the 126-bit product (see [`Rational::mul_small`]). `b, d > 0`; `a, c` nonzero (the
+        // `div` guards ran first). The divisor numerator `c` may be negative, so the sign is moved onto
+        // the numerator.
+        let g1 = gcd_u64(a.unsigned_abs(), c.unsigned_abs()) as i64; // gcd(|a|, |c|)
+        let g2 = gcd_u64(d.unsigned_abs(), b.unsigned_abs()) as i64; // gcd(d, b)
+        let mut num = (a / g1) as i128 * (d / g2) as i128;
+        let mut den = (b / g2) as i128 * (c / g1) as i128; // sign(den) = sign(c)
         if den < 0 {
             num = -num;
             den = -den;
         }
-        let g = gcd_u128(num.unsigned_abs(), den as u128) as i128; // g >= 1
         Some(Rational {
-            num: big_from_i128(num / g),
-            den: big_from_i128(den / g),
+            num: big_from_i128(num),
+            den: big_from_i128(den),
         })
     }
 
