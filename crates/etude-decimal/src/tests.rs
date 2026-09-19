@@ -299,19 +299,31 @@ fn checked_integer_extraction() {
 }
 
 #[test]
-fn display_renders_canonical_and_ignores_format_flags() {
-    // Contract (matching num-rational): Display streams the canonical form and ignores width / fill /
-    // alignment / sign / zero-padding / precision flags. `{:>8.2}` renders identically to `{}`.
-    for s in ["3.14", "-0.001", "1500", "0", "42", "12345678.9012345"] {
-        let d = Decimal::from_str(s).unwrap();
-        let plain = format!("{d}");
-        assert_eq!(plain, d.to_string(), "{s}");
-        assert_eq!(format!("{d:>8}"), plain, "{s} width ignored");
-        assert_eq!(format!("{d:08}"), plain, "{s} zero-pad ignored");
-        assert_eq!(format!("{d:+}"), plain, "{s} sign flag ignored");
-        assert_eq!(format!("{d:.2}"), plain, "{s} precision ignored");
-        assert_eq!(format!("{d:^12.4}"), plain, "{s} align+precision ignored");
-    }
+fn display_honors_padding_ignores_precision() {
+    // Shared contract with etude-rational: Display honors the padding flags via `pad_integral`
+    // (width / fill / alignment / `+` / sign-aware zero-pad) but ignores precision.
+    let d = Decimal::from_str("3.14").unwrap();
+    assert_eq!(format!("{d}"), "3.14");
+    assert_eq!(format!("{d:>8}"), "    3.14"); // width, right-aligned (numeric default)
+    assert_eq!(format!("{d:<8}"), "3.14    "); // left-aligned
+    assert_eq!(format!("{d:^8}"), "  3.14  "); // centered
+    assert_eq!(format!("{d:*>8}"), "****3.14"); // custom fill
+    assert_eq!(format!("{d:08}"), "00003.14"); // sign-aware zero-pad
+    assert_eq!(format!("{d:+}"), "+3.14"); // explicit sign
+    assert_eq!(format!("{d:.2}"), "3.14"); // precision ignored (no silent rounding)
+    assert_eq!(format!("{d:>8.2}"), "    3.14"); // padding honored, precision ignored
+
+    // Sign handling on a negative value: the `-` leads, zero-pad fills between it and the digits.
+    let n = Decimal::from_str("-0.5").unwrap();
+    assert_eq!(format!("{n}"), "-0.5");
+    assert_eq!(format!("{n:08}"), "-00000.5");
+    assert_eq!(format!("{n:+}"), "-0.5"); // already negative; `+` only affects non-negatives
+    assert_eq!(format!("{n:>8}"), "    -0.5");
+
+    // A bare integer value pads as a plain integral field.
+    let i = Decimal::from_str("42").unwrap();
+    assert_eq!(format!("{i:05}"), "00042");
+    assert_eq!(format!("{i:+06}"), "+00042");
 }
 
 #[test]

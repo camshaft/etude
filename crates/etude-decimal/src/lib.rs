@@ -1120,17 +1120,31 @@ fn fold_digits(ds: &[u8]) -> u64 {
 }
 
 impl core::fmt::Display for Decimal {
-    /// Renders the canonical decimal form (see [`Decimal::write_to`]). Like `num-rational`'s numeric
-    /// `Display`, this streams the digits straight into the formatter and **does not honor format flags** —
-    /// width, fill, alignment, sign (`+`), zero-padding, and precision (`{:.N}`) are ignored, so
-    /// `format!("{:>8.2}", d)` renders exactly the same string as `format!("{}", d)`. Honoring flags would
-    /// require buffering the whole rendering (defeating the zero-allocation streaming path) and a deliberate
-    /// choice of precision semantics for a decimal (`N` fractional digits, not a character truncation);
-    /// it is deferred until a consumer needs it. To pad or align, render to a `String` first and format
-    /// that.
+    /// Renders the canonical decimal form (see [`Decimal::write_to`]).
+    ///
+    /// # Format flags
+    /// Honors the `Formatter` **padding** flags — width, fill, alignment, the `+` sign flag, and sign-aware
+    /// zero-padding — via [`Formatter::pad_integral`] (the value's magnitude is padded as a single integral
+    /// field, e.g. `{:>8}` on `3.14` → `"    3.14"`, `{:+}` → `"+3.14"`, `{:08}` → `"00003.14"`, `{:08}` on
+    /// `-0.5` → `"-00000.5"`). **Precision is ignored** — `{:.N}` cannot mean "`N` fractional digits"
+    /// without silently choosing a rounding, and this crate never rounds without an explicit
+    /// [`RoundingMode`] (use [`Decimal::div_round`], or render and reformat). This is the shared contract
+    /// with [`etude-rational`](https://crates.io/crates/etude-rational), matching `num`'s numeric `Display`.
+    ///
+    /// The common flag-free case (`"{}"`, `to_string`) keeps a zero-allocation fast path, streaming the
+    /// digits straight into the sink; only a flagged format renders to a scratch `String` first (which
+    /// `pad_integral` requires, since it needs the whole magnitude).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // The Formatter is itself a `core::fmt::Write` sink — write straight into it, no String.
-        self.write_to(f)
+        // Fast path: no width/sign/zero-pad flag ⇒ nothing to pad, so stream with no allocation. (Fill and
+        // alignment are inert without a width; precision does not apply — see above.)
+        if f.width().is_none() && !f.sign_plus() && !f.sign_aware_zero_pad() {
+            return self.write_to(f);
+        }
+        // A padding flag is set: render the UNSIGNED magnitude to a scratch buffer, then let `pad_integral`
+        // apply the sign, width, fill, alignment, `+`, and sign-aware zero-padding (matching etude-rational).
+        let mut buf = alloc::string::String::new();
+        let _ = self.abs().write_to(&mut buf);
+        f.pad_integral(!self.is_negative(), "", &buf)
     }
 }
 
