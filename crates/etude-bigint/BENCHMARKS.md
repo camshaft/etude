@@ -100,6 +100,33 @@ fresh magnitude each of its thousands of shift-and-subtract steps, which cut the
 and beat num-bigint's subquadratic gcd even at 4096b. sign_magnitude_roundtrip is the canonical map-key
 encode+decode; num-bigint has no matching operation.)
 
+### Large-tier probe: where the subquadratic algorithms cross over
+
+The standard tiers top out at 4096b (64 limbs). To decide whether num-bigint's subquadratic multiply
+(Toom-3) and division (Burnikel-Ziegler) are worth reimplementing, the `mul_large` / `divmod_large`
+groups extend the two asymptotically-interesting ops to 16384b (256 limbs) and 65536b (1024 limbs):
+
+| op     | tier    | etude    | num-bigint | ratio    |
+|--------|---------|----------|------------|----------|
+| mul    | 16384b  | 51.2 µs  | 50.0 µs    | 1.02     |
+| mul    | 65536b  | 483 µs   | 395 µs     | 1.22     |
+| divmod | 16384b  | 147 µs   | 200 µs     | **0.74** |
+| divmod | 65536b  | 2.32 ms  | 1.80 ms    | 1.29     |
+
+Two findings that reprioritize the roadmap:
+
+- **Multiply.** Our Karatsuba holds parity (1.02×) through 256 limbs and only trails at 1024 limbs
+  (1.22×), where num-bigint's Toom-3 engages. So Toom-3 buys nothing until magnitudes far larger than
+  the 4096b tier — deprioritized (no consumer works at 1024-limb widths).
+- **Division.** Our schoolbook Knuth D with the 2-by-1 reciprocal actually *beats* num-bigint through
+  256 limbs (0.74× at 16384b) and only trails at 1024 limbs (1.29×), where its recursive divide engages.
+  This also explains the `div_exact` 1.06×/1.10× losses at 1024b/4096b: they are a narrow constant-factor
+  band, not an asymptotic gap — the ratio swings back to a win one tier up. Burnikel-Ziegler is likewise
+  a 1024-limb-and-up lever, deprioritized.
+
+Net: both subquadratic rewrites only pay off above ~256–1024 limbs, well beyond the standard tiers and
+any current consumer, so they stay unbuilt; the standard-tier board is the one that matters.
+
 ## Accessors, scalar ops, and codecs (every-function coverage)
 
 Per the standing directive that _every_ public function is benchmarked, the remaining API — the
@@ -325,8 +352,10 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
    item's payoff: etude-rational reports the same 64b loss at its `neg`/`abs` cells, so the one repr change
    closes those three rational cells as well.
 3. **mul at 4096b (1.03×), sub at 4096b (~1.03×), the 64b add/sub/mul tiers (~1.1–1.25×).** At or near
-   parity; num-bigint's edge at the largest mul tier is Toom-3, and the 64b arithmetic tiers share the
-   one-limb-`Vec` allocation root with clone/from_i64/neg/abs (the inline-repr item above).
+   parity; the 64b arithmetic tiers share the one-limb-`Vec` allocation root with clone/from_i64/neg/abs
+   (the inline-repr item above). num-bigint's edge at the largest standard mul tier is not yet Toom-3 —
+   the large-tier probe shows Toom-3 does not engage until ~1024 limbs (see above), so the 4096b 1.03×
+   is a constant-factor band, not an asymptotic gap.
 
 gcd is no longer a gap: making its Stein inner loop subtract in place (`sub_mag_inplace`) flipped the last
 loss (4096b 1.09→0.85×) into a full sweep of wins across all four tiers (0.25–0.85×), and rippled into
@@ -335,12 +364,16 @@ lever at the very widest magnitudes, but it now buys headroom on an already-winn
 
 ## Roadmap
 
-Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-subquadratic divmod → Toom-3 mul, with double-word Lehmer / HGCD held as a further gcd lever (single-word
-Lehmer was tried and reverted for regressing 1024b, so the correct version is the double-word one). The
-inline small-value magnitude repr is deferred: it must first grow inline-emitting arithmetic kernels
-(otherwise it regresses add/mul), then it closes clone / from_i64 / the 64b arithmetic tiers together.
-num-bigint stays both the correctness oracle and the perf yardstick.
+The large-tier probe (above) reprioritized the roadmap: the subquadratic rewrites — Burnikel-Ziegler
+divide, Toom-3 multiply, and double-word Lehmer / HGCD gcd — all only pay off above ~256–1024 limbs, far
+beyond the standard tiers and any current consumer, so they stay unbuilt (revisit only if a consumer
+needs 1024-limb-plus magnitudes). Note our schoolbook Knuth D already beats num-bigint through 256 limbs.
+
+The one remaining standard-tier lever with a proven payoff is the inline small-value magnitude repr — it
+closes clone / from_i64 / neg / abs and the 64b arithmetic tiers together (measured clone 2.20→~1.0×,
+from_i64 1.77→0.97×, and it also closes etude-rational's matching 64b neg/abs/recip cells). It is deferred
+behind a prerequisite: the arithmetic kernels must first emit inline results directly, or it regresses
+add/mul. num-bigint stays both the correctness oracle and the perf yardstick.
 
 ## Target notes: wasm / 32-bit
 
