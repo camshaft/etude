@@ -48,7 +48,7 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
 | to_decimal_string         | 64b    | 61.9 ns   | 72.2 ns    | **0.86**  |
-| to_decimal_string         | 256b   | 486 ns    | 249 ns     | 1.95      |
+| to_decimal_string         | 256b   | 342 ns    | 248 ns     | 1.38      |
 | to_decimal_string         | 1024b  | 3.76 µs   | 2.25 µs    | 1.67      |
 | to_decimal_string         | 4096b  | 24.1 µs   | 21.1 µs    | 1.14      |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
@@ -115,6 +115,11 @@ has no matching operation.)
   then − incoming borrow; the outgoing borrow is their OR), replacing the per-limb `i128` widen +
   `if d < 0` branch. Improves every tier — sub/256b 22.7 → 21.8 ns (**0.70×**), sub/1024b 39.6 → 37.2 ns
   (**0.85×**), sub/4096b 114 → 96.8 ns (1.20× → **1.02×**, closing the last losing sub tier).
+- **Reciprocal ÷10¹⁹ in the `to_decimal` peel** — the linear chunk loop's `128 ÷ 64` step used a `u128`
+  hardware divide, which lowers to a `__udivti3` libcall on aarch64/wasm. Replaced with a precomputed
+  2-by-1 reciprocal (Möller–Granlund; `10¹⁹` is already normalized) — a `wide_mul` + two corrections, no
+  128-bit divide: to_decimal/256b 486 → 342 ns (1.95× → **1.38×**). (64b is the single-limb write path,
+  unchanged; 1024b+ use the recursive multi-limb divmod, not this peel.)
 - **In-place divide-by-limb in `to_decimal_string`** — the ÷10¹⁹ chunk loop divides the magnitude in
   place (`div_rem_limb_inplace`), so no per-chunk quotient `Vec` is allocated: 1024b 4.84 → 4.37 µs.
 - **Recursive divide-and-conquer `to_decimal_string`** — above a 10-limb crossover, split the magnitude
@@ -146,8 +151,10 @@ has no matching operation.)
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string at 256b/1024b (1.95× / 1.67×).** The narrow path is now alloc-free; the residual
-   is num-bigint's divide-by-`u64` inner loop and its recursive conversion constant factors.
+1. **to_decimal_string at 256b/1024b (1.38× / 1.67×).** The 256b peel is now alloc-free and uses a
+   reciprocal ÷10¹⁹; 1024b's residual is the recursive conversion's multi-limb power divmods (the same
+   reciprocal trick, generalized to a runtime divisor in `div_rem_limb_inplace`, would also cut the
+   single-limb divmod path).
 2. **clone / from_i64 at 64b (2.20× / 1.77×).** The small-value construction/clone paths heap-allocate a
    one-limb `Vec`. An inline small-value magnitude repr fixes these (measured 2.20→~1.0× / 1.77→0.97×) but
    REGRESSES add/mul unless the arithmetic kernels emit inline results directly — a larger change (below).
