@@ -1345,8 +1345,29 @@ fn bench_chunk_dist(c: &mut Criterion) {
     }
 }
 
+/// `split_to` cost by cut position in a deep rope. Both a mid cut and a near-end cut take the O(log₃₂)
+/// Deep tree-split fast path, but the work is not position-uniform: a cut near an edge descends to a
+/// shallow boundary and repacks far fewer nodes than a cut through the middle. Measures both to show
+/// that split cost scales with how balanced the two resulting halves are, not just rope length.
+fn bench_split_position(c: &mut Criterion) {
+    let template: Vec<Bytes> = (0..DEEP).map(|i| mtu_chunk(i as u8)).collect();
+    let total = DEEP * 1400;
+    for &(at, label) in &[(total / 2, "mid"), (total - 700, "near_end")] {
+        let mut g = group(c, "split_position");
+        g.bench_function(BenchmarkId::new("rope", label), |b| {
+            b.iter_batched(
+                || template.iter().cloned().collect::<ByteVec>(),
+                |mut r| black_box(r.split_to(at).unwrap()),
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
+    bench_split_position,
     bench_chunk_dist,
     bench_stream,
     bench_build_crossover,

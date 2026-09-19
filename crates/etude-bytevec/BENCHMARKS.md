@@ -397,6 +397,24 @@ practical guidance: fragmentation barely dents rope addressing but is quadratic-
 if a producer floods a buffer with tiny chunks and you only ever flatten it, `compact()` first — but if
 you index into it, the tiered rope is exactly the structure you want.
 
+### `split_to` cost by cut position (runnable: `cargo bench -p etude-bytevec -- split_position`)
+
+`split_to` on a deep rope always takes the O(log₃₂) tree-split fast path, but the constant is not
+position-uniform — splitting a 1000-chunk rope (aarch64, jemalloc, release):
+
+| cut position | time |
+|--------------|------|
+| middle (`total/2`) | 7.12 µs |
+| near the end (`total-700`) | 1.35 µs |
+
+A cut near an edge descends to a shallow boundary and repacks only the handful of nodes along the
+right spine, while a mid cut splits deep nodes on both sides and repacks the seam of two substantial
+halves — so an edge-adjacent split is **~5× cheaper** than a mid one on the same rope. The takeaway is
+that `split_to`/`truncate`/`advance` near either end are cheap regardless of total length (peeling a
+frame off the front or trimming a tail is close to free), while the priciest split is the balanced
+mid-cut; there is no folding or degeneracy involved — both are the same fast path, just touching
+different amounts of the tree.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
