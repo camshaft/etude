@@ -87,8 +87,8 @@ num-rational always uses `BigInt`, so this is a large win:
 
 | op      | operands | etude    | num-rational | ratio     |
 |---------|----------|----------|--------------|-----------|
-| mul_i64 | 48-bit   | 0.43 µs  | 4.04 µs      | **0.107** |
-| div_i64 | 48-bit   | ~0.43 µs | ~4.1 µs      | **~0.11** |
+| mul_i64 | 48-bit   | 0.21 µs  | 4.13 µs      | **0.050** |
+| div_i64 | 48-bit   | 0.25 µs  | 4.26 µs      | **0.058** |
 | add_i64 | 48-bit   | 0.40 µs  | 3.14 µs      | **0.126** |
 | sub_i64 | 48-bit   | ~0.40 µs | ~3.1 µs      | **~0.13** |
 | cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
@@ -102,10 +102,11 @@ for the common i64-fitting case. The native `add`/`sub` path is tried BEFORE the
 path, so small **equal-denominator** add/sub (`add_eqden_i64` — a shared-denominator accumulation, e.g.
 tallying `k/1_000_003`) also goes native rather than allocating a Big sum + Big-gcd normalize: **0.26×**
 num-rational (~3.8× faster). (The byte-width tiers below UNDER-represent this case: their top magnitude bit is set, so a "64b"
-coefficient exceeds `i64` and takes the `Big` path.) The residual ~0.4 µs is the two result-`Big`
-allocations (`from_i64`) — both implementations must allocate the result; only our *arithmetic* went
-native, and etude-bigint's 1-limb `Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr
-item), so that residual will shrink further when that lands.
+coefficient exceeds `i64` and takes the `Big` path.) The residual ~0.2 µs (after `mul`/`div` cross-reduce on
+the i64 originals — slice 26) is dominated by the two result-`Big` allocations (`from_i64`) — both
+implementations must allocate the result; only our *arithmetic* went native, and etude-bigint's 1-limb
+`Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr item), so that residual will
+shrink further when that lands.
 
 `normalize` also takes this native path for i64-fitting components, so **small-rational construction**
 (`from_ratio_i64`, `new` on small `Big`s) reduces with a native gcd instead of a `Big` gcd. The native
@@ -257,6 +258,12 @@ re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 26** — native `mul_small`/`div_small` cross-reduce on the i64 originals (`gcd(a,d)`, `gcd(c,b)`)
+  instead of one `gcd_u128` over the ~126-bit products. Since the operands are canonical, the cross-reduced
+  result is already lowest-terms (no final gcd), and the two gcds run on `u64` (hardware divide) rather than
+  `u128` (an `__umodti3` libcall). `mul_i64` 0.43 µs → **0.21 µs (0.107× → 0.050×)**, `div_i64` → **0.058×**
+  (~17–20× num-rational). Corrects the earlier read that the native residual was purely allocation-bound —
+  the u128-product gcd was a real chunk. Oracle (i64 seeds) exercises both.
 - **slice 25** — banked the render crossing from etude-bigint's "skip the wasted top squaring" in the
   recursive `to_decimal` (#169): `to_string` **4096b 1.02× → 0.78×** (now beats num-rational), 2048b 0.90× →
   0.74×, 1024b 1.43× → 1.27×; 64b/256b unchanged (linear peel). Scoreboard refresh only, no local change
