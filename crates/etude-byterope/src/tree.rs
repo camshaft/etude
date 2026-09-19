@@ -634,7 +634,8 @@ impl Tree {
     }
 
     fn pop_end_block(&mut self, end: End) -> Option<Vec<Bytes>> {
-        if let Some(root) = self.root.as_mut() {
+        {
+            let root = self.root.as_mut()?;
             if let Node::Leaf(_) = root {
                 let block = into_block(self.root.take().unwrap());
                 self.chunk_count -= block.len();
@@ -654,8 +655,6 @@ impl Tree {
                 }
                 return Some(block);
             }
-        } else {
-            return None;
         }
         // Persistent fallback (shared tree).
         let root = self.root.take()?;
