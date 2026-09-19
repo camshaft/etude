@@ -51,10 +51,22 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 4096b  | 524 ns    | —          | —         |
+| clone                     | 64b    | 12.9 ns   | 5.87 ns    | 2.20      |
+| clone                     | 256b   | 12.7 ns   | 12.7 ns    | 1.00      |
+| clone                     | 1024b  | 13.8 ns   | 14.0 ns    | **0.98**  |
+| clone                     | 4096b  | 23.1 ns   | 23.1 ns    | 1.00      |
+| from_i64                  | —      | 12.2 ns   | 6.86 ns    | 1.77      |
 
 We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), **cmp** (three of four
 tiers), and **to_decimal_string at 64b** (0.86×), and reach parity-or-better on **mul at 256b/1024b**
 and **sub at 256b**.
+
+`clone` and `from_i64` are the small-value CONSTRUCTION paths: at 64b both trail num-bigint (2.20× /
+1.77×) because a small `Big` heap-allocates its one-limb `Vec` where num-bigint has a small-value
+fast path; at ≥256b they are at parity (the allocation is amortized). Closing 64b needs an inline
+small-value magnitude repr — measured to fix clone/`from_i64` (2.20→~1.0×, 1.77→0.97×) but to REGRESS
+add/mul (the `*_mag` kernels build a `Vec` that the inline form then has to copy), so it needs the
+kernels to emit inline results directly before it is a net win. Deferred behind that (see roadmap).
 
 (divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd is capped at 1024b because
 its Euclid cost is steep. sign_magnitude_roundtrip is the canonical map-key encode+decode; num-bigint
@@ -123,17 +135,20 @@ has no matching operation.)
 
 1. **to_decimal_string at 256b/1024b (1.95× / 1.67×).** The narrow path is now alloc-free; the residual
    is num-bigint's divide-by-`u64` inner loop and its recursive conversion constant factors.
-2. **to_decimal_string at 4096b (1.14×), sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the
+2. **clone / from_i64 at 64b (2.20× / 1.77×).** The small-value construction/clone paths heap-allocate a
+   one-limb `Vec`. An inline small-value magnitude repr fixes these (measured 2.20→~1.0× / 1.77→0.97×) but
+   REGRESSES add/mul unless the arithmetic kernels emit inline results directly — a larger change (below).
+3. **to_decimal_string at 4096b (1.14×), sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the
    64b add/sub/mul tiers (~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest tiers is a
-   subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd; at the
-   smallest, an inline small-value magnitude repr (no heap `Vec` for ≤1-limb values) would close the
-   arithmetic + clone gap.
+   subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd.
 
 ## Roadmap
 
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-small-value inline fast path → (later) subquadratic divmod, Toom-3 mul, Lehmer gcd. num-bigint stays
-both the correctness oracle and the perf yardstick.
+Lehmer gcd → subquadratic divmod → Toom-3 mul. The inline small-value magnitude repr is deferred: it must
+first grow inline-emitting arithmetic kernels (otherwise it regresses add/mul), then it closes clone /
+from_i64 / the 64b arithmetic tiers together. num-bigint stays both the correctness oracle and the
+perf yardstick.
 
 ## Target notes: wasm / 32-bit
 

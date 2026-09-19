@@ -188,6 +188,38 @@ fn bench_sign_magnitude_roundtrip(c: &mut Criterion) {
     g.finish();
 }
 
+/// `clone` across tiers — the small-value inline magnitude repr makes a ≤128-bit clone allocation-free
+/// (a stack copy), where a `Vec`-backed magnitude heap-allocates. Clone-heavy callers (e.g. rational
+/// reciprocal) live or die on this at the small tiers.
+fn bench_clone(c: &mut Criterion) {
+    let mut g = group(c, "clone");
+    let mut rng = Rng(0x0102_0304_0506_0708);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).clone()))
+        });
+        g.bench_with_input(BenchmarkId::new("num-bigint", label), &na, |bch, a| {
+            bch.iter(|| black_box(black_box(a).clone()))
+        });
+    }
+    g.finish();
+}
+
+/// `from_i64` — constructing a small value. Inline (no heap allocation) vs num-bigint's `Vec`-backed
+/// `BigInt::from`.
+fn bench_from_i64(c: &mut Criterion) {
+    let mut g = group(c, "from_i64");
+    g.bench_function("etude", |bch| {
+        bch.iter(|| black_box(Big::from_i64(black_box(-1_234_567_890_123_456_789))))
+    });
+    g.bench_function("num-bigint", |bch| {
+        bch.iter(|| black_box(BigInt::from(black_box(-1_234_567_890_123_456_789i64))))
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -197,6 +229,8 @@ criterion_group!(
     bench_gcd,
     bench_cmp,
     bench_to_decimal,
-    bench_sign_magnitude_roundtrip
+    bench_sign_magnitude_roundtrip,
+    bench_clone,
+    bench_from_i64
 );
 criterion_main!(benches);
