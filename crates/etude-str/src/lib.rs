@@ -148,7 +148,9 @@ impl Borrow<str> for Str {
 
 impl fmt::Display for Str {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        // Route through `pad`, as `str`'s own Display does, so width, fill, alignment, and precision
+        // (char-count truncation) format parameters are honored rather than dropped.
+        f.pad(self.as_str())
     }
 }
 
