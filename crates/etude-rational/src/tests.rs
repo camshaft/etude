@@ -15,8 +15,12 @@ use num_rational::BigRational;
 
 /// Assert our value and the reference agree on the canonical `(numer, denom)` pair. Comparing the decimal
 /// strings makes both the value AND the canonical-form invariant (positive den, lowest terms, `0/1` zero)
-/// part of the assertion.
+/// part of the assertion. Also asserts **`Display` parity** vs num-rational — bare and under representative
+/// padding/sign flags — so the `pad_integral` flag handling (#220) is locked against silent regression
+/// across the whole differential operand space, not just the static `display_matches_numrational_under_flags`
+/// cases (the harness formerly checked only the `(numer, denom)` pair, never the formatted whole value).
 fn assert_same(r: &Rational, b: &BigRational) {
+    use alloc::format;
     assert_eq!(
         r.numer().to_decimal_string(),
         b.numer().to_string(),
@@ -26,6 +30,23 @@ fn assert_same(r: &Rational, b: &BigRational) {
         r.denom().to_decimal_string(),
         b.denom().to_string(),
         "denominator mismatch: ours={r:?} ref={b}"
+    );
+    // Display parity: the whole `num/den` rendering must match num-rational byte-for-byte, both bare and
+    // under a width flag (fill/align), the `+` flag, and sign-aware zero-padding (exercises `pad_integral`).
+    assert_eq!(
+        format!("{r}"),
+        format!("{b}"),
+        "Display bare: ours={r:?} ref={b}"
+    );
+    assert_eq!(
+        format!("{r:>24}"),
+        format!("{b:>24}"),
+        "Display width: ours={r:?}"
+    );
+    assert_eq!(
+        format!("{r:+025}"),
+        format!("{b:+025}"),
+        "Display sign+zeropad: ours={r:?}"
     );
 }
 
