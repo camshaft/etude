@@ -457,7 +457,8 @@ impl ByteRope {
 
     /// Returns the chunk at chunk-`index` (index 0 is the front chunk), or `None`.
     ///
-    /// O(1) in the shallow tier (matching the flat buffer); O(index) in the deep tier.
+    /// O(1) in the shallow tier (matching the flat buffer); O(log₃₂) in the deep tier via a chunk-count
+    /// descent (buffered head/tail are O(1) deque indexing).
     pub fn get(&self, index: usize) -> Option<&Bytes> {
         match &self.repr {
             Repr::Small { head, additional } => {
@@ -467,7 +468,19 @@ impl ByteRope {
                     additional.get(index - 1)
                 }
             }
-            Repr::Deep(_) => self.chunks().nth(index),
+            Repr::Deep(d) => {
+                if index < d.head.len() {
+                    d.head.get(index)
+                } else {
+                    let i = index - d.head.len();
+                    let tree_chunks = d.tree.chunk_count();
+                    if i < tree_chunks {
+                        d.tree.get_chunk(i)
+                    } else {
+                        d.tail.get(i - tree_chunks)
+                    }
+                }
+            }
         }
     }
 

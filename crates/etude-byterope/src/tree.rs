@@ -204,6 +204,24 @@ impl Node {
         }
     }
 
+    /// Returns the chunk at chunk-`index` within this subtree (`index < self.chunk_len()`), descending
+    /// by the per-child cached chunk counts. O(FANOUT · height).
+    fn get_chunk(&self, mut index: usize) -> &Bytes {
+        match self {
+            Node::Leaf(b) => &b.chunks[index],
+            Node::Branch(b) => {
+                for child in &b.children {
+                    let c = child.chunk_len();
+                    if index < c {
+                        return child.get_chunk(index);
+                    }
+                    index -= c;
+                }
+                unreachable!("chunk index past branch")
+            }
+        }
+    }
+
     /// Recursively visits every chunk in this subtree, in order.
     fn for_each_chunk(&self, f: &mut impl FnMut(&Bytes)) {
         match self {
@@ -423,6 +441,13 @@ impl Tree {
         if let Some(root) = &self.root {
             root.for_each_chunk(f);
         }
+    }
+
+    /// Returns the chunk at chunk-`index` (0 = first) via an O(log₃₂) descent on the per-subtree chunk
+    /// counts, or `None` if out of range.
+    pub(crate) fn get_chunk(&self, index: usize) -> Option<&Bytes> {
+        let root = self.root.as_ref()?;
+        (index < self.chunk_count).then(|| root.get_chunk(index))
     }
 
     /// Validates the tree's structural invariants and cached sizes/counts against the actual nodes.
