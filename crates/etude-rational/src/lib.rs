@@ -514,8 +514,25 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
     })
 }
 
-/// Native binary-free Euclidean gcd of two `u128`s. `gcd(x, 0) = x`.
+/// Native Euclidean gcd of two `u128`s. `gcd(x, 0) = x`. When both operands fit `u64` (always the case for
+/// the `normalize` small-construction path, and for arithmetic on genuinely small operands) it dispatches
+/// to a `u64` gcd whose remainder step is a hardware divide — the `u128` `%` is an `__umodti3` libcall on
+/// aarch64, so the fast path avoids a libcall per Euclidean step. Values only shrink, so the one-time
+/// entry check suffices.
 fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    if a <= u64::MAX as u128 && b <= u64::MAX as u128 {
+        return gcd_u64(a as u64, b as u64) as u128;
+    }
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
+/// Native Euclidean gcd of two `u64`s (hardware divide, no `u128` libcall). `gcd(x, 0) = x`.
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let t = a % b;
         a = b;
