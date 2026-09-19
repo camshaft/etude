@@ -300,9 +300,48 @@ impl From<String> for StrRope {
 // Content equality / ordering / hashing — by the concatenated bytes, so a StrRope compares and hashes like
 // its text regardless of how it is chunked internally. (Two StrRopes with the same content but different
 // chunk boundaries are equal.)
+/// Lexicographic byte-content comparison of two ropes, walking both chunk iterators with two cursors and
+/// comparing overlapping runs via slice `cmp` (a `memcmp`) — no per-byte iteration, no allocation, and it
+/// short-circuits on the first differing run. Byte order == char order for UTF-8, so this matches `str`.
+fn cmp_content(a: &StrRope, b: &StrRope) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    let (mut ai, mut bi) = (a.0.chunks(), b.0.chunks());
+    let (mut ca, mut cb): (&[u8], &[u8]) = (&[], &[]);
+    loop {
+        while ca.is_empty() {
+            match ai.next() {
+                Some(c) => ca = &c[..],
+                None => break,
+            }
+        }
+        while cb.is_empty() {
+            match bi.next() {
+                Some(c) => cb = &c[..],
+                None => break,
+            }
+        }
+        match (ca.is_empty(), cb.is_empty()) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less, // a is a proper prefix of b
+            (false, true) => return Ordering::Greater,
+            (false, false) => {
+                let n = ca.len().min(cb.len());
+                match ca[..n].cmp(&cb[..n]) {
+                    Ordering::Equal => {
+                        ca = &ca[n..];
+                        cb = &cb[n..];
+                    }
+                    ord => return ord,
+                }
+            }
+        }
+    }
+}
+
 impl PartialEq for StrRope {
     fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len() && self.bytes().eq(other.bytes())
+        // O(1) length reject, then a chunk-aligned memcmp (not per-byte).
+        self.len() == other.len() && cmp_content(self, other).is_eq()
     }
 }
 impl Eq for StrRope {}
@@ -313,22 +352,37 @@ impl PartialOrd for StrRope {
 }
 impl Ord for StrRope {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        // Lexicographic by bytes == lexicographic by chars for UTF-8, matching `str`'s ordering.
-        self.bytes().cmp(other.bytes())
+        cmp_content(self, other)
     }
 }
 impl core::hash::Hash for StrRope {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        for b in self.bytes() {
-            state.write_u8(b);
+        // Feed whole chunks (a streaming hasher sees the same byte stream regardless of chunking, so
+        // equal content hashes equal), not one `write_u8` per byte. The `0xff` terminator matches
+        // `str`'s `Hash` (prevents prefix collisions in composite keys).
+        for chunk in self.0.chunks() {
+            state.write(&chunk[..]);
         }
+        state.write_u8(0xff);
     }
 }
 
 // Equality with the primitive string types (so tests + call sites read naturally).
 impl PartialEq<str> for StrRope {
     fn eq(&self, other: &str) -> bool {
-        self.len() == other.len() && self.bytes().eq(other.bytes())
+        if self.len() != other.len() {
+            return false;
+        }
+        // Chunk-aligned memcmp against the contiguous `str` bytes (not per-byte).
+        let mut rest = other.as_bytes();
+        for chunk in self.0.chunks() {
+            let c = &chunk[..];
+            if rest.len() < c.len() || rest[..c.len()] != *c {
+                return false;
+            }
+            rest = &rest[c.len()..];
+        }
+        rest.is_empty()
     }
 }
 impl PartialEq<&str> for StrRope {
@@ -339,26 +393,28 @@ impl PartialEq<&str> for StrRope {
 
 impl core::fmt::Display for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Linearize to one contiguous buffer, then view as &str (valid by the invariant). Individual
-        // chunks can't be written as &str — a codepoint may straddle a chunk boundary.
-        let contiguous = self.0.copy_to_bytes();
-        // The invariant guarantees valid UTF-8, but use the checked path (Display is already O(n) here)
-        // to avoid any unsafe. Route through `Formatter::pad` — as `str`'s own Display does — so the
-        // width, fill, alignment, and precision (char-count truncation) format parameters are honored.
-        match core::str::from_utf8(&contiguous) {
-            Ok(s) => f.pad(s),
-            Err(_) => Err(core::fmt::Error), // unreachable given the invariant
+        use core::fmt::Write as _;
+        // Stream chars (reassembling any codepoint that spans a chunk boundary) — NO whole-content
+        // allocation, unlike a linearize-then-write.
+        for c in self.chars() {
+            f.write_char(c)?;
         }
+        Ok(())
     }
 }
 
 impl core::fmt::Debug for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let contiguous = self.0.copy_to_bytes();
-        match core::str::from_utf8(&contiguous) {
-            Ok(s) => core::fmt::Debug::fmt(s, f),
-            Err(_) => Err(core::fmt::Error),
+        use core::fmt::Write as _;
+        // Same alloc-free char stream, with `str`-style escaping (matches `<str as Debug>`, which
+        // escapes each char via `escape_debug`).
+        f.write_char('"')?;
+        for c in self.chars() {
+            for esc in c.escape_debug() {
+                f.write_char(esc)?;
+            }
         }
+        f.write_char('"')
     }
 }
 
@@ -947,5 +1003,45 @@ mod tests {
                 text.char_indices().collect::<Vec<_>>()
             );
         });
+    }
+
+    // Ord/Eq between DIFFERENT content (incl. prefix / empty / multi-byte), built one byte per chunk so
+    // the chunk-aligned `cmp_content` walk crosses many leaf boundaries — must match `str`'s ordering.
+    #[test]
+    fn ord_matches_str_across_chunk_boundaries() {
+        fn one_byte_per_chunk(text: &str) -> StrRope {
+            let mut bv = ByteVec::new();
+            for b in text.as_bytes() {
+                bv.push_back(bytes::Bytes::copy_from_slice(&[*b]));
+            }
+            StrRope::from_utf8(bv).unwrap()
+        }
+        let words = [
+            "", "a", "ab", "abc", "abd", "b", "apple", "applf", "é", "és", "🦀", "🦀s",
+        ];
+        for x in words {
+            for y in words {
+                let (rx, ry) = (one_byte_per_chunk(x), one_byte_per_chunk(y));
+                assert_eq!(rx.cmp(&ry), x.cmp(y), "cmp {x:?} vs {y:?}");
+                assert_eq!(rx == ry, x == y, "eq {x:?} vs {y:?}");
+            }
+        }
+    }
+
+    // Debug escaping must match `<str as Debug>` (quotes, control chars, unicode) — the alloc-free
+    // char-stream Debug uses `char::escape_debug`, the same as str.
+    #[test]
+    fn debug_matches_str() {
+        for text in [
+            "hi",
+            "a\"b",
+            "tab\there",
+            "new\nline",
+            "café 🦀",
+            "back\\slash",
+            "",
+        ] {
+            assert_eq!(format!("{:?}", StrRope::from(text)), format!("{text:?}"));
+        }
     }
 }
