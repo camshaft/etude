@@ -436,15 +436,40 @@ impl Rational {
 }
 
 impl core::fmt::Display for Rational {
-    /// `num/den` (e.g. `-3/10`), or just `num` when the value is an integer. Writes the components
-    /// straight into the formatter via `Big::write_decimal` — no intermediate `String` allocation.
+    /// `num/den` (e.g. `-3/10`), or just `num` when the value is an integer.
+    ///
+    /// # Format flags
+    /// Honors the `Formatter` **padding** flags — width, fill, alignment, the `+` sign flag, and sign-aware
+    /// zero-padding — via [`Formatter::pad_integral`], matching `num-rational`'s `Ratio` byte-for-byte (this
+    /// crate is a drop-in): the numerator's sign is the value's sign, and the `num/den` magnitude is padded
+    /// as a single integral field (e.g. `{:>8}` → `"    3/10"`, `{:+}` → `"+3/10"`, `{:08}` → `"00003/10"`,
+    /// `{:08}` on `-3/10` → `"-0003/10"`). **Precision is ignored** — a `Rational` is an *exact* fraction
+    /// with no inherent decimal expansion, so `{:.2}` cannot mean "two fractional digits" without silently
+    /// choosing a rounding (num-rational ignores it too). This is the shared contract with `etude-decimal`.
+    ///
+    /// The common flag-free case (`"{}"`, `to_string`) keeps a zero-allocation fast path, streaming the
+    /// components straight into the sink via `Big::write_decimal`; only a flagged format renders to a
+    /// scratch `String` first (which `pad_integral` requires, since it needs the whole magnitude).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.num.write_decimal(f)?;
-        if !self.is_integer() {
-            f.write_str("/")?;
-            self.den.write_decimal(f)?;
+        // Fast path: no width/sign/zero-pad flag ⇒ nothing to pad, so stream with no allocation. (Fill and
+        // alignment are inert without a width; precision does not apply — see above.)
+        if f.width().is_none() && !f.sign_plus() && !f.sign_aware_zero_pad() {
+            self.num.write_decimal(f)?;
+            if !self.is_integer() {
+                f.write_str("/")?;
+                self.den.write_decimal(f)?;
+            }
+            return Ok(());
         }
-        Ok(())
+        // A padding flag is set: render the UNSIGNED magnitude to a scratch buffer, then let `pad_integral`
+        // apply the sign, width, fill, alignment, `+`, and sign-aware zero-padding exactly as num-rational.
+        let mut buf = String::new();
+        let _ = self.num.abs().write_decimal(&mut buf);
+        if !self.is_integer() {
+            buf.push('/');
+            let _ = self.den.write_decimal(&mut buf);
+        }
+        f.pad_integral(!self.num.is_negative(), "", &buf)
     }
 }
 
