@@ -1,0 +1,20 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-strrope"
+version = "0.1.0"
+description = "A UTF-8 string rope: a validated-UTF-8 view over the etude-bytevec byte rope"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# StrRope is a newtype over `etude_bytevec::Rope<Utf8>` — the byte rope with a zero-size UTF-8 kind marker.
+# The byte/rope machinery + the Utf8 validator live in etude-bytevec; this crate owns the str-facing API.
+etude-bytevec = { version = "0.1", path = "../etude-bytevec" }
+bytes = "1"
+
+[dev-dependencies]
+bolero = "0.13"
