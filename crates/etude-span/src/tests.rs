@@ -95,6 +95,77 @@ fn chunk_tail_and_skip_in_chunk() {
     assert_eq!(c.peek(), Some(b'o'));
 }
 
+/// Mixed-walk differential: a fuzz-chosen interleave of single-byte `bump`s and bulk
+/// `chunk_tail`+`skip_in_chunk` skips (including skips of zero and skips landing exactly on the
+/// leaf end) must observe exactly the flat byte sequence with contiguous absolute offsets. The
+/// plain differential walks with `bump` only; this is the fence for the bulk path under arbitrary
+/// leaf layouts.
+#[test]
+fn mixed_bump_and_skip_walk_matches_flat_model() {
+    use bolero::check;
+    use bolero_generator::TypeGenerator;
+
+    #[derive(Debug, Clone, TypeGenerator)]
+    struct Input {
+        bytes: Vec<u8>,
+        chunk_lens: Vec<u8>,
+        decisions: Vec<u8>,
+    }
+
+    check!().with_type::<Input>().cloned().for_each(|inp| {
+        let mut r = ByteVec::new();
+        let mut i = 0;
+        let mut li = 0;
+        while i < inp.bytes.len() {
+            let len = inp
+                .chunk_lens
+                .get(li % inp.chunk_lens.len().max(1))
+                .map(|&l| (l as usize).max(1))
+                .unwrap_or(inp.bytes.len());
+            li += 1;
+            let j = (i + len).min(inp.bytes.len());
+            r.push_back(Bytes::copy_from_slice(&inp.bytes[i..j]));
+            i = j;
+        }
+        let mut c = Cursor::new(&r);
+        let mut di = 0;
+        let mut expected_offset = 0usize;
+        loop {
+            assert_eq!(c.offset(), expected_offset, "offset stays contiguous");
+            let tail = c.chunk_tail();
+            assert_eq!(
+                tail,
+                &inp.bytes[expected_offset..(expected_offset + tail.len())],
+                "chunk_tail content"
+            );
+            let d = inp.decisions.get(di).copied().unwrap_or(1);
+            di += 1;
+            if d % 2 == 1 || tail.is_empty() {
+                // Single-byte step.
+                match c.peek() {
+                    Some(b) => {
+                        assert_eq!(b, inp.bytes[expected_offset], "peek byte");
+                        c.bump();
+                        expected_offset += 1;
+                    }
+                    None => {
+                        assert_eq!(expected_offset, inp.bytes.len(), "end reached early/late");
+                        break;
+                    }
+                }
+            } else {
+                // Bulk step within the current leaf (zero and to-the-exact-end included).
+                let k = (d as usize / 2) % (tail.len() + 1);
+                c.skip_in_chunk(k);
+                expected_offset += k;
+            }
+        }
+        assert_eq!(c.offset(), inp.bytes.len(), "final offset");
+        assert!(c.peek().is_none());
+        assert!(c.chunk_tail().is_empty());
+    });
+}
+
 #[test]
 fn differential_against_flat_model() {
     use bolero::check;
