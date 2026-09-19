@@ -124,6 +124,28 @@ fn bench_divmod(c: &mut Criterion) {
     g.finish();
 }
 
+/// Quotient-only division (`2n / n` shape) — `div_exact` vs num-bigint's `/` (which also returns only
+/// the quotient). `div_exact` skips the remainder `Vec` that `divmod` builds, so this also shows the
+/// gap it closes vs our own `divmod`.
+fn bench_div_exact(c: &mut Criterion) {
+    let mut g = group(c, "div_exact");
+    let mut rng = Rng(0xd1e0_eac7_0000_0001);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes * 2);
+        let b = rng.big(nbytes);
+        let (na, nb) = (to_num(&a), to_num(&b));
+        g.bench_with_input(BenchmarkId::new("etude", label), &(a, b), |bch, (a, b)| {
+            bch.iter(|| black_box(a.div_exact(black_box(b))))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &(na, nb),
+            |bch, (a, b)| bch.iter(|| black_box(a / b)),
+        );
+    }
+    g.finish();
+}
+
 fn bench_gcd(c: &mut Criterion) {
     use num_integer::Integer;
     binop(c, "gcd", HEAVY_TIERS, |a, b| a.gcd(b), |a, b| a.gcd(b));
@@ -226,6 +248,7 @@ criterion_group!(
     bench_sub,
     bench_mul,
     bench_divmod,
+    bench_div_exact,
     bench_gcd,
     bench_cmp,
     bench_to_decimal,

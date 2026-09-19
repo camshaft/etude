@@ -295,6 +295,25 @@ impl Big {
         Some((q, r))
     }
 
+    /// The QUOTIENT ONLY of the truncating division `self / divisor` (toward zero — the same quotient as
+    /// [`Big::divmod`]`.0`), `None` when `divisor` is zero. Unlike `divmod` this never allocates the
+    /// remainder, so callers that divide by a known factor and discard the remainder (e.g. reducing a
+    /// fraction by its gcd, or cross-reduction) skip that allocation. The name reflects the intended use
+    /// on EXACT divisions (remainder zero); a non-exact division still returns the truncating quotient.
+    pub fn div_exact(&self, divisor: &Big) -> Option<Big> {
+        if divisor.is_zero() {
+            return None;
+        }
+        // want_rem = false → the a<b / single-limb / Knuth paths all skip building the remainder `Vec`.
+        let (qmag, _rmag) = divmod_mag_impl(&self.mag, &divisor.mag, false);
+        let mut q = Big {
+            neg: self.neg != divisor.neg,
+            mag: qmag,
+        };
+        q.normalize();
+        Some(q)
+    }
+
     /// The greatest common divisor of `|self|` and `|other|` — always NON-NEGATIVE (gcd is sign-agnostic:
     /// `gcd(a, b) = gcd(|a|, |b|)`). `gcd(0, 0) = 0`; `gcd(a, 0) = |a|`.
     ///
@@ -978,28 +997,35 @@ fn shl_bits(m: &mut Vec<u64>, k: usize) {
 
 /// Unsigned division of magnitudes: `(quotient, remainder)` with `a = quotient * b + remainder`,
 /// `0 <= remainder < b`. `b` MUST be non-empty (nonzero — the caller checks). Both results normalized.
-/// Dispatches by divisor width: `a < b` is trivial, a single-limb divisor uses a linear scan, and a
-/// multi-limb divisor uses Knuth's Algorithm D (word-at-a-time long division).
 fn divmod_mag(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
-    // a < b → quotient 0, remainder a.
+    divmod_mag_impl(a, b, true)
+}
+
+/// The shared division core. When `want_rem` is false the remainder is not built (returned empty) and
+/// no allocation for it is made — the quotient-only path behind [`Big::div_exact`]. Dispatches by
+/// divisor width: `a < b` is trivial, a single-limb divisor uses a linear scan, and a multi-limb
+/// divisor uses Knuth's Algorithm D (word-at-a-time long division).
+fn divmod_mag_impl(a: &[u64], b: &[u64], want_rem: bool) -> (Vec<u64>, Vec<u64>) {
+    // a < b → quotient 0, remainder a (only materialized when wanted).
     if Big::cmp_mag(a, b) == Ordering::Less {
-        return (Vec::new(), a.to_vec());
+        return (Vec::new(), if want_rem { a.to_vec() } else { Vec::new() });
     }
     if b.len() == 1 {
-        return divmod_by_limb(a, b[0]);
+        return divmod_by_limb(a, b[0], want_rem);
     }
-    knuth_divmod(a, b)
+    knuth_divmod(a, b, want_rem)
 }
 
 /// Divide a magnitude by a single nonzero limb: `(quotient, remainder)`. One `u128` division per limb,
-/// most-significant first, carrying the running remainder (always `< d`, so it fits a single limb).
-fn divmod_by_limb(a: &[u64], d: u64) -> (Vec<u64>, Vec<u64>) {
+/// most-significant first, carrying the running remainder (always `< d`, so it fits a single limb). When
+/// `want_rem` is false the (single-limb) remainder is not allocated.
+fn divmod_by_limb(a: &[u64], d: u64, want_rem: bool) -> (Vec<u64>, Vec<u64>) {
     let mut q = a.to_vec();
     let rem = div_rem_limb_inplace(&mut q, d);
-    let r = if rem == 0 {
-        Vec::new()
-    } else {
+    let r = if want_rem && rem != 0 {
         alloc::vec![rem]
+    } else {
+        Vec::new()
     };
     (q, r)
 }
@@ -1022,7 +1048,9 @@ fn div_rem_limb_inplace(m: &mut Vec<u64>, d: u64) -> u64 {
 /// Knuth's Algorithm D (TAOCP Vol. 2, §4.3.1) over base-2⁶⁴ limbs, for a divisor of ≥2 limbs. Requires
 /// `a >= b` and `b`'s top limb nonzero (both hold via `divmod_mag`'s dispatch). The `u32` version in
 /// Hacker's Delight §9-2 (`divmnu`) is the model, widened to `u64` limbs with `u128`/`i128` intermediates.
-fn knuth_divmod(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
+/// When `want_rem` is false, D8 (the remainder unnormalization) is skipped and an empty remainder is
+/// returned — no remainder `Vec` is allocated.
+fn knuth_divmod(a: &[u64], b: &[u64], want_rem: bool) -> (Vec<u64>, Vec<u64>) {
     let n = b.len(); // ≥ 2
     let m = a.len() - n; // a.len() ≥ n, so m ≥ 0
     let base = 1u128 << 64;
@@ -1095,6 +1123,9 @@ fn knuth_divmod(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
     }
     strip(&mut q);
 
+    if !want_rem {
+        return (q, Vec::new()); // quotient-only caller — skip building the remainder
+    }
     // D8. Unnormalize the remainder (the low n limbs of un), shifting right by `s`.
     let mut r = alloc::vec![0u64; n];
     if s == 0 {

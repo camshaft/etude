@@ -36,6 +36,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | divmod                    | 256b   | 207 ns    | 392 ns     | **0.53**  |
 | divmod                    | 1024b  | 1.13 µs   | 2.09 µs    | **0.54**  |
 | divmod                    | 4096b  | 11.1 µs   | 20.5 µs    | **0.54**  |
+| div_exact (quotient-only) | 64b    | 35.7 ns   | 53.6 ns    | **0.67**  |
+| div_exact (quotient-only) | 256b   | 230 ns    | 232 ns     | **0.99**  |
+| div_exact (quotient-only) | 1024b  | 1.09 µs   | 1.02 µs    | 1.06      |
+| div_exact (quotient-only) | 4096b  | 11.4 µs   | 10.3 µs    | 1.10      |
 | gcd                       | 64b    | 843 ns    | 1.13 µs    | **0.74**  |
 | gcd                       | 256b   | 4.09 µs   | 4.71 µs    | **0.87**  |
 | gcd                       | 1024b  | 23.5 µs   | 23.1 µs    | 1.02      |
@@ -130,6 +134,11 @@ has no matching operation.)
 - **Stack-scratch linear `to_decimal`** — the `2..=10`-limb peel loop runs over fixed stack buffers (the
   quotient and the chunk list, both bounded by the limb threshold) instead of a heap `Vec` clone + chunk
   `Vec`, so the whole narrow path allocates nothing: 256b 545 → 486 ns (2.19× → 1.95×).
+- **Quotient-only `div_exact`** — a `want_rem` flag threaded through the division core (`a<b` / single-limb
+  / Knuth) skips building the remainder `Vec` entirely, for callers that divide by a known factor and
+  discard the remainder (fraction reduction, cross-reduction). vs num-bigint's `/`: 64b **0.67×** (beats
+  it), 256b 0.99×; vs our own `divmod` it removes one allocation per call. (num-bigint's `/` column is
+  quotient-only, so it is faster than its `/`+`%` divmod column — hence the tighter ratios at ≥1024b.)
 
 ## Where the gaps remain (optimization order)
 
