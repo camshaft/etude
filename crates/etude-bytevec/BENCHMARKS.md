@@ -198,6 +198,24 @@ reproduces the owning drain's read sequence exactly — including `partial_copy_
 contract that `Builder` relies on — pinned by a deterministic tier-spanning parity test and a fuzzed
 borrowed-vs-owning trace-equality check.
 
+**Fan-out / broadcast** (runnable: `cargo bench -p etude-bytevec -- reader_fanout`). The fork's O(1)-ness
+is the whole point in a fan-out: one source buffer, many independent consumable cursors, each peeking a
+little. Handing a plain `VecDeque<Bytes>` an *independent, consumable* cursor per reader means cloning the
+whole deque each time — you cannot advance N cursors over one deque without N copies — so it is O(readers ×
+chunks). The rope forks by borrowing (Small) or an O(1) shared clone (Deep). 64 readers, each reading the
+first chunk:
+
+| reader_fanout | source | rope | naive deque (clone-per-reader) | ratio |
+|---------------|--------|------|--------------------------------|-------|
+| 64 readers | small_max (32) | 1.24 µs | 32.2 µs | **0.038 (~26× faster)** |
+| 64 readers | deep (1000) | 76.2 µs | 972 µs | **0.078 (~13× faster)** |
+
+This is the same O(1)-clone advantage the `clone` row shows, applied to the reader: the naive baseline
+pays a full deque copy per cursor, the rope pays only the fork plus what each cursor actually touches. The
+deep rope's 76 µs is not the fork (that is ~37 ns × 64 ≈ 2.4 µs) but the first `next()` on each cursor
+copying-on-write the shared leftmost leaf — the documented reader drain cost — yet it still finishes ~13×
+ahead because it never copies the untouched remainder of the buffer.
+
 ### Compaction — `compact` / `compact_with` (runnable: `cargo bench -p etude-bytevec -- compact_`)
 
 `compact()` collapses a fragmented rope into one contiguous allocation; `compact_with(skip_above(n))`
