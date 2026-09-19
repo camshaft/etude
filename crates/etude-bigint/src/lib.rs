@@ -1058,19 +1058,57 @@ fn divmod_by_limb(a: &[u64], d: u64, want_rem: bool) -> (Vec<u64>, Vec<u64>) {
     (q, r)
 }
 
+/// The 2-by-1 reciprocal `⌊(2¹²⁸−1)/d⌋ − 2⁶⁴` of a NORMALIZED `d` (top bit set), for
+/// [`udiv_qrnnd_preinv`]. One `u128` divide, amortized over a whole multi-limb division.
+fn reciprocal_2by1(d: u64) -> u64 {
+    ((u128::MAX / d as u128) - (1u128 << 64)) as u64
+}
+
 /// Divide `m` by a single nonzero limb IN PLACE — `m` becomes the quotient (normalized) — returning the
-/// remainder (`< d`, so it fits one limb). One `u128` division per limb, most-significant first. Used by
-/// the decimal render's chunk loop to avoid a fresh quotient `Vec` per step.
+/// remainder (`< d`, so it fits one limb). Uses the reciprocal 2-by-1 division ([`udiv_qrnnd_preinv`]):
+/// one `u128` divide to build the reciprocal, then a `wide_mul` per limb — NO per-limb `u128` divide
+/// (which is a `__udivti3` libcall on aarch64/wasm). The divisor is first normalized (shifted so its top
+/// bit is set); the dividend is processed as if shifted left by the same amount, and the remainder is
+/// shifted back at the end.
 fn div_rem_limb_inplace(m: &mut Vec<u64>, d: u64) -> u64 {
-    let d = d as u128;
-    let mut rem = 0u128;
-    for limb in m.iter_mut().rev() {
-        let cur = (rem << 64) | *limb as u128; // rem < d ≤ 2^64, so this fits u128
-        *limb = (cur / d) as u64;
-        rem = cur % d;
+    if m.is_empty() {
+        return 0;
+    }
+    if m.len() == 1 {
+        // Single limb: a native `u64 / u64` (one hardware `udiv`, no `u128` and no reciprocal setup —
+        // the reciprocal's own `u128` divide would not amortize over a lone limb).
+        let r = m[0] % d;
+        m[0] /= d;
+        strip(m);
+        return r;
+    }
+    let sh = d.leading_zeros();
+    let dn = d << sh; // normalized divisor (top bit set)
+    let v = reciprocal_2by1(dn);
+    let n = m.len();
+    let mut rem;
+    if sh == 0 {
+        rem = 0u64;
+        for limb in m.iter_mut().rev() {
+            let (q, r) = udiv_qrnnd_preinv(rem, *limb, dn, v);
+            *limb = q;
+            rem = r;
+        }
+    } else {
+        // Dividing `(m << sh)` by `dn` gives the same quotient as `m / d`; the remainder comes out
+        // scaled by `2^sh`, undone at the end. `m << sh`'s top overflow seeds the running remainder.
+        rem = m[n - 1] >> (64 - sh);
+        for i in (0..n).rev() {
+            let lo = if i == 0 { 0 } else { m[i - 1] };
+            let shifted = (m[i] << sh) | (lo >> (64 - sh));
+            let (q, r) = udiv_qrnnd_preinv(rem, shifted, dn, v);
+            m[i] = q;
+            rem = r;
+        }
+        rem >>= sh;
     }
     strip(m);
-    rem as u64
+    rem
 }
 
 /// Knuth's Algorithm D (TAOCP Vol. 2, §4.3.1) over base-2⁶⁴ limbs, for a divisor of ≥2 limbs. Requires
