@@ -335,3 +335,22 @@ Contiguous-memory iteration and O(1)-clone structural sharing are **mutually exc
 buffer whose purpose is cheap clone/split/slice. Levers evaluated and rejected with measurements:
 FANOUT 32→64 (regressed `pop_back` 1.55→1.87 and `chunks_iter` 1.83→1.92), and a branchless
 `size_hint` counter (no measurable effect — confirming the cost is locality, not adapter overhead).
+
+## Recorded dead ends (measured, do not re-litigate)
+
+The clean per-method wins have been harvested (`compact`, `extend` bulk build, the pop cold-split, and
+the reader Small-tier borrow). What remains on the deep tier is the persistent-structure tradeoff above,
+not headroom. Experiments that were tried, measured, and rejected:
+
+- **`truncate` deep — pop-first instead of peek-then-pop.** The Deep whole-block-drop path calls
+  `back_block_bytes()` (a rightmost O(height) descent that reads a leaf's *cached* `bytes`) and then
+  `pop_back_block()` (a second descent). Replacing that with a single `pop_back_block()` followed by
+  re-summing the popped block's 32 chunk lengths *regressed* `truncate_half/deep` 5.97 → 6.29 µs (~5%):
+  the cached-total peek is a few cheap pointer hops, while re-summing 32 `Bytes` lengths per block costs
+  more than the descent it removes. A non-regressing variant would thread the cached `Block.bytes` out of
+  the pop itself (dropping both the peek and the re-sum), but that means plumbing the total through the
+  shared-tree persistent pop path for a projected sub-2% (and likely unmeasurable) gain — not worth the
+  surface on that path. The peek-then-pop form stands.
+- The deep sequential build/drain ratios (`push_back` ~1.32×, `truncate` ~1.20×, `clear`/`advance`/`pop`
+  1.30–1.74×) and the trivial-absolute shallow gaps (`truncate` shallow ~1.16× at ~30 ns, `append_mid`
+  shallow ~1.27× at ~150 ns) are the expected tradeoff or below the noise floor for a per-method win.
