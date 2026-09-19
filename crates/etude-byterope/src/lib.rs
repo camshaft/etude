@@ -868,6 +868,31 @@ impl ByteRope {
         R: etude_buffer::reader::Buffer<Error = core::convert::Infallible>,
     {
         use etude_buffer::reader::Infallible as _;
+        // Fast path: the spliced range lies entirely within the TREE body, so we can splice the tree
+        // directly and leave the buffered head/tail untouched — no fold-into-tree / re-derive
+        // round-trip (which the general path below pays via `into_tree`/`from_tree`: two extra
+        // seam concats plus rebuilding the buffered ends). Same O(log₃₂) split×2 + concat×2 on the
+        // tree, minus the fold. This is the common case (a splice in the middle of a large rope).
+        if let Repr::Deep(d) = &mut self.repr {
+            let head_bytes: usize = d.head.iter().map(|c| c.len()).sum();
+            let tree_bytes = d.tree.byte_len();
+            if start >= head_bytes && end <= head_bytes + tree_bytes {
+                let ts = start - head_bytes;
+                let te = end - head_bytes;
+                let (left, rest) = d.tree.split(ts); // left = tree[0, ts)
+                let (_dropped, right) = rest.split(te - ts); // right = tree[te, tree_len)
+                let mut midrope = ByteRope::new();
+                value.infallible_copy_into(&mut midrope); // value chunks (owned zero-copy)
+                let inserted = midrope.len();
+                d.tree = Tree::concat(Tree::concat(left, midrope.into_tree()), right);
+                self.len = self.len - (end - start) + inserted;
+                self.maybe_demote();
+                self.check_invariants();
+                return;
+            }
+        }
+        // General path: the range touches a buffered end, so fold everything into one tree, split
+        // out the range, splice, and re-derive the rope (buffered ends start empty).
         let whole = core::mem::take(self).into_tree(); // fold head/tail once
         let (left, rest) = whole.split(start); // left = [0, start)
         let (_dropped, right) = rest.split(end - start); // right = [end, len)
