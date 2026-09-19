@@ -49,23 +49,24 @@ variants are at parity or faster (the rope never touches a tree there).
 
 | op | size | byterope | bytevec | ratio |
 |----|------|----------|---------|-------|
-| pop_back (drain) | deep | 15.5 µs | 10.0 µs | 1.55 |
+| pop_back (drain) | deep | 15.0 µs | 10.0 µs | 1.50 (was 1.55; drain-in-place) |
 | from_iter | deep | 19.9 µs | 16.9 µs | 1.18 (bulk-built) |
 | builder (put_bytes) | deep | 30.0 µs | 20.8 µs | 1.44 |
 | extend | deep | 22.4 µs | 16.4 µs | 1.37 |
 | push_back | deep | 22.6 µs | 17.7 µs | 1.28 |
 | clear | deep | 10.8 µs | 8.5 µs | 1.27 |
-| pop_front (drain) | deep | 18.0 µs | 14.6 µs | 1.23 |
-| advance (drain) | deep | 18.0 µs | 15.5 µs | 1.16 |
-| chunks_iter | deep | 2.13 µs | 1.16 µs | 1.83 |
+| pop_front (drain) | deep | 17.0 µs | 14.6 µs | 1.16 (was 1.23; drain-in-place) |
+| advance (drain) | deep | 17.5 µs | 15.5 µs | 1.13 (was 1.16; drain-in-place) |
+| chunks_iter | deep | 2.13 µs | 1.16 µs | **1.83 (documented exception — see below)** |
 | get(index) chunk | deep | 32.6 ns | 4.2 ns | 7.7 (abs. 33 ns — both trivial) |
 
 ## Interpretation
 
 byterope is **parity-or-faster on the shallow streaming path** (the common case) and **wins by 1.35×
 to ~45000×** on the structural operations it exists for — clone, slice, split, concat, equality. It
-**trails 1.16×–1.55×** on deep-tier *sequential per-chunk* push/pop/drain/build/extend, and is slower
-in relative terms on `chunks_iter`/`get(index)` (though the absolute costs there are tiny).
+**trails 1.13×–1.50×** on deep-tier *sequential per-chunk* push/pop/drain/build/extend, and is slower
+in relative terms on `chunks_iter` (the documented 1.83× locality exception, below) and `get(index)`
+(though the absolute cost there is tiny — 33 ns).
 
 `FromIterator` now **bulk-builds** the radix tree bottom-up when the source size is known to exceed
 the flat tier (the common `collect` from a slice/`Vec`): `from_iter/deep` improved 1.49× → 1.18×
@@ -76,3 +77,32 @@ allocations for leaf/branch nodes that a flat `VecDeque<Bytes>` simply does not 
 further would require changing the tree node representation itself (e.g. a smaller/tagged node or an
 arena), a much larger rope-core change; the current gap is the expected persistent-structure
 tradeoff for the O(1) clone / O(log) split / zero-copy slice wins above.
+
+The **drain** paths (`pop_back` / `pop_front` / `advance`) were further tightened by adopting a
+freshly-popped tree block's buffer wholesale (`VecDeque::from(block)`, O(1)) instead of moving it
+chunk-by-chunk into the buffered end — the target deque is always empty at a refill. That closed
+`pop_back/deep` 1.55× → 1.50× (and `pop_front`/`advance` similarly).
+
+### The `chunks_iter` exception (1.83×)
+
+`chunks_iter/deep` is the one operation held **above the 1.5× parity bar as a documented,
+measured exception**, because closing it is provably incompatible with byterope's reason to exist.
+The gap is **cache locality**, not algorithm: `etude-bytevec` iterates one *contiguous*
+`VecDeque<Bytes>` (hardware-prefetched, ~0 cache misses), while byterope's iterator walks a tree
+whose leaf blocks are separate `Arc`-boxed allocations *scattered* across the heap (~one cache miss
+per leaf boundary). The two ways to close it each destroy a core guarantee:
+
+- A **contiguous arena** for tree nodes would make iteration cache-friendly, but O(1) structural-
+  sharing `clone`/`split` *requires* per-node `Arc`s that can be shared across clones — an arena
+  cannot be shared cheaply, so it breaks O(1) `clone`.
+- A **single-allocation leaf** (`Arc<[Bytes]>` / DST) removes one indirection, but `set_byte` /
+  `replace` grow a leaf's chunk slice *in place* via `Arc::make_mut`; a DST tail cannot resize in
+  place, so every small edit would re-copy the whole leaf — breaking the bounded copy-on-write
+  guarantee.
+
+Contiguous-memory iteration and O(1)-clone structural sharing are **mutually exclusive**. The
+1.83× is therefore the inherent price paid for `clone` (~440× faster at 1000 chunks), `slice`
+(~40×), `split_to` (~1.6×) and `eq` (~23×) — and chunk-iteration is rarely the hot path for a
+buffer whose purpose is cheap clone/split/slice. Levers evaluated and rejected with measurements:
+FANOUT 32→64 (regressed `pop_back` 1.55→1.87 and `chunks_iter` 1.83→1.92), and a branchless
+`size_hint` counter (no measurable effect — confirming the cost is locality, not adapter overhead).
