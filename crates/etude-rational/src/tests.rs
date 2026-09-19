@@ -208,6 +208,21 @@ fn division_of_fractions() {
 }
 
 #[test]
+fn display_matches_to_decimal_string() {
+    use alloc::format;
+    for (n, d) in [(3, 10), (-3, 10), (10, 5), (0, 7), (1, -2), (-6, -8)] {
+        let r = Rational::from_ratio_i64(n, d).unwrap();
+        assert_eq!(format!("{r}"), r.to_decimal_string());
+    }
+    assert_eq!(
+        format!("{}", Rational::from_ratio_i64(-3, 10).unwrap()),
+        "-3/10"
+    );
+    assert_eq!(format!("{}", Rational::from_i64(2)), "2");
+    assert_eq!(format!("{}", Rational::zero()), "0");
+}
+
+#[test]
 fn mul_div_cross_reduction() {
     let s = |n, d| Rational::from_ratio_i64(n, d).unwrap();
     // Products that cancel cross-wise: (6/5)*(10/9) = 4/3 [gcd(6,9)=3, gcd(10,5)=5].
