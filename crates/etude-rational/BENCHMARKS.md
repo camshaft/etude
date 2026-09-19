@@ -20,18 +20,26 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 
 | op         | tier   | etude     | num-rational | ratio     |
 |------------|--------|-----------|--------------|-----------|
-| add        | 64b    | 0.94 µs   | 3.88 µs      | **0.24**  |
-| add        | 256b   | 10.3 µs   | 16.7 µs      | **0.62**  |
-| add        | 1024b  | 24.1 µs   | 94.0 µs      | **0.26**  |
-| sub        | 64b    | 0.95 µs   | 3.98 µs      | **0.24**  |
-| sub        | 256b   | 10.5 µs   | 16.5 µs      | **0.63**  |
-| sub        | 1024b  | 24.1 µs   | 94.1 µs      | **0.26**  |
-| mul        | 64b    | 0.27 µs   | 4.96 µs      | **0.054** |
-| mul        | 256b   | 8.16 µs   | 20.8 µs      | **0.39**  |
-| mul        | 1024b  | 50.1 µs   | 117 µs       | **0.43**  |
+| add        | 64b    | 0.40 µs   | 3.70 µs      | **0.11**  |
+| add        | 256b   | 5.23 µs   | 16.7 µs      | **0.31**  |
+| add        | 1024b  | 15.8 µs   | 93.7 µs      | **0.17**  |
+| add        | 2048b  | 162 µs    | 270 µs       | **0.60**  |
+| add        | 4096b  | 176 µs    | 873 µs       | **0.20**  |
+| sub        | 64b    | 0.40 µs   | 3.85 µs      | **0.10**  |
+| sub        | 256b   | 5.35 µs   | 16.6 µs      | **0.32**  |
+| sub        | 1024b  | 15.7 µs   | 93.7 µs      | **0.17**  |
+| sub        | 2048b  | 163 µs    | 269 µs       | **0.61**  |
+| sub        | 4096b  | 176 µs    | 875 µs       | **0.20**  |
+| mul        | 64b    | 0.27 µs   | 4.99 µs      | **0.054** |
+| mul        | 256b   | 3.98 µs   | 20.2 µs      | **0.20**  |
+| mul        | 1024b  | 32.2 µs   | 116 µs       | **0.28**  |
+| mul        | 2048b  | 97.5 µs   | 329 µs       | **0.30**  |
+| mul        | 4096b  | 339 µs    | 1032 µs      | **0.33**  |
 | div        | 64b    | 0.24 µs   | 5.26 µs      | **0.045** |
-| div        | 256b   | 8.98 µs   | 21.9 µs      | **0.41**  |
-| div        | 1024b  | 48.5 µs   | 114 µs       | **0.42**  |
+| div        | 256b   | 4.50 µs   | 21.3 µs      | **0.21**  |
+| div        | 1024b  | 31.2 µs   | 113 µs       | **0.28**  |
+| div        | 2048b  | 98.7 µs   | 329 µs       | **0.30**  |
+| div        | 4096b  | 340 µs    | 1037 µs      | **0.33**  |
 | recip      | 64b    | 29.7 ns   | 14.5 ns      | 2.04      |
 | recip      | 256b   | 29.3 ns   | 32.2 ns      | **0.91**  |
 | recip      | 1024b  | 32.1 ns   | 34.7 ns      | **0.93**  |
@@ -158,20 +166,22 @@ Sample ratios at the large tiers (`ratio = etude / num-rational`; full numbers v
 
 | op  | 1024b   | 4096b   |
 |-----|---------|---------|
-| mul | **0.43**| **0.47**|
-| div | **0.42**| **0.46**|
-| add | **0.26**| **0.26**|
+| mul | **0.28**| **0.33**|
+| div | **0.28**| **0.33**|
+| add | **0.17**| **0.20**|
 
-`mul`/`div` **hold** their ~2× lead (cross-reduction halves the gcd work), and `add`/`sub` now hold a
-**~4× lead** too (**0.26×** at 1024b/4096b). Earlier these narrowed to ~parity, which was mis-diagnosed as
+`mul`/`div` hold a **~3× lead** (cross-reduction halves the gcd work), and `add`/`sub` a **~5× lead**
+(**0.17–0.20×**). Earlier the add/sub large tiers narrowed to ~parity, which was mis-diagnosed as
 multiply-bound (awaiting Toom-3) — the real cost was the `2n`-bit reduce gcd over the `(a*d + c*b)/(b*d)`
 product. `add`/`sub` now reduce over `gcd(b, d)` on the *denominators* (an n-bit gcd) and, when they are
 coprime (the common random case), skip the reduce gcd entirely; when they share a factor `g`, they work
 over the lcm and reduce against the small `g` (`gcd(N, lcm) = gcd(N, g)`). So the multiply — not a wide
-gcd — is now the floor for add/sub, and it is already competitive with num-bigint's. (The 256b/2048b bench
-seeds happen to have `gcd(b, d) > 1`, so those cells sit at the lcm-branch ratio ~0.62/0.80 rather than the
-coprime ~0.26; both branches beat num-rational.) The remaining bignum lever is a **Lehmer gcd** in
-etude-bigint for the still-gcd-bound `normalize`/`add_eqden`@≥1024b (raw unreduced pairs), which is deferred.
+gcd — is now the floor for add/sub, and it beats num-bigint's. (The 256b/2048b bench
+seeds happen to have `gcd(b, d) > 1`, so those cells sit at the lcm-branch ratio ~0.31/0.60 — an extra
+`gcd(num, g)` on the ~2n-bit numerator — rather than the coprime ~0.17; both branches beat num-rational.)
+The whole binop board dropped again after etude-bigint's in-place Stein gcd (#207), which rippled through
+every reduction; that also closed the last gcd-bound cells (`normalize`/`add_eqden` now win all tiers), so
+the previously-deferred **Lehmer/HGCD** gcd is no longer gap-closing and has been dropped.
 
 ## Rendering (`to_string` / `Display`)
 
@@ -290,6 +300,18 @@ very wide renders are unaffected. Re-bench on each render land.
   (added the 2048b/4096b rows). Closes the last gcd-bound parity/loss class — the only remaining non-wins
   are `recip`/`neg`/`abs`@64b (etude-bigint small-`Big` inline-repr). Scoreboard refresh only, no local
   change. etude-bigint has consequently deprioritized Lehmer/HGCD (no longer needed to close a gap).
+- **slice 37** — banked the rest of etude-bigint #207 (in-place Stein gcd): slice 33 refreshed only
+  `normalize`/`add_eqden`, but the **binops** also route their reductions through that gcd — `add`/`sub` via
+  `gcd(b, d)` (`addsub_big`) and `mul`/`div` via `gcd(a,d)`+`gcd(c,b)` (`cross_reduce_mul`) — so all four
+  improved and were unbanked. Refreshed the full binop board: **add/sub 256b 0.62× → 0.31×, 1024b 0.26× →
+  0.17×, 64b 0.24× → 0.11×**; **mul 256b 0.39× → 0.20×, 1024b 0.43× → 0.28×**; **div 256b 0.41× → 0.21×,
+  1024b 0.42× → 0.28×**; added the 2048b/4096b rows (mul/div ≈0.30–0.33×, add/sub ≈0.20×). Scoreboard
+  refresh only, no local change. NB: the `add`/`sub` **2048b** cell (0.60×) reflects the shared-denominator-
+  factor `lcm` branch — the fixed-seed 2048b operands happen to have denominators sharing a factor, so
+  `addsub_big` takes the `gcd(b,d) > 1` path (an extra `gcd(num, g)` on the ~2n-bit numerator); still a win,
+  and confirms the shared-factor branch beats num-rational too (mul/div at the same tier are ≈0.30×, on the
+  coprime path). Localized via mul/div scaling normally (1024→2048→4096 = 32→97→339 µs), ruling out a
+  `Big::mul`/`gcd` size cliff.
 - **slice 35** — extended the native `u64`-magnitude band to `normalize` (small-rational construction).
   Its native path used `to_i64_checked`, so the `64b` construction tier (magnitudes fit u64 but exceed
   i64) fell to the `Big` gcd + `div_exact`. Added a `to_i128_checked` + `≤ u64::MAX` guard branch: sign
