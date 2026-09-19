@@ -238,6 +238,19 @@ fn replace_with_inclusive_max_end_errors_instead_of_wrapping() {
     assert_eq!(rope, b"hello world");
 }
 
+/// Companion to `replace_with_inclusive_max_end_errors_instead_of_wrapping` for the `slice` path:
+/// an excluded start of `usize::MAX` must hit `slice`'s documented out-of-bounds panic, not wrap
+/// the `+ 1` to 0 and silently return the whole rope (release) or arithmetic-overflow (debug).
+#[test]
+#[should_panic(expected = "out of bounds")]
+fn slice_with_excluded_max_start_panics_instead_of_wrapping() {
+    let rope = ByteRope::from(b"hello world");
+    let _ = rope.slice((
+        core::ops::Bound::Excluded(usize::MAX),
+        core::ops::Bound::Unbounded,
+    ));
+}
+
 #[test]
 fn replace_equal_length_overwrite_is_in_place() {
     // A unique single-chunk rope overwritten with equal-length values must stay ONE chunk (the
