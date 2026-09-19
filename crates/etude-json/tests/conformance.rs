@@ -90,6 +90,51 @@ fn utf8_and_surrogate_escapes() {
     assert!(serde_json::from_slice::<serde_json::Value>(br#""lone\uD800end""#).is_err());
 }
 
+/// KNOWN SPEC DIVERGENCE (tracked repro, breaker-byterope): the tokenizer accepts a JSON string
+/// whose content is not valid UTF-8 — a raw `0xFF` byte between the quotes, unescaped — as a normal
+/// escape-free `String` token. RFC 8259 §8.1 requires JSON text to be UTF-8, and `serde_json`
+/// rejects the same input. This is the byte-oriented lexer being more permissive than the spec, the
+/// same strict-vs-lossy class as the still-open lone-surrogate ruling.
+///
+/// Downstream consequences this divergence causes (surfaced on their PRs):
+/// - the etude-json-serde adapter (#184) does `StrRope::from_utf8(content).expect(...)` on the
+///   escape-free arm and PANICS on this input — a deserializer must return `Err`;
+/// - `Token::decode_str_rope` (#147) lossy-decodes the same content to U+FFFD.
+///
+/// So consumers disagree and neither matches `serde_json`. Pending the owner's design ruling: if the
+/// tokenizer moves to validate string-content UTF-8 at lex time (matching serde_json / RFC, and
+/// making the `from_utf8_unchecked` zero-copy wiring in #208/#213 sound by construction), this test
+/// flips to assert rejection — it is the change-detector for that decision.
+#[test]
+fn string_content_invalid_utf8_is_accepted_diverging_from_serde() {
+    let bytes: &[u8] = b"\"a\xffb\""; // a raw 0xFF byte inside the string, no escape
+    let r = rope(bytes, bytes.len());
+    let toks: Vec<_> = Tokenizer::new(&r)
+        .collect::<Result<_, _>>()
+        .expect("byte-oriented lexer currently accepts non-UTF-8 string content");
+    assert_eq!(toks.len(), 1, "one String token");
+    assert_eq!(toks[0].kind(), TokenKind::String);
+    assert_eq!(
+        toks[0].string_has_escapes(),
+        Some(false),
+        "escape-free, so a consumer takes the zero-copy borrow arm"
+    );
+    // The accepted content is genuinely not valid UTF-8 — the crux of the divergence.
+    let span = toks[0]
+        .string_span()
+        .expect("string token has a content span");
+    let content = r.slice(span.range()).copy_to_bytes();
+    assert!(
+        core::str::from_utf8(&content).is_err(),
+        "content is not valid UTF-8 (the divergence)"
+    );
+    // serde_json rejects the same bytes outright.
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(bytes).is_err(),
+        "serde_json rejects non-UTF-8 JSON per RFC 8259"
+    );
+}
+
 #[test]
 fn byte_order_mark_is_rejected() {
     // JSON has no BOM; a leading U+FEFF (EF BB BF) is not a valid token start, so the tokenizer
