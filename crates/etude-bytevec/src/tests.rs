@@ -892,6 +892,7 @@ fn differential_against_model() {
         TakeAliases(usize, usize),
         MutateAlias(usize, u8),
         PushShared,
+        StartsEndsWith(usize, Vec<u8>),
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
@@ -1070,6 +1071,27 @@ fn differential_against_model() {
                 Op::PushShared => {
                     rope.push_back(big.clone());
                     model.extend_from_slice(&big);
+                }
+                Op::StartsEndsWith(k, d) => {
+                    // chunk-aware starts_with/ends_with (#58) vs the model: a REAL prefix/suffix
+                    // always matches, its single-byte perturbation never does, and a random
+                    // literal agrees with the slice oracle.
+                    let k = k % (model.len() + 1);
+                    assert!(rope.starts_with(&model[..k]), "own prefix len {k}");
+                    assert!(
+                        rope.ends_with(&model[model.len() - k..]),
+                        "own suffix len {k}"
+                    );
+                    if k > 0 {
+                        let mut p = model[..k].to_vec();
+                        p[k - 1] = p[k - 1].wrapping_add(1);
+                        assert!(!rope.starts_with(&p), "perturbed prefix matched, len {k}");
+                        let mut s = model[model.len() - k..].to_vec();
+                        s[0] = s[0].wrapping_add(1);
+                        assert!(!rope.ends_with(&s), "perturbed suffix matched, len {k}");
+                    }
+                    assert_eq!(rope.starts_with(d), model.starts_with(&d[..]));
+                    assert_eq!(rope.ends_with(d), model.ends_with(&d[..]));
                 }
             }
             assert_eq!(rope.len(), model.len(), "len after {op:?}");
