@@ -19,9 +19,12 @@
 //! A consumer that materializes every value pays more still — a separate story.
 //!
 //! The isolated workloads confirm the split (raw_tokenize ≈ or beats serde in every one):
-//! - `digest_numbers`: serde ~21µs, raw_tokenize ~20µs, adapter ~130µs — a **6.5x** handoff tax, ~220ns
-//!   per number building four eager sub-ropes the digest ignores. The sharpest case for lazy components.
-//! - `digest_strings`: serde ~29µs, raw_tokenize ~26µs, adapter ~106µs — the `from_utf8` re-validation.
+//! - `digest_numbers`: after making `NumberToken` lazy (one eager lexeme slice + on-demand component
+//!   accessors, replacing four eager sub-ropes), the adapter dropped ~130µs → ~86µs (≈ -34%) — the
+//!   eager slicing was about a third of the number handoff. The residual gap over raw_tokenize is the
+//!   single lexeme slice + the Stream lookahead / dispatch per value.
+//! - `digest_strings`: serde ~29µs, raw_tokenize ~26µs, adapter ~106µs — the `from_utf8` re-validation
+//!   (the next lever, pending strrope's `from_utf8_unchecked`).
 
 use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};

@@ -31,14 +31,15 @@ impl Deserializer for ValDe {
             Val::Null => visitor.visit_null(),
             Val::Bool(b) => visitor.visit_bool(b),
             Val::Str(s) => visitor.visit_str(s),
-            Val::Int => visitor.visit_number(NumberToken {
-                lexeme: ByteVec::from(&b"-1"[..]),
-                negative: true,
-                integer: ByteVec::from(&b"1"[..]),
-                fraction: None,
-                exponent: None,
-                exponent_negative: false,
-            }),
+            // lexeme "-1": integer digit "1" is at offset 1..2.
+            Val::Int => visitor.visit_number(NumberToken::new(
+                ByteVec::from(&b"-1"[..]),
+                true,
+                1..2,
+                None,
+                None,
+                false,
+            )),
             Val::Arr(items) => visitor.visit_seq(SeqDe {
                 iter: items.into_iter(),
             }),
@@ -190,25 +191,22 @@ fn rope_str_arms_and_helpers() {
 
 #[test]
 fn number_token_integer_flag() {
-    let int = NumberToken {
-        lexeme: ByteVec::from(&b"123"[..]),
-        negative: false,
-        integer: ByteVec::from(&b"123"[..]),
-        fraction: None,
-        exponent: None,
-        exponent_negative: false,
-    };
+    let int = NumberToken::new(ByteVec::from(&b"123"[..]), false, 0..3, None, None, false);
     assert!(int.is_integer());
+    assert_eq!(int.integer().copy_to_bytes().as_ref(), b"123");
 
-    let float = NumberToken {
-        lexeme: ByteVec::from(&b"1.5"[..]),
-        negative: false,
-        integer: ByteVec::from(&b"1"[..]),
-        fraction: Some(ByteVec::from(&b"5"[..])),
-        exponent: None,
-        exponent_negative: false,
-    };
+    // lexeme "1.5": integer "1" at 0..1, fraction "5" at 2..3.
+    let float = NumberToken::new(
+        ByteVec::from(&b"1.5"[..]),
+        false,
+        0..1,
+        Some(2..3),
+        None,
+        false,
+    );
     assert!(!float.is_integer());
+    assert_eq!(float.integer().copy_to_bytes().as_ref(), b"1");
+    assert_eq!(float.fraction().unwrap().copy_to_bytes().as_ref(), b"5");
 }
 
 #[test]

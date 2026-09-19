@@ -34,7 +34,7 @@
 extern crate alloc;
 
 use etude_bytevec::ByteVec;
-use etude_json::{Token, TokenKind, Tokenizer};
+use etude_json::{Span, Token, TokenKind, Tokenizer};
 use etude_serde::{Deserializer, Error, MapAccess, NumberToken, RopeStr, SeqAccess, Visitor};
 use etude_strrope::StrRope;
 
@@ -151,19 +151,23 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                 }
             }
             TokenKind::Number => {
-                // Slice the whole-lexeme span (primary payload, feeds Decimal::parse) and each
-                // component span into O(1) sub-ropes, so the NumberToken is self-contained — the
-                // Visitor decodes with no handle on the source rope.
+                // Slice the whole-lexeme span ONCE (the only eager cost, and it makes the token
+                // self-contained), then record each component as an offset RANGE WITHIN the lexeme —
+                // the Visitor materializes a component only if it asks. This collapses the old
+                // four-slices-per-number handoff to one slice for a skip/scan consumer.
                 let p = token.number_parts().expect("Number token has parts");
                 let input = self.stream.input;
-                visitor.visit_number(NumberToken {
-                    lexeme: input.slice(token.span().range()),
-                    negative: p.negative,
-                    integer: input.slice(p.integer.range()),
-                    fraction: p.fraction.map(|s| input.slice(s.range())),
-                    exponent: p.exponent.map(|s| input.slice(s.range())),
-                    exponent_negative: p.exponent_negative,
-                })
+                let lex = token.span().range();
+                let base = lex.start;
+                let rel = |s: Span| (s.range().start - base)..(s.range().end - base);
+                visitor.visit_number(NumberToken::new(
+                    input.slice(lex),
+                    p.negative,
+                    rel(p.integer),
+                    p.fraction.map(rel),
+                    p.exponent.map(rel),
+                    p.exponent_negative,
+                ))
             }
             TokenKind::BeginArray => {
                 self.stream.depth += 1;

@@ -26,12 +26,6 @@ fn rope(bytes: &[u8], chunk: usize) -> ByteVec {
     r
 }
 
-/// The ASCII digits of a component sub-rope as an owned string.
-fn digits(run: &ByteVec) -> String {
-    let bytes = run.copy_to_bytes();
-    String::from_utf8(bytes.as_ref().to_vec()).expect("digits are ASCII")
-}
-
 /// A [`Visitor`] that builds a `serde_json::Value`, so the adapter's output can be compared to
 /// `serde_json::from_slice` directly. It recurses into containers, exercising the whole seam.
 struct BuildValue;
@@ -52,25 +46,10 @@ impl Visitor for BuildValue {
         Err(Error::custom("JSON has no bytes value"))
     }
     fn visit_number(self, n: NumberToken) -> Result<Value, Error> {
-        // Reconstruct the lexeme from the component digit runs and let serde parse it, so both sides
-        // of the differential produce the same `Number` value regardless of `e`/`E`/`+` spelling.
-        let mut lex = String::new();
-        if n.negative {
-            lex.push('-');
-        }
-        lex.push_str(&digits(&n.integer));
-        if let Some(frac) = &n.fraction {
-            lex.push('.');
-            lex.push_str(&digits(frac));
-        }
-        if let Some(exp) = &n.exponent {
-            lex.push('e');
-            if n.exponent_negative {
-                lex.push('-');
-            }
-            lex.push_str(&digits(exp));
-        }
-        serde_json::from_str(&lex).map_err(Error::custom)
+        // Parse the primary lexeme sub-rope directly — it is the exact original number bytes, so serde
+        // produces the same `Number` on both sides of the differential.
+        let bytes = n.lexeme().copy_to_bytes();
+        serde_json::from_slice(bytes.as_ref()).map_err(Error::custom)
     }
     fn visit_seq<A: SeqAccess>(self, mut seq: A) -> Result<Value, Error> {
         let mut items = Vec::new();

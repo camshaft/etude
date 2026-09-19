@@ -23,9 +23,9 @@
 //!   content) or `Owned` (an unescaped buffer; unescape can never be a pure borrow). The decoder
 //!   picks the arm from its cheap has-escapes flag, with no re-scan.
 //! - Bytes: [`RopeBytes`] — `Borrowed` sub-rope or `Owned` buffer.
-//! - Numbers: [`NumberToken`] — never a borrow, always a lazy decode, but skippable. It carries the
-//!   byte-offset spans of the number's components so a value constructor
-//!   (`Decimal::from_components`, …) is handed validated digits with no intermediate `String` (§6).
+//! - Numbers: [`NumberToken`] — never a borrow, always a lazy, skippable decode. One eager sub-rope
+//!   (the whole lexeme, for `Decimal::parse`) plus component digit runs kept as offsets and sliced only
+//!   on demand (for `Decimal::from_components`), so a skip/scan consumer pays a single slice (§5, §6).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
@@ -35,6 +35,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::Range;
 use etude_bytevec::ByteVec;
 use etude_strrope::StrRope;
 
@@ -93,43 +94,83 @@ impl RopeBytes {
     }
 }
 
-/// A number, as owned-shared [`ByteVec`] sub-ropes of the source — never a borrow of a parsed value,
-/// always a lazy, skippable decode. All runs are O(1) structural shares of the same source chunks
-/// (numbers are short), so the token is self-contained: the [`Visitor`] can decode without any handle
-/// on the source rope.
+/// A number, handed to a [`Visitor`] as one owned-shared sub-rope plus lazy component metadata — never
+/// a borrow of a parsed value, always a skippable decode. Self-contained (the Visitor has no handle on
+/// the source rope), yet the eager cost is a *single* O(1) sub-rope slice regardless of how much the
+/// consumer reads (design §5, settled — materialize-on-demand applied inside the token).
 ///
-/// It is a *superset* handoff (design §5/§6, settled):
-/// - [`lexeme`](NumberToken::lexeme) is the **primary** payload — the whole validated number lexeme as
-///   one sub-rope. Its byte iterator (`lexeme.chunks().flat_map(|c| c.iter().copied())`) feeds a
-///   from-text value constructor such as `Decimal::parse(impl IntoIterator<Item = u8>)`. One slice, no
-///   re-synthesis of the `.`/`e`/sign.
-/// - The component runs + flags below are cheap structural metadata for a consumer that wants
-///   integer-detection without re-scanning, or a value type that wants pre-split digits
-///   (`Decimal::from_components(sign, int_digits, frac_digits, exp)`). The coefficient digits are
-///   `integer` then `fraction`; the effective power of ten is `±exponent − fraction.len()`.
-///
-/// A decoder builds all of these from its recorded spans (`etude_json::Token::span` for the lexeme,
-/// `Token::number_parts` for the components) with one `ByteVec::slice` each. (A bare `Span` would not
-/// work at the visit boundary — the Visitor has no handle on the source rope to resolve it.)
+/// - [`lexeme`](NumberToken::lexeme) is the **primary** payload and the only eager slice: the whole
+///   validated number lexeme. Its byte iterator (`lexeme().chunks().flat_map(|c| c.iter().copied())`)
+///   feeds a from-text value constructor such as `Decimal::parse(impl IntoIterator<Item = u8>)`.
+/// - The integer / fraction / exponent digit runs are stored as **offset ranges within the lexeme**
+///   (private, an invariant the decoder establishes — a consumer can't hand-build mismatched offsets)
+///   and materialized only when asked, via [`integer`](Self::integer) / [`fraction`](Self::fraction) /
+///   [`exponent`](Self::exponent) (each one O(1) sub-slice of the short single-chunk lexeme). This
+///   feeds a pre-split-digit constructor (`Decimal::from_components(sign, int, frac, exp)`), while a
+///   skip/scan consumer pays nothing beyond the lexeme and [`is_integer`](Self::is_integer) is free.
 #[derive(Clone, Debug)]
 pub struct NumberToken {
-    /// The whole number lexeme (sign, integer, optional fraction, optional exponent) as one sub-rope —
-    /// the primary payload for a from-text value constructor.
-    pub lexeme: ByteVec,
-    /// The lexeme has a leading `-`.
-    pub negative: bool,
-    /// The integer-part digits (no sign) — a non-empty run for a valid number.
-    pub integer: ByteVec,
-    /// The fraction digits after `.` (digits only), or `None` if there is no fraction.
-    pub fraction: Option<ByteVec>,
-    /// The exponent digits after `e`/`E` and its optional sign (digits only), or `None`.
-    pub exponent: Option<ByteVec>,
-    /// The exponent carries an explicit `-`. `false` when there is no exponent or it is `+`/unsigned.
-    pub exponent_negative: bool,
+    lexeme: ByteVec,
+    negative: bool,
+    integer: Range<usize>,
+    fraction: Option<Range<usize>>,
+    exponent: Option<Range<usize>>,
+    exponent_negative: bool,
 }
 
 impl NumberToken {
-    /// Whether the lexeme is an integer — no fraction and no exponent.
+    /// Build a number token from a validated lexeme and its component offsets. Producer-only (the
+    /// decoder / tokenizer): each range MUST index within `lexeme` and cover only that component's
+    /// digits (no sign / `.` / `e`), and `integer` must be non-empty for a valid number.
+    pub fn new(
+        lexeme: ByteVec,
+        negative: bool,
+        integer: Range<usize>,
+        fraction: Option<Range<usize>>,
+        exponent: Option<Range<usize>>,
+        exponent_negative: bool,
+    ) -> Self {
+        NumberToken {
+            lexeme,
+            negative,
+            integer,
+            fraction,
+            exponent,
+            exponent_negative,
+        }
+    }
+
+    /// The whole number lexeme — the primary payload; feed its byte iterator to a from-text ctor.
+    pub fn lexeme(&self) -> &ByteVec {
+        &self.lexeme
+    }
+
+    /// Whether the lexeme has a leading `-`.
+    pub fn is_negative(&self) -> bool {
+        self.negative
+    }
+
+    /// The integer-part digits (no sign) — an O(1) sub-slice of the lexeme, materialized on demand.
+    pub fn integer(&self) -> ByteVec {
+        self.lexeme.slice(self.integer.clone())
+    }
+
+    /// The fraction digits after `.` (digits only), or `None` — materialized on demand.
+    pub fn fraction(&self) -> Option<ByteVec> {
+        self.fraction.clone().map(|r| self.lexeme.slice(r))
+    }
+
+    /// The exponent digits after `e`/`E` and its optional sign (digits only), or `None` — on demand.
+    pub fn exponent(&self) -> Option<ByteVec> {
+        self.exponent.clone().map(|r| self.lexeme.slice(r))
+    }
+
+    /// Whether the exponent carries an explicit `-`. `false` with no exponent or a `+`/unsigned one.
+    pub fn exponent_is_negative(&self) -> bool {
+        self.exponent_negative
+    }
+
+    /// Whether the lexeme is an integer — no fraction and no exponent. Free (no slice).
     pub fn is_integer(&self) -> bool {
         self.fraction.is_none() && self.exponent.is_none()
     }

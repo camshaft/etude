@@ -36,7 +36,7 @@ impl Visitor for DecimalNum {
 
     fn visit_number(self, n: NumberToken) -> Result<Decimal, Error> {
         // The whole point: parse straight off the lexeme rope, no intermediate String, cross-chunk safe.
-        Decimal::parse(n.lexeme.chunks().flat_map(|c| c.iter().copied()))
+        Decimal::parse(n.lexeme().chunks().flat_map(|c| c.iter().copied()))
             .ok_or_else(|| Error::custom("Decimal::parse rejected a tokenizer-validated number"))
     }
     fn visit_null(self) -> Result<Decimal, Error> {
