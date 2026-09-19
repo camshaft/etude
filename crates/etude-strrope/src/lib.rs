@@ -190,6 +190,76 @@ mod tests {
     use super::StrRope;
     use etude_bytevec::ByteVec;
 
+    /// Differential oracle vs `str`/`String`: arbitrary raw bytes, built into ropes under several
+    /// chunk layouts (so multi-byte codepoints and invalid sequences STRADDLE leaf boundaries), must
+    /// agree with `core::str::from_utf8` on accept/reject AND `valid_up_to`; on accept, every
+    /// str-facing query must match the flat `&str`. This is the fence for any future optimization of
+    /// the linearize-then-validate path (e.g. per-chunk validation with boundary stitching).
+    #[test]
+    fn differential_against_str_oracle() {
+        use core::hash::{Hash, Hasher};
+        fn hash_of(s: &StrRope) -> u64 {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        }
+        bolero::check!()
+            .with_type::<Vec<u8>>()
+            .cloned()
+            .for_each(|bytes| {
+                let oracle = core::str::from_utf8(&bytes);
+                let mut accepted: Vec<StrRope> = Vec::new();
+                for chunk in [1usize, 2, 3, 7, bytes.len().max(1)] {
+                    let mut rope = ByteVec::new();
+                    for piece in bytes.chunks(chunk) {
+                        rope.push_back(bytes::Bytes::copy_from_slice(piece));
+                    }
+                    match (StrRope::from_utf8(rope), oracle) {
+                        (Ok(s), Ok(flat)) => {
+                            assert_eq!(s.len(), flat.len(), "len at chunk={chunk}");
+                            assert_eq!(s, *flat, "content at chunk={chunk}");
+                            assert!(
+                                s.bytes().eq(flat.bytes()),
+                                "byte iterator at chunk={chunk}"
+                            );
+                            // is_char_boundary parity on every index incl. len and past-end.
+                            for i in 0..=flat.len() + 1 {
+                                assert_eq!(
+                                    s.is_char_boundary(i),
+                                    flat.is_char_boundary(i),
+                                    "is_char_boundary({i}) at chunk={chunk}"
+                                );
+                            }
+                            assert_eq!(format!("{s}"), flat, "Display at chunk={chunk}");
+                            accepted.push(s);
+                        }
+                        (Err(e), Err(want)) => {
+                            assert_eq!(
+                                e.valid_up_to(),
+                                want.valid_up_to(),
+                                "valid_up_to at chunk={chunk}"
+                            );
+                        }
+                        (got, want) => panic!(
+                            "accept/reject diverged from str oracle at chunk={chunk}: rope={}, str={}",
+                            got.is_ok(),
+                            want.is_ok()
+                        ),
+                    }
+                }
+                // Chunking must be invisible to Eq/Ord/Hash across every accepted layout.
+                for pair in accepted.windows(2) {
+                    assert_eq!(pair[0], pair[1], "Eq across chunkings");
+                    assert_eq!(
+                        pair[0].cmp(&pair[1]),
+                        core::cmp::Ordering::Equal,
+                        "Ord across chunkings"
+                    );
+                    assert_eq!(hash_of(&pair[0]), hash_of(&pair[1]), "Hash across chunkings");
+                }
+            });
+    }
+
     #[test]
     fn from_str_and_basic_queries() {
         let s = StrRope::from("héllo");
