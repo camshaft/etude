@@ -95,6 +95,35 @@ fn finish_leaf(block: &mut Block, mut chunks: Vec<Bytes>, added: usize) -> Inser
     }
 }
 
+/// Applies a [`crate::CowEdit`] to chunk `i` of a leaf's chunk vec, splicing in the extra pieces of a
+/// split. Returns the number of chunks added (0, 1, or 2); slot `i` must already have been consumed
+/// (taken). Mirrors `splice_cow_deque` (lib.rs) for a `Vec` leaf block.
+fn splice_cow_vec(chunks: &mut Vec<Bytes>, i: usize, edit: crate::CowEdit) -> usize {
+    match edit {
+        crate::CowEdit::InPlace(c) => {
+            chunks[i] = c;
+            0
+        }
+        crate::CowEdit::Split {
+            prefix,
+            mid,
+            suffix,
+        } => {
+            chunks[i] = mid;
+            let mut added = 0;
+            if let Some(s) = suffix {
+                chunks.insert(i + 1, s);
+                added += 1;
+            }
+            if let Some(p) = prefix {
+                chunks.insert(i, p); // pushes `mid` (and any suffix) right by one
+                added += 1;
+            }
+            added
+        }
+    }
+}
+
 /// Absorbs a child's [`InsertResult`] into `branch` at child index `i`: bumps the chunk `count`, and
 /// when the child split, fixes the boundary `sizes` and inserts the sibling, splitting this branch (and
 /// bubbling a new overflow) if it exceeds `FANOUT`. `total` is unchanged (bytes are conserved).
@@ -323,45 +352,89 @@ impl Node {
 
     /// Overwrites `count` bytes starting at `offset` within this node with bytes streamed from
     /// `value` (`offset + count <= byte_len`). FBIP: `Arc::make_mut` mutates uniquely-owned nodes in
-    /// place and path-copies only shared spine nodes; each covered leaf chunk is edited in place when
-    /// unique (else copied). Byte lengths are unchanged, so no cache fix-up. O(log₃₂ + covered chunks).
-    fn overwrite<R>(&mut self, offset: usize, count: usize, value: &mut R)
+    /// place and path-copies only shared spine nodes; each covered leaf chunk is edited with the
+    /// bounded [`crate::cow_edit`] — in place when uniquely owned, else a copy bounded by the edited
+    /// span, sharing the untouched prefix/suffix of a large shared chunk rather than copying it whole.
+    /// Byte totals are conserved, but a bounded-COW split of a boundary chunk GROWS the chunk count, so
+    /// this threads a B-tree [`InsertResult`] back up the spine (like [`Node::set_byte`]): a leaf may
+    /// split at `FANOUT` and a branch may split once after absorbing its children's inserts. Only the
+    /// first- and last-covered child of a branch can split (interior children are fully covered, so
+    /// every chunk is rewritten whole → `InPlace`, no new chunks), so a branch gains at most two
+    /// children per overwrite — one `split_branch_off` suffices. O(log₃₂ + covered chunks).
+    fn overwrite<R>(&mut self, offset: usize, count: usize, value: &mut R) -> InsertResult
     where
         R: etude_buffer::reader::Buffer<Error = core::convert::Infallible>,
     {
+        use etude_buffer::reader::Infallible as _;
         match self {
             Node::Leaf(arc) => {
                 let block = Arc::make_mut(arc);
-                let mut off = offset;
+                let mut chunks = core::mem::take(&mut block.chunks).into_vec();
+                let mut local = offset;
                 let mut idx = 0;
-                while off >= block.chunks[idx].len() {
-                    off -= block.chunks[idx].len();
+                while local >= chunks[idx].len() {
+                    local -= chunks[idx].len();
                     idx += 1;
                 }
                 let mut remaining = count;
+                let mut added = 0;
                 while remaining > 0 {
-                    let here = (block.chunks[idx].len() - off).min(remaining);
-                    crate::overwrite_one(&mut block.chunks[idx], off, here, value);
+                    let here = (chunks[idx].len() - local).min(remaining);
+                    let edit =
+                        crate::cow_edit(core::mem::take(&mut chunks[idx]), local, here, |s| {
+                            let mut dst: &mut [u8] = s;
+                            value.infallible_copy_into(&mut dst);
+                        });
+                    let n = splice_cow_vec(&mut chunks, idx, edit);
+                    added += n;
                     remaining -= here;
-                    off = 0;
-                    idx += 1;
+                    idx += 1 + n; // skip past any spliced-in prefix/suffix to the next original chunk
+                    local = 0;
                 }
+                finish_leaf(block, chunks, added)
             }
             Node::Branch(arc) => {
                 let branch = Arc::make_mut(arc);
-                let mut off = offset;
+                let mut local = offset;
                 let mut i = 0;
-                while off >= branch.sizes[i] {
-                    off -= branch.sizes[i];
+                while local >= branch.sizes[i] {
+                    local -= branch.sizes[i];
                     i += 1;
                 }
                 let mut remaining = count;
+                let mut total_added = 0;
                 while remaining > 0 {
-                    let here = (branch.sizes[i] - off).min(remaining);
-                    branch.children[i].overwrite(off, here, value);
+                    // Byte totals are conserved, so the child's covered span is fixed by its ORIGINAL
+                    // cached size even if it splits below.
+                    let here = (branch.sizes[i] - local).min(remaining);
+                    let res = branch.children[i].overwrite(local, here, value);
+                    branch.count += res.added;
+                    total_added += res.added;
                     remaining -= here;
-                    off = 0;
-                    i += 1;
+                    local = 0;
+                    let mut step = 1;
+                    if let Some(sib) = res.overflow {
+                        // The child split: fix its now-shrunk boundary size and splice the sibling in.
+                        // Defer any split of THIS branch until the whole walk finishes so indices stay
+                        // stable (only the first/last-covered child can reach here, ≤2 inserts total).
+                        branch.sizes[i] = branch.children[i].byte_len();
+                        let sib_bytes = sib.byte_len();
+                        branch.children.insert(i + 1, sib);
+                        branch.sizes.insert(i + 1, sib_bytes);
+                        step = 2; // skip past the inserted sibling to the next original child
+                    }
+                    i += step;
+                }
+                if branch.children.len() > FANOUT {
+                    InsertResult {
+                        added: total_added,
+                        overflow: Some(split_branch_off(branch)),
+                    }
+                } else {
+                    InsertResult {
+                        added: total_added,
+                        overflow: None,
+                    }
                 }
             }
         }
@@ -498,10 +571,17 @@ impl Tree {
         if count == 0 {
             return;
         }
-        self.root
+        let res = self
+            .root
             .as_mut()
             .expect("overwrite on an empty tree")
             .overwrite(offset, count, value);
+        self.chunk_count += res.added;
+        if let Some(sib) = res.overflow {
+            let old = self.root.take().unwrap();
+            self.root = Some(Node::branch2(old, sib));
+            self.height += 1;
+        }
     }
 
     /// Appends a block (`1..=FANOUT` chunks) at the back. In-place when uniquely owned.

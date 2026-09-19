@@ -1295,24 +1295,6 @@ fn locate_within_chunk(
     None // `start` is at the very end — an append, not a within-chunk edit
 }
 
-/// Overwrites `[local, local + here)` of a single chunk with the next `here` bytes from `value`, in
-/// place when the chunk uniquely owns its allocation (`try_into_mut`), else copying just this one
-/// chunk (COW). The bytes stream straight into the target slice — no allocation for the source.
-pub(crate) fn overwrite_one<R>(slot: &mut Bytes, local: usize, here: usize, value: &mut R)
-where
-    R: etude_buffer::reader::Buffer<Error = core::convert::Infallible>,
-{
-    use etude_buffer::reader::Infallible as _;
-    let mut buf = match core::mem::take(slot).try_into_mut() {
-        Ok(unique) => unique,
-        Err(shared) => BytesMut::from(&shared[..]),
-    };
-    // `&mut [u8]` is a fixed-capacity writer, so this fills exactly `here` bytes.
-    let mut dst: &mut [u8] = &mut buf[local..local + here];
-    value.infallible_copy_into(&mut dst);
-    *slot = buf.freeze();
-}
-
 /// Replaces chunk `si` (0 = `head`, `k` = `additional[k-1]`) — keeping `[..so]` and `[eo..]` of it —
 /// with a single chunk holding `[..so] ++ value ++ [eo..]`. One allocation; removes the element if
 /// the result is empty. The byte source streams into the buffer with no allocation of its own.
@@ -1352,7 +1334,7 @@ fn splice_one_chunk<R>(
 
 /// Overwrites `count` bytes starting at flat-tier offset `start` with bytes streamed from `value`
 /// (an equal-length edit: `start + count` is in bounds). Walks only the covered chunks — locates the
-/// first with a partial scan, then writes each once via [`overwrite_one`]. No list allocation, no rescan.
+/// first with a partial scan, then writes each once via bounded [`cow_edit`]. No list alloc, no rescan.
 fn overwrite_flat<R>(
     head: &mut Bytes,
     additional: &mut VecDeque<Bytes>,
