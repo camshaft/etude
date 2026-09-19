@@ -75,10 +75,24 @@ the rope scan — it is the per-token **handoff**. Two attributed costs and thei
   double-scan is the *cost of laziness* and the right trade: escape-free strings (the common case) get
   the zero-copy borrow and win; escaped strings (the minority) pay twice. So **"#147" is declined** —
   a negligible measured win that would add an `unsafe` public API to the lexer.
+- **Dispatch — by reference, not by move** — even at 96 bytes the `Token` was moved *out* of the
+  lookahead on every value (`Stream::next() -> Token`), yet the deserializer only ever *reads* it
+  through `&self` accessors. Replacing `next()` with `peek() -> Option<&Token>` + `bump()` dispatches
+  by reference — each arm reads only the small `Copy` metadata it uses (a container reads just the
+  1-byte kind) — cutting `digest_containers` **54 µs → 44.5 µs (−17.0%, ratio 2.64× → 2.20×)** and
+  `digest_mixed` **−6.3%**, differential-fuzz-validated as behavior-preserving. Spike-side (the adapter
+  is frozen behind #184); staged, not landed to main. Combined with #247 the container path is
+  **76 µs → 44.5 µs (~42% off)**.
 
 The `raw_tokenize` baseline is what re-attributed this gap: an earlier reading blamed the tokenizer's
 `byte_at` scan, and a fresh measurement falsified it — for escape-free input the scan is competitive
-(beats serde) and the handoff was the lever (cut by #247); only escape-heavy input makes the scan lose.
-The remaining ~2.64× on containers is generic-`Visitor` dispatch + per-element recursive re-entry + the
-lookahead fill/take, not memcpy — the next lever, if pursued, lives there (spike-side; the adapter stays
-spike-only per the operator's Decision 0 pending #184 review).
+(beats serde) and the handoff was the lever. **Ranked lever status on the ~2.2× container path**
+(adapter 44.5 µs vs serde 20 µs vs `raw_tokenize` 18 µs, so ~26 µs of SAX machinery sits over the bare
+scan): (1) Token memcpy — *addressed*, shrink #247 + by-ref dispatch together removed the whole
+move/copy cost; (2) remaining ~26 µs is lookahead fill/take churn + per-element recursive re-entry into
+`deserialize_any` + generic-`Visitor` calls — increasingly **inherent** SAX-vs-specialized-builder
+overhead (serde's `Value` builder is one tight recursive loop with no per-node trait dispatch). Further
+wins here look small and structural (e.g. flattening the `Option<Result<Option<Token>, Error>>`
+lookahead slot); none are a clean high-value lever, so the profiling stops here. All post-Token-memcpy
+work is spike-side; the adapter stays spike-only per the operator's Decision 0 pending #184 review, so
+these levers graduate *with this data* when #184 clears — they are not landed to main now.

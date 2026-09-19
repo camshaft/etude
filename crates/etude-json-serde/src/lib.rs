@@ -64,7 +64,7 @@ pub fn from_rope_with<V: Visitor>(
 ) -> Result<V::Value, Error> {
     let mut stream = Stream::with_strictness(input, strictness);
     let value = de(&mut stream).deserialize_any(visitor)?;
-    match stream.next()? {
+    match stream.peek()? {
         None => Ok(value),
         Some(_) => Err(Error::custom("trailing tokens after a complete value")),
     }
@@ -122,10 +122,22 @@ impl<'a> Stream<'a> {
         }
     }
 
-    /// Consume and return the next token, `None` at end of input.
-    fn next(&mut self) -> Result<Option<Token>, Error> {
+    /// Borrow the next token without consuming it (`None` at end of input). Combined with [`Stream::bump`]
+    /// this dispatches on the token *by reference*: the deserializer reads it only through accessors and
+    /// never needs to own it, so the (comparatively large) `Token` is not moved out of the lookahead on
+    /// every value — only the small `Copy` metadata a given arm actually uses is read out.
+    fn peek(&mut self) -> Result<Option<&Token>, Error> {
         self.fill();
-        self.peeked.take().expect("filled")
+        match self.peeked.as_ref().expect("filled") {
+            Ok(opt) => Ok(opt.as_ref()),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// Advance past the currently-peeked token. Cheap — it drops the lookahead slot so the next
+    /// [`Stream::fill`] tokenizes the following token. Call only after a successful peek.
+    fn bump(&mut self) {
+        self.peeked = None;
     }
 }
 
@@ -141,33 +153,51 @@ struct JsonDeserializer<'a, 'b> {
 
 impl Deserializer for JsonDeserializer<'_, '_> {
     fn deserialize_any<V: Visitor>(self, visitor: V) -> Result<V::Value, Error> {
-        let token = self
-            .stream
-            .next()?
-            .ok_or_else(|| Error::custom("expected a value, found end of input"))?;
-        match token.kind() {
-            TokenKind::Null => visitor.visit_null(),
-            TokenKind::True => visitor.visit_bool(true),
-            TokenKind::False => visitor.visit_bool(false),
+        // Dispatch on the token BY REFERENCE: read its kind (Copy) from the lookahead without moving
+        // the whole `Token` out, then let each arm read only the small `Copy` metadata it needs and
+        // `bump` past it. This keeps the ~96-byte `Token` in the lookahead slot instead of memcpying
+        // it per value.
+        let kind = match self.stream.peek()? {
+            Some(t) => t.kind(),
+            None => return Err(Error::custom("expected a value, found end of input")),
+        };
+        match kind {
+            TokenKind::Null => {
+                self.stream.bump();
+                visitor.visit_null()
+            }
+            TokenKind::True => {
+                self.stream.bump();
+                visitor.visit_bool(true)
+            }
+            TokenKind::False => {
+                self.stream.bump();
+                visitor.visit_bool(false)
+            }
             TokenKind::String => {
-                let input = self.stream.input;
                 // Copy-avoidance payoff: an escape-free string's content is handed as an O(1) structural
                 // share (RopeStr::Borrowed) — no unescape, no allocation; only an escaped string is
-                // materialized into an Owned buffer, chosen from the cheap has-escapes flag.
+                // materialized into an Owned buffer, chosen from the cheap has-escapes flag. The built
+                // `RopeStr` owns its data (rope handle / String), so the token borrow can end before we
+                // `bump`.
+                let input = self.stream.input;
+                let strictness = self.stream.strictness;
+                let token = self.stream.peek()?.expect("peeked a String token above");
                 let has_escapes = token
                     .string_has_escapes()
                     .expect("String token has an escapes flag");
-                if has_escapes {
-                    let s = token
-                        .decode_string(input)
-                        .ok_or_else(|| Error::custom("string content could not be decoded"))?;
-                    visitor.visit_str(RopeStr::Owned(s))
+                let rope_str = if has_escapes {
+                    RopeStr::Owned(
+                        token
+                            .decode_string(input)
+                            .ok_or_else(|| Error::custom("string content could not be decoded"))?,
+                    )
                 } else {
                     let span = token
                         .string_span()
                         .expect("String token has a content span");
                     let content = input.slice(span.range());
-                    let rope = match self.stream.strictness {
+                    let rope = match strictness {
                         // A Strict tokenizer validates string-content UTF-8 at lex, so this span is
                         // guaranteed valid UTF-8 and the O(1) unchecked conversion is the zero-copy
                         // fast path — no redundant re-scan of the borrowed content.
@@ -183,29 +213,35 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                         Strictness::Lenient => StrRope::from_utf8(content)
                             .map_err(|_| Error::custom("string content is not valid UTF-8"))?,
                     };
-                    visitor.visit_str(RopeStr::Borrowed(rope))
-                }
+                    RopeStr::Borrowed(rope)
+                };
+                self.stream.bump();
+                visitor.visit_str(rope_str)
             }
             TokenKind::Number => {
                 // Slice the whole-lexeme span ONCE (the only eager cost, and it makes the token
                 // self-contained), then record each component as an offset RANGE WITHIN the lexeme —
                 // the Visitor materializes a component only if it asks. This collapses the old
                 // four-slices-per-number handoff to one slice for a skip/scan consumer.
-                let p = token.number_parts().expect("Number token has parts");
                 let input = self.stream.input;
+                let token = self.stream.peek()?.expect("peeked a Number token above");
+                let p = token.number_parts().expect("Number token has parts");
                 let lex = token.span().range();
                 let base = lex.start;
                 let rel = |s: Span| (s.range().start - base)..(s.range().end - base);
-                visitor.visit_number(NumberToken::new(
+                let number = NumberToken::new(
                     input.slice(lex),
                     p.negative,
                     rel(p.integer),
                     p.fraction.map(rel),
                     p.exponent.map(rel),
                     p.exponent_negative,
-                ))
+                );
+                self.stream.bump();
+                visitor.visit_number(number)
             }
             TokenKind::BeginArray => {
+                self.stream.bump();
                 self.stream.depth += 1;
                 if self.stream.depth > MAX_DEPTH {
                     return Err(Error::custom("recursion limit exceeded"));
@@ -220,6 +256,7 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                 out
             }
             TokenKind::BeginObject => {
+                self.stream.bump();
                 self.stream.depth += 1;
                 if self.stream.depth > MAX_DEPTH {
                     return Err(Error::custom("recursion limit exceeded"));
@@ -232,6 +269,7 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                 out
             }
             TokenKind::EndArray | TokenKind::EndObject | TokenKind::Colon | TokenKind::Comma => {
+                self.stream.bump();
                 Err(Error::custom(
                     "unexpected structural token where a value was expected",
                 ))
@@ -250,7 +288,7 @@ impl SeqAccess for Seq<'_, '_> {
         match self.stream.peek_kind()? {
             None => return Err(Error::custom("unterminated array")),
             Some(TokenKind::EndArray) => {
-                self.stream.next()?;
+                self.stream.bump();
                 return Ok(None);
             }
             _ => {}
@@ -259,8 +297,8 @@ impl SeqAccess for Seq<'_, '_> {
             self.first = false;
         } else {
             // Elements after the first are comma-separated; a trailing comma (comma then `]`) is invalid.
-            match self.stream.next()? {
-                Some(t) if t.kind() == TokenKind::Comma => {}
+            match self.stream.peek_kind()? {
+                Some(TokenKind::Comma) => self.stream.bump(),
                 _ => return Err(Error::custom("expected ',' between array elements")),
             }
             if self.stream.peek_kind()? == Some(TokenKind::EndArray) {
@@ -281,7 +319,7 @@ impl MapAccess for Map<'_, '_> {
         match self.stream.peek_kind()? {
             None => return Err(Error::custom("unterminated object")),
             Some(TokenKind::EndObject) => {
-                self.stream.next()?;
+                self.stream.bump();
                 return Ok(None);
             }
             _ => {}
@@ -289,8 +327,8 @@ impl MapAccess for Map<'_, '_> {
         if self.first {
             self.first = false;
         } else {
-            match self.stream.next()? {
-                Some(t) if t.kind() == TokenKind::Comma => {}
+            match self.stream.peek_kind()? {
+                Some(TokenKind::Comma) => self.stream.bump(),
                 _ => return Err(Error::custom("expected ',' between object members")),
             }
             if self.stream.peek_kind()? == Some(TokenKind::EndObject) {
@@ -305,8 +343,8 @@ impl MapAccess for Map<'_, '_> {
     }
 
     fn next_value<V: Visitor>(&mut self, visitor: V) -> Result<V::Value, Error> {
-        match self.stream.next()? {
-            Some(t) if t.kind() == TokenKind::Colon => {}
+        match self.stream.peek_kind()? {
+            Some(TokenKind::Colon) => self.stream.bump(),
             _ => return Err(Error::custom("expected ':' after object key")),
         }
         de(self.stream).deserialize_any(visitor)
