@@ -339,20 +339,33 @@ impl Big {
 
     /// The DECIMAL string of this value (leading `-` if negative), size-independent. `0` → `"0"`.
     ///
+    /// A thin allocating wrapper over [`Big::write_decimal`] — the same digits written into a fresh
+    /// `String`. When rendering into an existing sink (e.g. a `Display` impl), prefer `write_decimal`.
+    pub fn to_decimal_string(&self) -> alloc::string::String {
+        let mut s = alloc::string::String::new();
+        self.write_decimal(&mut s)
+            .expect("writing decimal digits into a String is infallible");
+        s
+    }
+
+    /// Write this value's decimal digits (leading `-` if negative) straight into a `core::fmt::Write`
+    /// sink — the allocation-free core of [`Big::to_decimal_string`]. `0` writes `"0"`.
+    ///
+    /// Lets a downstream `Display` (e.g. a decimal or rational built on `Big`) render into any sink —
+    /// a `String`, a `core::fmt::Formatter`, a byte buffer — with no intermediate `String`/`Vec`. Same
+    /// digits as [`Big::to_decimal_string`].
+    ///
     /// Small magnitudes take the linear chunk method (peel 19 digits per single-limb division by
     /// `10^19`); wide magnitudes take a recursive divide-and-conquer split (halve by a power of ten),
     /// which turns the linear method's O(n²) into the same subquadratic shape `num-bigint` uses.
-    pub fn to_decimal_string(&self) -> alloc::string::String {
-        use alloc::string::String;
+    pub fn write_decimal<W: core::fmt::Write>(&self, w: &mut W) -> core::fmt::Result {
         if self.is_zero() {
-            return String::from("0");
+            return w.write_str("0");
         }
-        let mut digits: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         if self.neg {
-            digits.push(b'-');
+            w.write_str("-")?;
         }
-        to_decimal_mag(&self.mag, &mut digits);
-        String::from_utf8(digits).expect("ascii digits")
+        write_decimal_mag(&self.mag, w)
     }
 
     /// Box a signed 64-bit int as a `Big`.
@@ -681,7 +694,7 @@ const DECIMAL_CHUNK_DIGITS: usize = 19;
 /// benchmark (the 64b/256b tiers stay linear; the 1024b+ tiers go recursive).
 const DECIMAL_RECURSIVE_THRESHOLD: usize = 10;
 
-/// Render a nonzero canonical magnitude `mag` as decimal digits into `out` (no leading zeros).
+/// Render a nonzero canonical magnitude `mag` as decimal digits into the sink `w` (no leading zeros).
 ///
 /// Narrow magnitudes use [`emit_decimal_linear`] (peel `10^19` chunks). Wide ones use a recursive
 /// divide-and-conquer split: with `pow[i] = 10^(19·2^i)`, dividing by the half-width power `pow[level-1]`
@@ -689,10 +702,9 @@ const DECIMAL_RECURSIVE_THRESHOLD: usize = 10;
 /// linear method is O(n²) (each of the n/19 chunk divisions scans the whole shrinking magnitude); the
 /// split makes the sub-divisions operate on geometrically smaller operands, the same subquadratic
 /// base conversion `num-bigint` uses.
-fn to_decimal_mag(mag: &[u64], out: &mut Vec<u8>) {
+fn write_decimal_mag<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt::Result {
     if mag.len() <= DECIMAL_RECURSIVE_THRESHOLD {
-        emit_decimal_linear(mag, out);
-        return;
+        return emit_decimal_linear(mag, w);
     }
     // Power stack: pow[0] = 10^19, pow[i] = pow[i-1]² = 10^(19·2^i). Square up until it strictly
     // exceeds the value, so the top entry bounds it (value < pow[level]).
@@ -703,35 +715,40 @@ fn to_decimal_mag(mag: &[u64], out: &mut Vec<u8>) {
         pow.push(sq);
     }
     let level = pow.len() - 1; // pow[level] > value ≥ pow[level-1]
-    to_decimal_rec(mag, out, true, level, &pow);
+    write_decimal_rec(mag, w, true, level, &pow)
 }
 
-/// Recursively render `value(mag) < pow[level]` into `out`. `top` nodes render at natural width (no
-/// leading zeros); non-`top` nodes render at exactly `19·2^level` digits (left-zero-padded), their
+/// Recursively render `value(mag) < pow[level]` into the sink `w`. `top` nodes render at natural width
+/// (no leading zeros); non-`top` nodes render at exactly `19·2^level` digits (left-zero-padded), their
 /// fixed slot in the parent split. `pow[i] = 10^(19·2^i)`.
-fn to_decimal_rec(mag: &[u64], out: &mut Vec<u8>, top: bool, level: usize, pow: &[Vec<u64>]) {
+fn write_decimal_rec<W: core::fmt::Write>(
+    mag: &[u64],
+    w: &mut W,
+    top: bool,
+    level: usize,
+    pow: &[Vec<u64>],
+) -> core::fmt::Result {
     if level == 0 {
         // value < 10^19 fits a single limb → one chunk (width 19 unless it is the leading chunk).
         let v = mag.first().copied().unwrap_or(0);
-        push_decimal_chunk(out, v, if top { 0 } else { DECIMAL_CHUNK_DIGITS });
-        return;
+        return write_decimal_chunk(w, v, if top { 0 } else { DECIMAL_CHUNK_DIGITS });
     }
     // Split at the half-width power: hi = value / pow[level-1], lo = value % pow[level-1]. Since
     // value < pow[level] = pow[level-1]², both halves are < pow[level-1] (handled at level-1).
     let (hi, lo) = divmod_mag(mag, &pow[level - 1]);
     if top && hi.is_empty() {
         // The high half is empty — the value is narrower than the balanced split; lo is the new top.
-        to_decimal_rec(&lo, out, true, level - 1, pow);
+        write_decimal_rec(&lo, w, true, level - 1, pow)
     } else {
-        to_decimal_rec(&hi, out, top, level - 1, pow);
-        to_decimal_rec(&lo, out, false, level - 1, pow);
+        write_decimal_rec(&hi, w, top, level - 1, pow)?;
+        write_decimal_rec(&lo, w, false, level - 1, pow)
     }
 }
 
 /// Linear base conversion: peel 19-digit chunks (value mod `10^19`) off `mag`, least-significant
 /// first, dividing IN PLACE (`cur` shrinks to the quotient each step, so no per-chunk quotient `Vec`),
 /// then emit most-significant chunk first at natural width, the rest zero-padded to 19. `mag` nonzero.
-fn emit_decimal_linear(mag: &[u64], out: &mut Vec<u8>) {
+fn emit_decimal_linear<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt::Result {
     let mut cur = mag.to_vec();
     let mut chunks: Vec<u64> = Vec::new();
     while !cur.is_empty() {
@@ -743,27 +760,43 @@ fn emit_decimal_linear(mag: &[u64], out: &mut Vec<u8>) {
         } else {
             DECIMAL_CHUNK_DIGITS
         };
-        push_decimal_chunk(out, chunk, pad);
+        write_decimal_chunk(w, chunk, pad)?;
     }
+    Ok(())
 }
 
-fn push_decimal_chunk(digits: &mut Vec<u8>, mut v: u64, pad: usize) {
-    let mut buf = [0u8; 20]; // u64 is at most 20 decimal digits
+/// Format one `10^19` chunk `v` into a fixed stack buffer — most-significant digit first, left-padded
+/// with `'0'` to at least `pad` digits — and write it to the sink in a single `write_str` (the bytes
+/// are ASCII digits, hence valid UTF-8). No allocation.
+fn write_decimal_chunk<W: core::fmt::Write>(
+    w: &mut W,
+    mut v: u64,
+    pad: usize,
+) -> core::fmt::Result {
+    let mut lsf = [0u8; 20]; // digits least-significant first; a u64 is at most 20 decimal digits
     let mut n = 0;
     if v == 0 {
-        buf[0] = b'0';
+        lsf[0] = b'0';
         n = 1;
     } else {
         while v > 0 {
-            buf[n] = b'0' + (v % 10) as u8;
+            lsf[n] = b'0' + (v % 10) as u8;
             v /= 10;
             n += 1;
         }
     }
-    // buf[..n] is least-significant first; emit most-significant first, padding with '0' up to `pad`.
-    for i in (0..n.max(pad)).rev() {
-        digits.push(if i < n { buf[i] } else { b'0' });
+    // Assemble most-significant first into `out`, left-padding with '0' up to `pad` (pad ≤ 19, n ≤ 20).
+    let width = n.max(pad);
+    let mut out = [0u8; 20];
+    for (i, slot) in out[..width].iter_mut().enumerate() {
+        let from_right = width - 1 - i; // position i from the left is digit `width-1-i` from the right
+        *slot = if from_right < n {
+            lsf[from_right]
+        } else {
+            b'0'
+        };
     }
+    w.write_str(core::str::from_utf8(&out[..width]).expect("ascii digits"))
 }
 
 /// Below this many limbs (in the SMALLER operand), schoolbook multiply beats Karatsuba (whose
