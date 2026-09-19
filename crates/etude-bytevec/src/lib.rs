@@ -465,6 +465,68 @@ impl ByteVec {
     }
 }
 
+/// Options for [`Rope::compact_with`]: which segments to leave in place rather than copy into the
+/// coalesced contiguous buffer.
+///
+/// The default (all options off — the shape [`Rope::compact`] uses) collapses the entire rope into a
+/// single contiguous allocation. Each option makes `compact_with` *skip* (keep as its own segment) the
+/// chunks it matches, so the compacted rope becomes a run of coalesced fragments interleaved with the
+/// skipped segments, in order. The two skips **compose**: a segment is left in place if it matches
+/// `keep_unique` *or* `skip_above` (a chunk that is either uniquely owned or larger than the threshold
+/// is not copied).
+///
+/// Built with the `const` builder methods:
+///
+/// ```
+/// use etude_bytevec::CompactionConfig;
+///
+/// // Coalesce small shared fragments, but leave any chunk over 64 KiB and any solely-owned chunk in place.
+/// let cfg = CompactionConfig::new().keep_unique(true).skip_above(64 * 1024);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompactionConfig {
+    keep_unique: bool,
+    skip_above: Option<usize>,
+}
+
+impl CompactionConfig {
+    /// A config that copies every segment into one contiguous buffer (no skips) — identical to
+    /// [`Rope::compact`].
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            keep_unique: false,
+            skip_above: None,
+        }
+    }
+
+    /// When `true`, a segment whose backing [`Bytes`] is *uniquely owned* (this rope is its sole
+    /// holder — nothing else shares the allocation) is left in place instead of copied. Copying a
+    /// buffer you already exclusively own only spends a memcpy without reducing sharing, so keeping it
+    /// avoids that cost; shared segments are still coalesced (compaction de-shares them into the new
+    /// contiguous buffer). Off by default.
+    #[inline]
+    pub const fn keep_unique(mut self, keep: bool) -> Self {
+        self.keep_unique = keep;
+        self
+    }
+
+    /// Leave any segment strictly larger than `threshold` bytes in place instead of copying it into
+    /// the coalesced buffer — avoids a large memcpy for a big already-standalone chunk. Off by default
+    /// (no size limit).
+    #[inline]
+    pub const fn skip_above(mut self, threshold: usize) -> Self {
+        self.skip_above = Some(threshold);
+        self
+    }
+
+    /// Whether this segment should be left in place rather than coalesced, per the composed options.
+    #[inline]
+    fn skips(&self, chunk: &Bytes) -> bool {
+        (self.keep_unique && chunk.is_unique()) || self.skip_above.is_some_and(|t| chunk.len() > t)
+    }
+}
+
 /// Kind-agnostic surface shared by every [`Rope`] regardless of content kind: constructors, reads,
 /// and the raw byte-offset structural ops (`slice`, `split_to`, `append`). The unchecked byte
 /// mutators (`push_back`/`push_front`/`pop_*`/`set_byte`/`replace`/`advance`/`truncate`/…) also live
@@ -880,6 +942,87 @@ impl<K> Rope<K> {
                 },
             },
         }
+    }
+
+    /// Collapses the entire rope into a single contiguous allocation.
+    ///
+    /// Every chunk is copied, in order, into one fresh [`Bytes`] buffer, so the rope afterwards holds
+    /// exactly one segment (or zero, when empty). The logical byte content is unchanged — this only
+    /// re-lays-out the storage, trading the tiered/shared representation for a flat one. It is
+    /// available on any kind (a `Rope<Utf8>` stays valid: the bytes are identical, only regrouped).
+    ///
+    /// Use it when a rope that was built up from many small or shared fragments will now be read
+    /// repeatedly or handed off as one slice, and the O(log) navigation / per-chunk overhead is no
+    /// longer worth the structural-sharing it bought. For finer control (leaving large or
+    /// uniquely-owned segments in place) use [`compact_with`](Self::compact_with).
+    #[inline]
+    pub fn compact(&mut self) {
+        self.compact_with(&CompactionConfig::new());
+    }
+
+    /// Compacts the rope under `config`: coalesces the segments it does not skip into contiguous
+    /// buffers while leaving the skipped segments (large and/or uniquely-owned, per
+    /// [`CompactionConfig`]) in place, preserving order.
+    ///
+    /// With the default config this is exactly [`compact`](Self::compact) — one contiguous buffer.
+    /// With skips, the result is the skipped segments interleaved with coalesced runs of the segments
+    /// between them, so a run of small shared fragments becomes one buffer while a neighbouring large
+    /// or solely-owned chunk keeps its own allocation (no memcpy). The logical content is unchanged.
+    pub fn compact_with(&mut self, config: &CompactionConfig) {
+        // Zero or one chunk is already a single contiguous allocation (or empty) — maximally compact
+        // under every config, so there is nothing to coalesce. Skips the pointless copy-and-rebuild
+        // on an already-flat rope (the common re-compact / single-chunk case).
+        if self.chunk_count() <= 1 {
+            return;
+        }
+
+        // Pre-size the coalesce buffer to the exact total of the segments that will be copied, so it
+        // never reallocates mid-fill. `BytesMut::split` hands each finished run its bytes O(1) out of
+        // this one allocation and keeps the tail capacity for the next run, so a single allocation
+        // backs every coalesced run (no per-run alloc, no growth-recopy) — a large win for the common
+        // full `compact()` over a many-chunk rope, where the naive grow-as-you-go buffer would realloc
+        // and recopy repeatedly as it doubled toward the full length.
+        let coalesced_len: usize = self
+            .chunks()
+            .filter(|c| !config.skips(c))
+            .map(|c| c.len())
+            .sum();
+
+        // Build the new chunk sequence: coalesce non-skipped segments into a running contiguous
+        // buffer, emit skipped segments as their own (handle-cloned, not copied) chunks, in order.
+        let mut out: Vec<Bytes> = Vec::new();
+        let mut run = bytes::BytesMut::with_capacity(coalesced_len);
+        for chunk in self.chunks() {
+            if config.skips(chunk) {
+                if !run.is_empty() {
+                    out.push(run.split().freeze());
+                }
+                out.push(chunk.clone());
+            } else {
+                run.extend_from_slice(chunk);
+            }
+        }
+        if !run.is_empty() {
+            out.push(run.freeze());
+        }
+
+        // Nothing to do if the layout is already exactly this sequence (avoids a pointless rebuild of
+        // an already-single-chunk rope — the common re-compact case).
+        if out.len() == self.chunk_count()
+            && self
+                .chunks()
+                .zip(out.iter())
+                .all(|(a, b)| a.as_ptr() == b.as_ptr())
+        {
+            return;
+        }
+
+        // The borrow from `chunks()` above has ended; rebuild in place, preserving the content kind.
+        let mut rebuilt = Self::default();
+        for chunk in out {
+            rebuilt.push_chunk_back(chunk);
+        }
+        *self = rebuilt;
     }
 
     /// Creates an empty rope, pre-reserving space for `cap` chunks.

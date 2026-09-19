@@ -169,6 +169,32 @@ afterward should drain the rope directly (`pop_front` / `advance`, ~15 µs deep,
 reader; the reader earns its keep precisely when the source must stay intact, and there its O(1) setup is
 the win the table's single-read framing hides.
 
+### Compaction — `compact` / `compact_with` (runnable: `cargo bench -p etude-bytevec -- 'compact_full|compact_skip_large'`)
+
+`compact()` collapses a fragmented rope into one contiguous allocation; `compact_with(skip_above(n))`
+coalesces the small fragments but leaves segments over `n` bytes in place (no memcpy). The bench input is
+a fragmented rope of groups — 8 small (64 B) fragments then one large (2 KiB) chunk — so full compact
+copies everything into one buffer, while the skip variant coalesces each small run and keeps the large
+chunks. Latest run (aarch64, jemalloc, release; `deep` = 1000 groups ≈ 9000 chunks / 2.56 MB, `shallow` =
+4 groups):
+
+| op | shape | time |
+|----|-------|------|
+| compact_full | shallow | 1.82 µs |
+| compact_full | deep | 314 µs |
+| compact_skip_large | shallow | 1.41 µs |
+| compact_skip_large | deep | 306 µs |
+
+Two things the numbers pin down. First, the coalesce buffer is pre-sized to the exact total it will copy,
+so it never reallocates mid-fill and `BytesMut::split` hands each finished run its bytes O(1) out of that
+one allocation — this alone took full `compact()/deep` from 457 µs to 314 µs (about 31% faster) versus a
+naive grow-as-you-go buffer that doubles and recopies. Second, `skip_above` saves the large-chunk memcpy
+(here ~2 MB of the 2.56 MB is left in place) but only edges out full compact at `deep` (306 vs 314 µs),
+because leaving the large chunks in place means the result still has ~2000 segments to rebuild into the
+tree, and that rebuild cost offsets most of the copy saved. `skip_above` is therefore most worthwhile when
+it keeps a *few* genuinely large segments (little rebuild, large memcpy avoided) rather than many; `compact()`
+is the right default when the goal is one contiguous buffer for repeated reads or handoff.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat
