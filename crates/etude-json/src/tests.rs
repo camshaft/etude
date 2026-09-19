@@ -415,6 +415,31 @@ fn differential_valid_documents() {
 }
 
 #[test]
+fn tokenizer_never_panics_on_arbitrary_bytes() {
+    use bolero::check;
+    // `differential_arbitrary_input` fuzzes a `String`, so its bytes are always valid UTF-8 — it
+    // never feeds the tokenizer a raw non-UTF-8 or high byte. This fuzzes fully arbitrary `Vec<u8>`
+    // (invalid UTF-8, control bytes, anything) across rope-chunk layouts: draining the tokenizer must
+    // always terminate in Ok/Err and never unwind (a tokenizer that panics on malformed input is a
+    // DoS bug), and the accept-superset invariant must hold — whatever serde_json accepts, the
+    // tokenizer must also tokenize. (The reverse does not hold: the byte-oriented lexer accepts a
+    // documented superset, e.g. non-UTF-8 string content — see the conformance repro.)
+    check!().with_type::<Vec<u8>>().cloned().for_each(|bytes| {
+        for chunk in [1usize, 2, 7, bytes.len().max(1)] {
+            let r = rope(&bytes, chunk);
+            let result = Tokenizer::new(&r).collect::<Result<Vec<_>, _>>();
+            // A panic here fails the fuzz; the accept-superset direction reuses check_valid.
+            if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok() {
+                assert!(
+                    result.is_ok(),
+                    "tokenizer rejected serde-valid input at chunk={chunk}: {bytes:?}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn differential_arbitrary_input() {
     use bolero::check;
 
