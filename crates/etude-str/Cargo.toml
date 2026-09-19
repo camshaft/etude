@@ -20,6 +20,11 @@ serde = ["dep:serde"]
 # generator produces valid UTF-8 by construction (generates a `String`, then `Str::from`), so it never
 # violates the wrapped-bytes-are-UTF-8 invariant.
 bolero-generator = ["dep:bolero-generator", "bolero-generator/alloc"]
+# OPTIONAL integration with the `etude-buffer` copy-avoiding reader: adds `Str::from_reader`, which drains
+# any `etude_buffer::reader::Buffer` byte source and validates its bytes as UTF-8, producing a `Str`. OFF
+# by default so the base build stays a pure `bytes` leaf. (The reverse — reading a `Str` OUT as a byte
+# source — needs no wiring: `into_bytes()` is O(1) and `bytes::Bytes` already implements `reader::Buffer`.)
+buffer = ["dep:etude-buffer"]
 
 [dependencies]
 # `Str` is a newtype over `bytes::Bytes` — a clone is an O(1) refcount bump, and text/bytes share ONE
@@ -29,6 +34,8 @@ bytes = "1"
 serde = { version = "1", optional = true, default-features = false, features = ["alloc"] }
 # OPTIONAL — only pulled in by the `bolero-generator` feature (off by default).
 bolero-generator = { version = "0.13", default-features = false, optional = true }
+# OPTIONAL — only pulled in by the `buffer` feature (off by default). The copy-avoiding reader/writer traits.
+etude-buffer = { version = "0.1", path = "../etude-buffer", optional = true }
 
 [dev-dependencies]
 bolero = "0.13"
