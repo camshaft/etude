@@ -697,6 +697,32 @@ fn wide_mul(a: u64, b: u64) -> (u64, u64) {
     (hi, lo)
 }
 
+/// Divide the double word `(u1·2⁶⁴ + u0)` by a NORMALIZED single-word divisor `d` (top bit set), using a
+/// precomputed reciprocal `v = ⌊(2¹²⁸−1)/d⌋ − 2⁶⁴` — returns `(quotient, remainder)`. Requires `u1 < d`
+/// (so the quotient fits one word). Möller & Granlund, "Improved division by invariant integers",
+/// Algorithm 4 (DIV2BY1): a widening multiply plus two conditional corrections replace the hardware
+/// `u128 / u64` divide (which lowers to a slow `__udivti3` libcall on aarch64 and wasm).
+#[inline]
+fn udiv_qrnnd_preinv(u1: u64, u0: u64, d: u64, v: u64) -> (u64, u64) {
+    // (q1, q0) = v·u1 + (u1·2⁶⁴ + u0); then q1+1 is the quotient estimate.
+    let (mut q1, q0) = wide_mul(v, u1);
+    let (q0, carry) = q0.overflowing_add(u0);
+    q1 = q1.wrapping_add(u1).wrapping_add(carry as u64);
+    let mut qhat = q1.wrapping_add(1);
+    let mut r = u0.wrapping_sub(qhat.wrapping_mul(d));
+    // First correction: qhat was one too large iff r ran past q0.
+    if r > q0 {
+        qhat = qhat.wrapping_sub(1);
+        r = r.wrapping_add(d);
+    }
+    // Second correction: a final overshoot (r ≥ d) means qhat was one too small.
+    if r >= d {
+        qhat += 1;
+        r -= d;
+    }
+    (qhat, r)
+}
+
 /// Append the base-10 digits of `v` (most-significant first) to `digits`, zero-padded to at least
 /// `pad` digits. `pad == 0` emits the natural length (used for the most-significant chunk); a following
 /// chunk uses `pad == 19` so its leading zeros are preserved in the concatenation.
@@ -704,6 +730,11 @@ fn wide_mul(a: u64, b: u64) -> (u64, u64) {
 /// decimal-digit count. Peeling by it extracts 19 digits per division step.
 const DECIMAL_CHUNK: u64 = 10_000_000_000_000_000_000; // 10^19 < 2^64
 const DECIMAL_CHUNK_DIGITS: usize = 19;
+
+/// Precomputed 2-by-1 reciprocal of [`DECIMAL_CHUNK`] for [`udiv_qrnnd_preinv`]: `⌊(2¹²⁸−1)/d⌋ − 2⁶⁴`
+/// (Möller & Granlund, "Improved division by invariant integers"). `10¹⁹ = 0x8AC7230489E80000` already
+/// has its top bit set (normalized), so no shift is needed and the reciprocal division is exact.
+const DECIMAL_CHUNK_RECIP: u64 = ((u128::MAX / DECIMAL_CHUNK as u128) - (1u128 << 64)) as u64;
 
 /// At or below this many limbs the linear chunk method wins: the recursive split's big divmods and
 /// power-of-ten stack cost more than they save until the magnitude is wide. Tuned on the `to_decimal`
@@ -783,19 +814,19 @@ fn emit_decimal_linear<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt
     let mut len = mag.len();
     let mut chunks = [0u64; MAX_LINEAR_CHUNKS];
     let mut n = 0;
-    let d = DECIMAL_CHUNK as u128;
     while len > 0 {
         // Divide cur[..len] by 10^19 in place (most-significant limb first); `rem` is the peeled chunk.
-        let mut rem = 0u128;
+        // Each step is a 128÷64 via the precomputed reciprocal (a `wide_mul`, no `u128` hardware divide).
+        let mut rem = 0u64;
         for limb in cur[..len].iter_mut().rev() {
-            let c = (rem << 64) | *limb as u128; // rem < 10^19 ≤ 2^64, so this fits u128
-            *limb = (c / d) as u64;
-            rem = c % d;
+            let (q, r) = udiv_qrnnd_preinv(rem, *limb, DECIMAL_CHUNK, DECIMAL_CHUNK_RECIP);
+            *limb = q;
+            rem = r;
         }
         while len > 0 && cur[len - 1] == 0 {
             len -= 1; // strip high zero limbs off the shrinking quotient
         }
-        chunks[n] = rem as u64;
+        chunks[n] = rem;
         n += 1;
     }
     // Emit most-significant chunk first at natural width, the rest zero-padded to 19.
