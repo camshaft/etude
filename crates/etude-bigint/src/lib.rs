@@ -875,10 +875,14 @@ const DECIMAL_CHUNK_DIGITS: usize = 19;
 /// has its top bit set (normalized), so no shift is needed and the reciprocal division is exact.
 const DECIMAL_CHUNK_RECIP: u64 = ((u128::MAX / DECIMAL_CHUNK as u128) - (1u128 << 64)) as u64;
 
-/// At or below this many limbs the linear chunk method wins: the recursive split's big divmods and
-/// power-of-ten stack cost more than they save until the magnitude is wide. Tuned on the `to_decimal`
-/// benchmark (the 64b/256b tiers stay linear; the 1024b+ tiers go recursive).
-const DECIMAL_RECURSIVE_THRESHOLD: usize = 10;
+/// At or below this many limbs the linear chunk method wins: the recursive split's per-node divmods
+/// (each with its own quotient/remainder/scratch allocations) cost more than they save until the
+/// magnitude is very wide. The linear peel divides by `10^19` in place with a precomputed reciprocal
+/// (a `wide_mul`, no `u128` divide), so its per-chunk step is cheap enough that it beats the recursive
+/// path through at least 64 limbs — measured on the `to_decimal` benchmark: linear vs recursive is
+/// 1.64 vs 3.21 µs at 1024b (16 limbs) and 14.3 vs 17.2 µs at 4096b (64 limbs). Recursive is kept for
+/// the wider magnitudes above this, where its subquadratic split finally pays off.
+const DECIMAL_RECURSIVE_THRESHOLD: usize = 64;
 
 /// Upper bound on the number of `10^19` chunks a `≤DECIMAL_RECURSIVE_THRESHOLD`-limb value produces:
 /// each limb is `< 2^64 ≈ 10^19.27`, so `L` limbs are `< 10^(19.27·L)` → `⌈19.27·L / 19⌉` chunks
