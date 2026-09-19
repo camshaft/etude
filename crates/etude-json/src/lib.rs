@@ -234,6 +234,77 @@ impl fmt::Display for Error {
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
+/// A forward cursor over a [`ByteVec`]'s chunks.
+///
+/// It walks each contiguous leaf (`chunks()`) with a local slice index and refills at chunk
+/// boundaries, so reading the next byte is O(1) amortized — each leaf is touched once, for O(n) over
+/// the whole input. A per-byte `byte_at(offset)` would instead be an O(log n) tree descent every
+/// byte (O(n log n) total, cache-hostile). The absolute byte offset is tracked only to stamp token
+/// span endpoints, never to fetch a byte.
+struct Cursor<'a> {
+    chunks: etude_bytevec::Chunks<'a>,
+    /// The current leaf. Empty exactly when the cursor is exhausted (past the last byte).
+    chunk: &'a [u8],
+    /// Index of the current byte within `chunk`. Invariant: `pos < chunk.len()` unless exhausted.
+    pos: usize,
+    /// Absolute byte offset of `chunk[0]` in the input.
+    base: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(input: &'a ByteVec) -> Self {
+        let mut cursor = Cursor {
+            chunks: input.chunks(),
+            chunk: &[],
+            pos: 0,
+            base: 0,
+        };
+        // Prime with the first non-empty leaf (empty leaves carry no bytes and no offset).
+        loop {
+            match cursor.chunks.next() {
+                Some(next) if !next.is_empty() => {
+                    cursor.chunk = &next[..];
+                    break;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        cursor
+    }
+
+    /// The current byte without advancing, or `None` at end of input.
+    fn peek(&self) -> Option<u8> {
+        self.chunk.get(self.pos).copied()
+    }
+
+    /// The absolute byte offset of the current position (equals the input length at end of input).
+    fn offset(&self) -> usize {
+        self.base + self.pos
+    }
+
+    /// Advance past the current byte. The caller must have observed a byte via [`Cursor::peek`]
+    /// first (so `pos < chunk.len()`); at a leaf boundary this refills to the next non-empty leaf.
+    fn bump(&mut self) {
+        self.pos += 1;
+        if self.pos >= self.chunk.len() {
+            self.base += self.chunk.len();
+            self.pos = 0;
+            self.chunk = &[];
+            loop {
+                match self.chunks.next() {
+                    Some(next) if !next.is_empty() => {
+                        self.chunk = &next[..];
+                        break;
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
 /// An iterator of [`Token`]s over a [`ByteVec`].
 ///
 /// Create one with [`Tokenizer::new`] and iterate it. Each step yields `Ok(token)` for a well-formed
@@ -241,12 +312,11 @@ impl std::error::Error for Error {}
 /// yield `None`). When the input holds no more tokens (only trailing whitespace remains) iteration
 /// ends with `None`.
 ///
-/// The tokenizer borrows the rope for its lifetime and reads it by byte offset, so it is correct
-/// regardless of how the rope is chunked — a token whose bytes straddle a rope-leaf boundary is read
-/// the same as one within a single chunk.
+/// The tokenizer streams the rope's chunks through a [`Cursor`], reading each leaf once, so it is
+/// correct regardless of how the rope is chunked — a token whose bytes straddle a rope-leaf boundary
+/// is read the same as one within a single leaf, and no byte costs a tree descent.
 pub struct Tokenizer<'a> {
-    input: &'a ByteVec,
-    pos: usize,
+    cursor: Cursor<'a>,
     done: bool,
 }
 
@@ -254,22 +324,16 @@ impl<'a> Tokenizer<'a> {
     /// Create a tokenizer over `input`. Iterating it yields the JSON tokens of the rope's bytes.
     pub fn new(input: &'a ByteVec) -> Self {
         Tokenizer {
-            input,
-            pos: 0,
+            cursor: Cursor::new(input),
             done: false,
         }
     }
 
-    /// The byte at `offset`, or `None` past the end of the input.
-    fn byte(&self, offset: usize) -> Option<u8> {
-        self.input.byte_at(offset)
-    }
-
-    /// Advance `pos` past JSON insignificant whitespace (space, tab, LF, CR).
+    /// Advance past JSON insignificant whitespace (space, tab, LF, CR).
     fn skip_whitespace(&mut self) {
-        while let Some(b) = self.byte(self.pos) {
+        while let Some(b) = self.cursor.peek() {
             match b {
-                b' ' | b'\t' | b'\n' | b'\r' => self.pos += 1,
+                b' ' | b'\t' | b'\n' | b'\r' => self.cursor.bump(),
                 _ => break,
             }
         }
@@ -277,26 +341,26 @@ impl<'a> Tokenizer<'a> {
 
     /// Emit a one-byte structural token of `kind` starting at the current position.
     fn structural(&mut self, kind: TokenKind) -> Token {
-        let start = self.pos;
-        self.pos += 1;
+        let start = self.cursor.offset();
+        self.cursor.bump();
         Token {
             kind,
             span: Span {
                 start,
-                end: self.pos,
+                end: self.cursor.offset(),
             },
             string: None,
             number: None,
         }
     }
 
-    /// Scan a `"..."` string beginning at the opening quote (`self.pos`).
+    /// Scan a `"..."` string beginning at the opening quote (the current position).
     fn scan_string(&mut self) -> Result<Token, Error> {
-        let start = self.pos;
-        let mut pos = start + 1; // past the opening quote
+        let start = self.cursor.offset();
+        self.cursor.bump(); // past the opening quote
         let mut has_escapes = false;
         loop {
-            let b = match self.byte(pos) {
+            let b = match self.cursor.peek() {
                 Some(b) => b,
                 None => {
                     return Err(Error {
@@ -309,14 +373,14 @@ impl<'a> Tokenizer<'a> {
                 b'"' => {
                     let content = Span {
                         start: start + 1,
-                        end: pos,
+                        end: self.cursor.offset(),
                     };
-                    self.pos = pos + 1; // past the closing quote
+                    self.cursor.bump(); // past the closing quote
                     return Ok(Token {
                         kind: TokenKind::String,
                         span: Span {
                             start,
-                            end: self.pos,
+                            end: self.cursor.offset(),
                         },
                         string: Some(StringInfo {
                             content,
@@ -327,32 +391,33 @@ impl<'a> Tokenizer<'a> {
                 }
                 b'\\' => {
                     has_escapes = true;
-                    let esc = self.byte(pos + 1).ok_or(Error {
+                    let esc_start = self.cursor.offset();
+                    self.cursor.bump(); // past the backslash
+                    let esc = self.cursor.peek().ok_or(Error {
                         offset: start,
                         kind: ErrorKind::UnterminatedString,
                     })?;
                     match esc {
                         b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
-                            pos += 2;
+                            self.cursor.bump();
                         }
                         b'u' => {
-                            for i in 0..4 {
-                                let h = self.byte(pos + 2 + i).ok_or(Error {
-                                    offset: pos,
-                                    kind: ErrorKind::InvalidUnicodeEscape,
-                                })?;
-                                if !h.is_ascii_hexdigit() {
-                                    return Err(Error {
-                                        offset: pos,
-                                        kind: ErrorKind::InvalidUnicodeEscape,
-                                    });
+                            self.cursor.bump(); // past the `u`
+                            for _ in 0..4 {
+                                match self.cursor.peek() {
+                                    Some(h) if h.is_ascii_hexdigit() => self.cursor.bump(),
+                                    _ => {
+                                        return Err(Error {
+                                            offset: esc_start,
+                                            kind: ErrorKind::InvalidUnicodeEscape,
+                                        });
+                                    }
                                 }
                             }
-                            pos += 6;
                         }
                         _ => {
                             return Err(Error {
-                                offset: pos,
+                                offset: esc_start,
                                 kind: ErrorKind::InvalidEscape,
                             });
                         }
@@ -360,11 +425,11 @@ impl<'a> Tokenizer<'a> {
                 }
                 0x00..=0x1F => {
                     return Err(Error {
-                        offset: pos,
+                        offset: self.cursor.offset(),
                         kind: ErrorKind::ControlCharInString,
                     });
                 }
-                _ => pos += 1,
+                _ => self.cursor.bump(),
             }
         }
     }
@@ -372,25 +437,24 @@ impl<'a> Tokenizer<'a> {
     /// Scan a numeric literal beginning at `self.pos`, validating the JSON number grammar
     /// `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
     fn scan_number(&mut self) -> Result<Token, Error> {
-        let start = self.pos;
-        let mut pos = start;
+        let start = self.cursor.offset();
 
-        if self.byte(pos) == Some(b'-') {
-            pos += 1;
+        if self.cursor.peek() == Some(b'-') {
+            self.cursor.bump();
         }
 
         // Integer part: a lone `0`, or a nonzero digit followed by more digits.
-        match self.byte(pos) {
-            Some(b'0') => pos += 1,
+        match self.cursor.peek() {
+            Some(b'0') => self.cursor.bump(),
             Some(b'1'..=b'9') => {
-                pos += 1;
-                while matches!(self.byte(pos), Some(b'0'..=b'9')) {
-                    pos += 1;
+                self.cursor.bump();
+                while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
+                    self.cursor.bump();
                 }
             }
             _ => {
                 return Err(Error {
-                    offset: pos,
+                    offset: self.cursor.offset(),
                     kind: ErrorKind::InvalidNumber,
                 });
             }
@@ -398,43 +462,45 @@ impl<'a> Tokenizer<'a> {
 
         // Optional fraction: `.` then at least one digit.
         let mut has_fraction = false;
-        if self.byte(pos) == Some(b'.') {
+        if self.cursor.peek() == Some(b'.') {
             has_fraction = true;
-            pos += 1;
-            if !matches!(self.byte(pos), Some(b'0'..=b'9')) {
+            self.cursor.bump();
+            if !matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
                 return Err(Error {
-                    offset: pos,
+                    offset: self.cursor.offset(),
                     kind: ErrorKind::InvalidNumber,
                 });
             }
-            while matches!(self.byte(pos), Some(b'0'..=b'9')) {
-                pos += 1;
+            while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
+                self.cursor.bump();
             }
         }
 
         // Optional exponent: `e`/`E`, optional sign, at least one digit.
         let mut has_exponent = false;
-        if matches!(self.byte(pos), Some(b'e') | Some(b'E')) {
+        if matches!(self.cursor.peek(), Some(b'e') | Some(b'E')) {
             has_exponent = true;
-            pos += 1;
-            if matches!(self.byte(pos), Some(b'+') | Some(b'-')) {
-                pos += 1;
+            self.cursor.bump();
+            if matches!(self.cursor.peek(), Some(b'+') | Some(b'-')) {
+                self.cursor.bump();
             }
-            if !matches!(self.byte(pos), Some(b'0'..=b'9')) {
+            if !matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
                 return Err(Error {
-                    offset: pos,
+                    offset: self.cursor.offset(),
                     kind: ErrorKind::InvalidNumber,
                 });
             }
-            while matches!(self.byte(pos), Some(b'0'..=b'9')) {
-                pos += 1;
+            while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
+                self.cursor.bump();
             }
         }
 
-        self.pos = pos;
         Ok(Token {
             kind: TokenKind::Number,
-            span: Span { start, end: pos },
+            span: Span {
+                start,
+                end: self.cursor.offset(),
+            },
             string: None,
             number: Some(NumberInfo {
                 has_fraction,
@@ -443,23 +509,24 @@ impl<'a> Tokenizer<'a> {
         })
     }
 
-    /// Scan a bare-word keyword (`word`) beginning at `self.pos`, emitting `kind` on an exact match.
+    /// Scan a bare-word keyword (`word`) beginning at the current position, emitting `kind` on an
+    /// exact match.
     fn scan_keyword(&mut self, word: &[u8], kind: TokenKind) -> Result<Token, Error> {
-        let start = self.pos;
-        for (i, &expected) in word.iter().enumerate() {
-            if self.byte(start + i) != Some(expected) {
+        let start = self.cursor.offset();
+        for &expected in word {
+            if self.cursor.peek() != Some(expected) {
                 return Err(Error {
                     offset: start,
                     kind: ErrorKind::InvalidKeyword,
                 });
             }
+            self.cursor.bump();
         }
-        self.pos = start + word.len();
         Ok(Token {
             kind,
             span: Span {
                 start,
-                end: self.pos,
+                end: self.cursor.offset(),
             },
             string: None,
             number: None,
@@ -475,7 +542,7 @@ impl Iterator for Tokenizer<'_> {
             return None;
         }
         self.skip_whitespace();
-        let b = match self.byte(self.pos) {
+        let b = match self.cursor.peek() {
             Some(b) => b,
             None => {
                 self.done = true;
@@ -495,7 +562,7 @@ impl Iterator for Tokenizer<'_> {
             b'f' => self.scan_keyword(b"false", TokenKind::False),
             b'n' => self.scan_keyword(b"null", TokenKind::Null),
             _ => Err(Error {
-                offset: self.pos,
+                offset: self.cursor.offset(),
                 kind: ErrorKind::UnexpectedByte,
             }),
         };
