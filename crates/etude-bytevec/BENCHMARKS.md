@@ -283,6 +283,28 @@ What the numbers confirm — no surprises, and one thing worth pinning:
   already builds the tree by folding whole `FANOUT` blocks (the bulk path), so there is no cheap lever
   here beyond the representation changes ruled out below. It is bounded and predictable, not a blow-up.
 
+The **amplitude sweep** (`cargo bench -p etude-bytevec -- churn_sweep`) pins where churn actually starts:
+oscillate the backlog around a center of 48 (midway between `DEMOTE_AT` 32 and `PROMOTE_AT` 64) with a
+growing amplitude, and watch the rope-vs-naive ratio step up as the swing clears the band:
+
+| amplitude | swing | rope | naive deque | ratio |
+|-----------|-------|------|-------------|-------|
+| 16 | 40↔56 | 813 ns | 646 ns | 1.26 |
+| 24 | 36↔60 | 1.17 µs | 972 ns | 1.20 |
+| 32 | 32↔64 | 1.84 µs | 1.59 µs | 1.16 |
+| 40 | 28↔68 | 3.18 µs | 1.83 µs | **1.74** |
+| 56 | 20↔76 | 3.44 µs | 1.99 µs | 1.73 |
+| 64 | 16↔80 | 3.65 µs | 2.08 µs | 1.75 |
+
+The step is sharp and lands exactly where the theory says it should. Swings up to amplitude 32 stay inside
+the band (a 32↔64 swing never promotes — promotion needs 65 chunks — nor demotes below the flat tier), so
+the rope just tracks the naive deque's growing op count at the usual ~1.2× flat-tier overhead. At
+amplitude 40 the swing finally clears both thresholds and every cycle pays a `promote` + `demote`, so the
+ratio jumps to ~1.74× and then holds flat (bigger swings cross the *same* two thresholds, once each). This
+is the hysteresis band doing its job: it absorbs oscillations up to its full width before the
+representation flips, where a single-threshold design would flip on the very first push/pop across the
+line. The band width is a deliberate memory-vs-churn choice, not headroom.
+
 ### Build: bulk vs incremental crossover (runnable: `cargo bench -p etude-bytevec -- build_crossover`)
 
 Building the same rope two ways, swept across sizes: bulk (`collect` / `from_iter`, which folds whole
