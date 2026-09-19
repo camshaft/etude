@@ -2518,6 +2518,16 @@ impl reader::Buffer for ByteVec {
         Ok(self.read_chunk_bytes(watermark).into())
     }
 
+    /// Drains the front of the rope into `dest`, returning at most one boundary chunk for the caller.
+    ///
+    /// Ordering invariant (Builder and other in-order drains depend on this): every front chunk
+    /// strictly smaller than `dest`'s current remaining capacity is copied *into* `dest`, in order;
+    /// the returned [`reader::Chunk`] is non-empty only when a front chunk met or exceeded that
+    /// capacity, and then it is exactly `dest`'s remaining-capacity bytes — a maximal, capacity-filling
+    /// run, never a shorter one. Once the source is exhausted an empty chunk is returned. So a caller
+    /// never receives a short (sub-capacity) run out of order ahead of bytes still copied into `dest`;
+    /// relaxing this (e.g. returning a boundary-cut run mid-drain) would let such a caller reorder its
+    /// output. The `debug_assert` below trips if a future change breaks the maximal-run guarantee.
     #[inline]
     fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<reader::Chunk<'_>, Self::Error>
     where
@@ -2531,7 +2541,13 @@ impl reader::Buffer for ByteVec {
             let cap = dest.remaining_capacity();
             // if the front chunk fills (or overfills) the destination, hand it back for the caller
             if front_len >= cap {
-                return Ok(self.read_chunk_bytes(cap).into());
+                let run = self.read_chunk_bytes(cap);
+                debug_assert_eq!(
+                    run.len(),
+                    cap,
+                    "partial_copy_into must return a capacity-filling run, never a short one"
+                );
+                return Ok(run.into());
             }
             self.copy_front(dest);
         }
