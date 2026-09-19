@@ -788,9 +788,18 @@ fn io_read_write() {
     assert_eq!(rope, b" world");
 }
 
-/// Differential fuzz: apply a random op sequence to a `ByteVec` and to a flat `Vec<u8>` model,
-/// asserting byte-for-byte equivalence (and per-op results) after every step. Exercises the tree
-/// paths across the promote/demote thresholds.
+/// Differential fuzz — THE shared harness for every byterope agent (breaker/fixer/compat):
+/// extend the `Op` enum here rather than adding one-off differential loops. Applies a random op
+/// sequence to a `ByteVec` and to a flat `Vec<u8>` model, asserting byte-for-byte equivalence
+/// (and per-op results) after every step. Covers the full public surface, including:
+/// - deep-tier starts in one op (`Deepen` populates tree + buffered ends, so sequences reach the
+///   deep paths without needing 64+ pushes),
+/// - zero-copy aliasing in BOTH directions: `TakeAliases` retains a full clone and a zero-copy
+///   slice that every subsequent op must leave untouched (asserted after each op), and
+///   `MutateAlias` writes THROUGH the slice while the parent must stay intact,
+/// - a retained shared chunk (`PushShared`) that no COW edit may ever write through (asserted at
+///   the end of every run),
+/// - self-sharing appends, `bytes::Buf` reads, `split_to_copy`, and flatten/chunks roundtrips.
 #[test]
 fn differential_against_model() {
     use bolero::check;
@@ -805,16 +814,32 @@ fn differential_against_model() {
         Advance(usize),
         Truncate(usize),
         SplitTo(usize),
+        SplitToCopy(usize),
         Append(Vec<u8>),
+        AppendSelfSlice(usize, usize),
         Slice(usize, usize),
         GetByte(usize),
+        GetChunk(usize),
         SetByte(usize, u8),
         Replace(usize, usize, Vec<u8>, u8),
+        BufRead(usize, usize),
+        FlattenCheck,
+        Deepen,
+        Clear,
+        TakeAliases(usize, usize),
+        MutateAlias(usize, u8),
+        PushShared,
     }
 
     check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
         let mut rope = ByteVec::new();
         let mut model: Vec<u8> = Vec::new();
+        // Persistent aliases (a full clone + a zero-copy slice), refreshed by `TakeAliases`; the
+        // per-op asserts below prove no later mutation of `rope` leaks into them.
+        let mut alias: Option<(ByteVec, Vec<u8>)> = None;
+        let mut sl: Option<(ByteVec, Vec<u8>)> = None;
+        // A retained shared chunk (rc >= 2 once pushed): edits must COW, never write through it.
+        let big = Bytes::from(alloc::vec![0x77u8; COW_SPLIT_ABOVE + 5]);
         for op in &ops {
             match op {
                 Op::PushBack(d) => {
@@ -856,11 +881,25 @@ fn differential_against_model() {
                     assert_eq!(front, &model[..k]);
                     model.drain(..k);
                 }
+                Op::SplitToCopy(n) => {
+                    let k = n % (model.len() + 1);
+                    let front = rope.split_to_copy(k).unwrap();
+                    assert_eq!(&front[..], &model[..k]);
+                    model.drain(..k);
+                }
                 Op::Append(d) => {
                     let mut other: ByteVec = d.chunks(3).map(Bytes::copy_from_slice).collect();
                     rope.append(&mut other);
                     assert!(other.is_empty());
                     model.extend_from_slice(d);
+                }
+                Op::AppendSelfSlice(a, b) => {
+                    let lo = a % (model.len() + 1);
+                    let hi = lo + b % (model.len() - lo + 1);
+                    let mut other = rope.slice(lo..hi);
+                    rope.append(&mut other);
+                    assert!(other.is_empty());
+                    model.extend_from_within(lo..hi);
                 }
                 Op::Slice(a, b) => {
                     let lo = a % (model.len() + 1);
@@ -870,6 +909,20 @@ fn differential_against_model() {
                 Op::GetByte(i) => {
                     let idx = i % (model.len() + 1);
                     assert_eq!(rope.byte_at(idx), model.get(idx).copied());
+                }
+                Op::GetChunk(i) => {
+                    // get(index) descends by CACHED chunk counts in the deep tier; the chunk
+                    // iterator is its oracle (pointer identity, not just bytes).
+                    let n = rope.chunks().len();
+                    let idx = i % (n + 1);
+                    match rope.get(idx) {
+                        Some(c) => {
+                            let it = rope.chunks().nth(idx).expect("iterator chunk");
+                            assert_eq!(c.as_ptr(), it.as_ptr(), "get({idx}) wrong chunk");
+                            assert_eq!(c.len(), it.len());
+                        }
+                        None => assert_eq!(idx, n, "get({idx}) None but {n} chunks"),
+                    }
                 }
                 Op::SetByte(i, v) => {
                     if model.is_empty() {
@@ -902,11 +955,221 @@ fn differential_against_model() {
                     }
                     model.splice(lo..hi, repl.iter().copied());
                 }
+                Op::BufRead(a, b) => {
+                    // bytes::Buf on a shared clone; the original must be untouched (the global
+                    // asserts below see any disturbance).
+                    let mut r = rope.clone();
+                    let k = a % (model.len() + 1);
+                    bytes::Buf::advance(&mut r, k);
+                    let m = b % (model.len() - k + 1);
+                    let got = bytes::Buf::copy_to_bytes(&mut r, m);
+                    assert_eq!(&got[..], &model[k..k + m]);
+                }
+                Op::FlattenCheck => {
+                    assert_eq!(&rope.copy_to_bytes()[..], &model[..]);
+                    assert_eq!(rope.chunks().len(), rope.chunks().count());
+                    let flat: Vec<u8> = rope.chunks().flat_map(|c| c.iter().copied()).collect();
+                    assert_eq!(flat, model);
+                }
+                Op::Deepen => {
+                    // reach the deep tier (tree + buffered head) in ONE op, so short sequences
+                    // exercise deep paths without needing PROMOTE_AT+ pushes
+                    for i in 0..PROMOTE_AT {
+                        let b = [(i % 251) as u8, (i % 239) as u8];
+                        rope.push_back(chunk(&b));
+                        model.extend_from_slice(&b);
+                    }
+                    for i in 0..3u8 {
+                        let b = [0xB0 ^ i; 2];
+                        rope.push_front(chunk(&b));
+                        model.splice(0..0, b.iter().copied());
+                    }
+                }
+                Op::Clear => {
+                    rope.clear();
+                    model.clear();
+                }
+                Op::TakeAliases(a, b) => {
+                    alias = Some((rope.clone(), model.clone()));
+                    let lo = a % (model.len() + 1);
+                    let hi = lo + b % (model.len() - lo + 1);
+                    sl = Some((rope.slice(lo..hi), model[lo..hi].to_vec()));
+                }
+                Op::MutateAlias(i, v) => {
+                    // write THROUGH the zero-copy slice alias; the parent rope must be intact
+                    // (the global rope == model assert below proves it)
+                    if let Some((srope, smodel)) = sl.as_mut().filter(|(_, m)| !m.is_empty()) {
+                        let idx = i % smodel.len();
+                        srope.set_byte(idx, *v).unwrap();
+                        smodel[idx] = *v;
+                    }
+                }
+                Op::PushShared => {
+                    rope.push_back(big.clone());
+                    model.extend_from_slice(&big);
+                }
             }
             assert_eq!(rope.len(), model.len(), "len after {op:?}");
             assert_eq!(rope, model, "bytes after {op:?}");
+            if let Some((arope, amodel)) = &alias {
+                assert_eq!(arope, amodel, "persistent clone disturbed after {op:?}");
+            }
+            if let Some((srope, smodel)) = &sl {
+                assert_eq!(srope, smodel, "persistent slice disturbed after {op:?}");
+            }
         }
+        assert!(
+            big.iter().all(|&b| b == 0x77),
+            "shared Bytes handle was written through"
+        );
     });
+}
+
+/// A BULK-BUILT rope (`FromIterator` with a size hint above `PROMOTE_AT` takes the bottom-up
+/// `extend_blocks` + `from_tree` path, #31) must agree with the flat oracle on every axis the
+/// incremental `push_back` construction does: bytes, `get(index)` vs the chunk iterator (cached
+/// chunk counts), `byte_at`, `slice`, and `split_to` through the tree-body fast path (#30).
+#[test]
+fn bulk_built_rope_matches_oracle_on_every_axis() {
+    // exact size hint (Vec iterator) above PROMOTE_AT -> the bulk bottom-up build path
+    let chunks: Vec<Bytes> = (0..(PROMOTE_AT * 3 + 7))
+        .map(|i| Bytes::from(alloc::vec![(i % 251) as u8; 1 + i % 5]))
+        .collect();
+    let flat: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+    let rope: ByteVec = chunks.iter().cloned().collect();
+    assert!(
+        matches!(rope.repr, Repr::Deep(_)),
+        "bulk collect should land deep"
+    );
+    rope.check_invariants();
+    assert_eq!(rope, flat, "bulk-built bytes");
+
+    // get(index) vs the chunk iterator: pointer identity for every index
+    let n = rope.chunks().len();
+    assert_eq!(n, chunks.len(), "bulk build dropped or merged chunks");
+    for i in 0..n {
+        let via_iter = rope.chunks().nth(i).expect("iterator chunk");
+        let via_get = rope.get(i).expect("get chunk");
+        assert_eq!(
+            via_get.as_ptr(),
+            via_iter.as_ptr(),
+            "bulk get({i}) wrong chunk"
+        );
+    }
+    assert!(rope.get(n).is_none());
+
+    // byte_at + slice spot grid
+    for &off in &[0, 1, flat.len() / 3, flat.len() / 2, flat.len() - 1] {
+        assert_eq!(rope.byte_at(off), Some(flat[off]), "bulk byte_at {off}");
+    }
+    for &(a, b) in &[
+        (0, flat.len()),
+        (3, flat.len() / 2),
+        (flat.len() / 3, flat.len() - 2),
+    ] {
+        assert_eq!(rope.slice(a..b), &flat[a..b], "bulk slice {a}..{b}");
+    }
+
+    // split_to through the tree body (both halves oracle-exact, invariants hold)
+    for at in [1, flat.len() / 3, flat.len() / 2, flat.len() - 1] {
+        let mut r = rope.clone();
+        let front = r.split_to(at).unwrap();
+        front.check_invariants();
+        r.check_invariants();
+        assert_eq!(front, &flat[..at], "bulk split front at {at}");
+        assert_eq!(r, &flat[at..], "bulk split back at {at}");
+    }
+}
+
+/// Deep-tier `get(index)` descends the tree by the per-subtree CACHED chunk counts, so any stale
+/// count fix-up (leaf splits from bounded-COW `set_byte`, concat seam repacks, pop-block refills,
+/// structural `replace`) would silently send it to the WRONG chunk while the byte content stays
+/// right. Oracle: `get(i)` must equal `chunks().nth(i)` (pointer + bytes) for EVERY index, swept
+/// after each count-perturbing mutation, with all three regions (head/tree/tail) populated.
+#[test]
+fn get_index_matches_chunk_iterator_after_count_perturbing_mutations() {
+    fn sweep(rope: &ByteVec, label: &str) {
+        let n = rope.chunks().len();
+        for i in 0..n {
+            let via_iter = rope.chunks().nth(i).expect("iterator chunk");
+            let via_get = rope.get(i).expect("get chunk");
+            assert_eq!(
+                via_get.as_ptr(),
+                via_iter.as_ptr(),
+                "{label}: get({i}) returned a different chunk than chunks().nth({i})"
+            );
+            assert_eq!(via_get.len(), via_iter.len(), "{label}: get({i}) length");
+        }
+        assert!(rope.get(n).is_none(), "{label}: get(count) must be None");
+        assert!(
+            rope.get(n + 1000).is_none(),
+            "{label}: get(far) must be None"
+        );
+    }
+
+    // All three regions populated: tree via push_back (incl. large shared chunks that will split
+    // on set_byte), buffered head via push_front, buffered tail via trailing push_backs.
+    let big = Bytes::from(alloc::vec![9u8; COW_SPLIT_ABOVE * 2 + 1]);
+    let mut rope = ByteVec::new();
+    for i in 0..(PROMOTE_AT * 2) {
+        if i % 11 == 0 {
+            rope.push_back(big.clone()); // shared: a later set_byte splits its leaf
+        } else {
+            rope.push_back(Bytes::from(alloc::vec![i as u8; 1 + i % 5]));
+        }
+    }
+    for i in 0..7 {
+        rope.push_front(Bytes::from(alloc::vec![0xA0u8 ^ i; 2]));
+        rope.push_back(Bytes::from(alloc::vec![0x50u8 ^ i; 3]));
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+    sweep(&rope, "initial");
+
+    // Leaf-splitting set_byte edits (shared big chunks -> bounded COW split -> count fix-ups up
+    // the spine, possibly leaf/branch/root splits).
+    let len = rope.len();
+    for k in 0..40usize {
+        let off = (k * 6151 + 13) % len;
+        rope.set_byte(off, 0xEE).unwrap();
+    }
+    sweep(&rope, "after set_byte splits");
+
+    // Structural replace (UC6 tree splice: split + concat seam repacks).
+    let l = rope.len();
+    rope.replace(l / 3..l / 2, Bytes::from(alloc::vec![0x33u8; 97]))
+        .unwrap();
+    sweep(&rope, "after structural replace");
+
+    // End churn: pop refills from tree blocks at both ends, then re-push.
+    for _ in 0..12 {
+        rope.pop_front();
+        rope.pop_back();
+    }
+    sweep(&rope, "after end pops");
+    for i in 0..12u8 {
+        rope.push_front(Bytes::from(alloc::vec![i | 0x80; 2]));
+        rope.push_back(Bytes::from(alloc::vec![i | 0x40; 2]));
+    }
+    sweep(&rope, "after re-push");
+
+    // Concat of two deep ropes (seam repack merges leaf blocks -> counts recomputed).
+    let mut other = ByteVec::new();
+    for i in 0..(PROMOTE_AT * 2) {
+        other.push_back(Bytes::from(alloc::vec![i as u8 ^ 0xFF; 1 + i % 3]));
+    }
+    rope.append(&mut other);
+    sweep(&rope, "after deep concat");
+
+    // Self-sharing append (slice + append shares subtrees with re-counted spines).
+    let quarter = rope.len() / 4;
+    let mut part = rope.slice(quarter..quarter * 3);
+    rope.append(&mut part);
+    sweep(&rope, "after self-slice append");
+
+    // split_to leaves both halves with fresh spines.
+    let front = rope.split_to(rope.len() / 2).unwrap();
+    sweep(&front, "split front");
+    sweep(&rope, "split back");
 }
 
 /// Differential oracle for the [`Builder`] construction surface (bytevec-compat), reusing the same
