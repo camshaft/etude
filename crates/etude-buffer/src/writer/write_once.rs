@@ -4,7 +4,14 @@
 use crate::{reader::Chunk, writer::Buffer};
 use bytes::{Bytes, BytesMut, buf::UninitSlice};
 
-/// Only allows a single write into the storage. After that, no more writes are allowed.
+/// Reports exhausted capacity after the first non-empty write, so a capacity-checking transfer
+/// loop performs exactly one transfer round into the storage.
+///
+/// The gate is advisory by design: the put methods are not hard-gated, so an in-flight multi-put
+/// transfer (a reader that checks capacity once and then writes its content as several chunks) may
+/// complete its round — only the next capacity check observes the wrapper as full. Callers that
+/// bypass capacity checks can therefore still write; wrap the storage in a
+/// [`Limit`](crate::writer::Limit) when a hard byte cap is required.
 ///
 /// This can be used for very low latency scenarios where processing the single read is more
 /// important than filling the entire storage with as much data as possible.
@@ -83,6 +90,50 @@ impl<S: Buffer + ?Sized> Buffer for WriteOnce<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the advisory-by-design boundary (consensus ruling on etude#166): a capacity-checking
+    /// transfer loop performs exactly one round (the loop observes exhausted capacity after the
+    /// first non-empty write), while a same-pass multi-put transfer completes — the pattern
+    /// `copy_into_multi_chunks` blesses. If the operator later redirects to strict single-put
+    /// enforcement, this test documents exactly what changes.
+    #[test]
+    fn advisory_boundary_one_round_for_loops_completion_for_same_pass() {
+        // A capacity-checking loop (the shape of a reader's copy_into) stops after one round.
+        let mut storage: Vec<u8> = vec![];
+        {
+            let mut writer = WriteOnce::new(&mut storage);
+            let chunks: [&[u8]; 3] = [b"one", b"two", b"three"];
+            let mut i = 0;
+            while writer.has_remaining_capacity() && i < chunks.len() {
+                writer.put_slice(chunks[i]);
+                i += 1;
+            }
+            assert_eq!(i, 1, "loop must observe the gate after the first write");
+        }
+        assert_eq!(&storage[..], b"one");
+
+        // A real multi-chunk reader drains through its own capacity-checked rounds: only the
+        // first round lands.
+        let mut storage: Vec<u8> = vec![];
+        {
+            use crate::reader::{Buffer as _, IoSlice};
+            let parts: [&[u8]; 2] = [b"hello", b"world"];
+            let mut reader = IoSlice::new(&parts);
+            let mut writer = WriteOnce::new(&mut storage);
+            reader.copy_into(&mut writer).unwrap();
+        }
+        assert_eq!(&storage[..], b"hello", "reader copy_into stops at the gate");
+
+        // A same-pass multi-put (no capacity re-check between puts) completes its transfer,
+        // exactly as `copy_into_multi_chunks` blesses.
+        let mut storage: Vec<u8> = vec![];
+        {
+            let mut writer = WriteOnce::new(&mut storage);
+            writer.put_slice(b"first");
+            writer.put_slice(b"second");
+        }
+        assert_eq!(&storage[..], b"firstsecond");
+    }
 
     #[test]
     fn write_once_test() {
