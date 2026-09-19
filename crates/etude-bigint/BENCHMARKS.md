@@ -16,77 +16,76 @@ Numbers below are medians from one `aarch64-linux` run and are **indicative, not
 absolute times vary by machine; what matters is the **ratio to num-bigint** and its movement as
 optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**bold**), `>1.00` = slower.
 
-## Current — base-2⁶⁴ u64 limbs, schoolbook algorithms
+## Current — u64 limbs + Knuth Algorithm D divmod
 
 | op                        | tier   | etude     | num-bigint | ratio     |
 |---------------------------|--------|-----------|------------|-----------|
-| add                       | 64b    | 19.1 ns   | 25.4 ns    | **0.75**  |
-| add                       | 256b   | 21.0 ns   | 72.1 ns    | **0.29**  |
-| add                       | 1024b  | 40.3 ns   | 87.2 ns    | **0.46**  |
-| add                       | 4096b  | 122 ns    | 171 ns     | **0.71**  |
-| sub                       | 64b    | 31.1 ns   | 17.2 ns    | 1.81      |
-| sub                       | 256b   | 31.0 ns   | 30.3 ns    | 1.02      |
-| sub                       | 1024b  | 49.9 ns   | 43.5 ns    | 1.15      |
-| sub                       | 4096b  | 134 ns    | 94.4 ns    | 1.42      |
-| mul                       | 64b    | 21.4 ns   | 18.9 ns    | 1.13      |
-| mul                       | 256b   | 42.4 ns   | 52.0 ns    | **0.82**  |
+| add                       | 64b    | 19.4 ns   | 27.3 ns    | **0.71**  |
+| add                       | 256b   | 21.6 ns   | 72.3 ns    | **0.30**  |
+| add                       | 1024b  | 41.3 ns   | 87.8 ns    | **0.47**  |
+| add                       | 4096b  | 123 ns    | 172 ns     | **0.71**  |
+| sub                       | 64b    | 30.4 ns   | 17.3 ns    | 1.76      |
+| sub                       | 256b   | 30.8 ns   | 30.9 ns    | **1.00**  |
+| sub                       | 1024b  | 50.3 ns   | 44.1 ns    | 1.14      |
+| sub                       | 4096b  | 133 ns    | 95.3 ns    | 1.40      |
+| mul                       | 64b    | 21.6 ns   | 19.2 ns    | 1.12      |
+| mul                       | 256b   | 42.3 ns   | 52.8 ns    | **0.80**  |
 | mul                       | 1024b  | 390 ns    | 389 ns     | 1.00      |
 | mul                       | 4096b  | 6.19 µs   | 4.99 µs    | 1.24      |
-| divmod                    | 64b    | 759 ns    | 111 ns     | 6.86      |
-| divmod                    | 256b   | 5.53 µs   | 388 ns     | 14.2      |
-| divmod                    | 1024b  | 38.4 µs   | 2.07 µs    | 18.6      |
-| divmod                    | 4096b  | 412 µs    | 20.4 µs    | 20.3      |
-| gcd                       | 64b    | 11.2 µs   | 1.15 µs    | 9.81      |
-| gcd                       | 256b   | 120 µs    | 4.77 µs    | 25.2      |
-| gcd                       | 1024b  | 2.71 ms   | 23.5 µs    | 115.3     |
-| cmp                       | 64b    | 2.63 ns   | 2.73 ns    | **0.96**  |
-| cmp                       | 256b   | 3.66 ns   | 3.55 ns    | 1.03      |
-| cmp                       | 1024b  | 8.91 ns   | 8.72 ns    | 1.02      |
-| cmp                       | 4096b  | 27.5 ns   | 27.5 ns    | 1.00      |
-| to_decimal_string         | 64b    | 9.01 µs   | 71.8 ns    | 125       |
-| to_decimal_string         | 256b   | 139 µs    | 248 ns     | 562       |
-| to_decimal_string         | 1024b  | 2.15 ms   | 2.25 µs    | 958       |
+| divmod                    | 64b    | 48.9 ns   | 111 ns     | **0.44**  |
+| divmod                    | 256b   | 207 ns    | 392 ns     | **0.53**  |
+| divmod                    | 1024b  | 1.13 µs   | 2.09 µs    | **0.54**  |
+| divmod                    | 4096b  | 11.1 µs   | 20.5 µs    | **0.54**  |
+| gcd                       | 64b    | 1.13 µs   | 1.11 µs    | 1.02      |
+| gcd                       | 256b   | 8.23 µs   | 4.66 µs    | 1.77      |
+| gcd                       | 1024b  | 59.5 µs   | 23.2 µs    | 2.56      |
+| cmp                       | 64b    | 2.63 ns   | 3.23 ns    | **0.81**  |
+| cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
+| cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
+| cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
+| to_decimal_string         | 64b    | 660 ns    | 72.1 ns    | 9.2       |
+| to_decimal_string         | 256b   | 4.34 µs   | 249 ns     | 17.4      |
+| to_decimal_string         | 1024b  | 51.5 µs   | 2.26 µs    | 22.8      |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 4096b  | 524 ns    | —          | —         |
 
+We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), and **cmp** (three of four
+tiers), and reach parity-or-better on **mul at 256b/1024b** and **sub at 256b**.
+
 (divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd and to_decimal_string are
-capped at 1024b because their per-digit / Euclid cost is steep. sign_magnitude_roundtrip is the
+capped at 1024b because their Euclid / per-digit cost is steep. sign_magnitude_roundtrip is the
 canonical map-key encode+decode; num-bigint has no matching operation.)
 
-## Adopted: base-2⁶⁴ u64 limbs (vs the u32 baseline)
+## Landed optimizations
 
-Switching the internal limb from `u32` to `u64` (with `u128` intermediate products and accumulators)
-halves the limb count and doubles the work per native instruction. It improved **every** operation and
-regressed none, so it is adopted. Speedup vs the u32 baseline (u64 / u32, lower is better):
+- **base-2⁶⁴ u64 limbs** (u128 intermediates) — halved the limb count; improved every op over the
+  original u32 baseline (mul 0.27–0.78, add/cmp 0.53–0.96 of the u32 time).
+- **Knuth Algorithm D divmod** (word-at-a-time, replacing bit-at-a-time long division; single-limb
+  divisors take a linear `u128`-per-limb fast path). This is the largest win so far:
 
-| op     | 64b  | 256b | 1024b | 4096b |
-|--------|------|------|-------|-------|
-| add    | 0.96 | 0.85 | 0.65  | 0.59  |
-| sub    | 0.94 | 0.89 | 0.75  | 0.73  |
-| mul    | 0.78 | 0.51 | 0.33  | 0.27  |
-| divmod | 0.92 | 0.82 | 0.80  | 0.80  |
-| cmp    | 0.86 | 0.67 | 0.59  | 0.53  |
+  | op / tier      | before (u64 bit-at-a-time) | after (Knuth) | speedup | vs num-bigint |
+  |----------------|----------------------------|---------------|---------|---------------|
+  | divmod / 256b  | 5.53 µs                    | 207 ns        | 27×     | 0.53          |
+  | divmod / 4096b | 412 µs                     | 11.1 µs       | 37×     | 0.54          |
+  | gcd / 1024b    | 2.71 ms                    | 59.5 µs       | 46×     | 2.56          |
+  | to_decimal / 1024b | 2.15 ms                | 51.5 µs       | 42×     | 22.8          |
 
-First crossings **below 1.00 vs num-bigint** with u64: **add beats it at every tier**, **mul at
-256b (0.82) and parity at 1024b**, **cmp at parity across the board**. Encapsulation kept this a
-non-breaking change; the differential oracle, canonical form, and byte-identical encodings stayed green.
+  divmod went from 7–20× *slower* than num-bigint to ~2× *faster*; gcd (Euclid over divmod) fell from
+  ~115× to 2.6×, and to_decimal_string (repeated ÷10) from ~960× to ~23× as a side effect.
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string — 125–960×.** The single largest gap, newly visible. It divides by 10 one digit
-   at a time through the general (bit-at-a-time) divmod. Chunking (divide by 10¹⁹, the largest power of
-   ten in a u64, for 19 digits per step) plus a fast divmod collapses this.
-2. **gcd — up to 115×.** Euclid over `divmod`, so it inherits divmod's cost. Fixing divmod fixes most;
-   a binary/Lehmer gcd closes the rest.
-3. **divmod — 7–20×.** Still bit-at-a-time long division (O(bits·limbs)). Knuth Algorithm D
-   (word-at-a-time) is the target, and it unblocks gcd and to_decimal_string too.
-4. **mul at 4096b (1.24×) and sub (1.0–1.8×).** Karatsuba above a crossover for the large mul; a direct
-   signed subtract (dropping the `add(neg())` allocation) for sub.
+1. **to_decimal_string — 9–23×.** Still divides by 10 one digit at a time. Chunking (divide by 10¹⁹,
+   the largest power of ten in a u64, for 19 digits per step) collapses the step count ~19×.
+2. **gcd — up to 2.6×.** Now divmod-fast but still plain Euclid; a binary or Lehmer gcd closes the rest.
+3. **mul at 4096b (1.24×).** Schoolbook O(n·m); Karatsuba above a crossover for the large tier.
+4. **sub (1.0–1.76×).** Routes through `add(neg())`, allocating an extra magnitude; a direct signed
+   subtract removes that.
 
 ## Roadmap
 
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-Knuth Algorithm D divmod → chunked to_decimal_string → Karatsuba mul → direct signed sub →
-binary/Lehmer gcd. num-bigint stays both the correctness oracle and the perf yardstick.
+chunked to_decimal_string → binary/Lehmer gcd → Karatsuba mul → direct signed sub. num-bigint stays both
+the correctness oracle and the perf yardstick.
