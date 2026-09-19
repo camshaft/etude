@@ -267,7 +267,7 @@ fn cmp_large_continued_fraction() {
         let bi = BigInt::from_signed_bytes_le(&big.to_le_twos_complement_bytes());
         (big, bi)
     }
-    let nbytes = 96; // > CMP_SMALL_BYTES (64) ⇒ the continued-fraction branch
+    let nbytes = 96; // > CMP_SMALL_BYTES (16) ⇒ the continued-fraction branch
     for i in 0..40u64 {
         let (n1, bn1) = from_seed(i * 4 + 1, nbytes);
         let (d1, bd1) = from_seed(i * 4 + 2, nbytes);
