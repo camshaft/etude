@@ -32,6 +32,7 @@ impl Deserializer for ValDe {
             Val::Bool(b) => visitor.visit_bool(b),
             Val::Str(s) => visitor.visit_str(s),
             Val::Int => visitor.visit_number(NumberToken {
+                lexeme: ByteVec::from(&b"-1"[..]),
                 negative: true,
                 integer: ByteVec::from(&b"1"[..]),
                 fraction: None,
@@ -190,6 +191,7 @@ fn rope_str_arms_and_helpers() {
 #[test]
 fn number_token_integer_flag() {
     let int = NumberToken {
+        lexeme: ByteVec::from(&b"123"[..]),
         negative: false,
         integer: ByteVec::from(&b"123"[..]),
         fraction: None,
@@ -199,6 +201,7 @@ fn number_token_integer_flag() {
     assert!(int.is_integer());
 
     let float = NumberToken {
+        lexeme: ByteVec::from(&b"1.5"[..]),
         negative: false,
         integer: ByteVec::from(&b"1"[..]),
         fraction: Some(ByteVec::from(&b"5"[..])),

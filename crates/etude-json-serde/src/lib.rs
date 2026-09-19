@@ -24,8 +24,9 @@
 //!   string is materialized into a [`RopeStr::Owned`] buffer via `Token::decode_string`. (etude-json
 //!   #147's `decode_str_rope` will let the escaped case return a built leaf too; the common zero-copy
 //!   case needs only `Token::string_span` + `string_has_escapes`, which exist today.)
-//! - Numbers arrive as an [`etude_serde::NumberToken`] built from `Token::number_parts` (component
-//!   spans) — no value is parsed here; a value type consumes the spans on demand (§6).
+//! - Numbers arrive as an [`etude_serde::NumberToken`]: the whole lexeme (`Token::span`) as the primary
+//!   sub-rope plus the component runs (`Token::number_parts`) as structural metadata. No value is parsed
+//!   here; a consumer decodes on demand — e.g. `Decimal::parse(lexeme.chunks().flat_map(…))`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
@@ -150,11 +151,13 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                 }
             }
             TokenKind::Number => {
-                // Slice each component span into an O(1) sub-rope so the NumberToken is self-contained
-                // (the Visitor needs no handle on the source rope to read the digits).
+                // Slice the whole-lexeme span (primary payload, feeds Decimal::parse) and each
+                // component span into O(1) sub-ropes, so the NumberToken is self-contained — the
+                // Visitor decodes with no handle on the source rope.
                 let p = token.number_parts().expect("Number token has parts");
                 let input = self.stream.input;
                 visitor.visit_number(NumberToken {
+                    lexeme: input.slice(token.span().range()),
                     negative: p.negative,
                     integer: input.slice(p.integer.range()),
                     fraction: p.fraction.map(|s| input.slice(s.range())),

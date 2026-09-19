@@ -93,23 +93,29 @@ impl RopeBytes {
     }
 }
 
-/// A number, as the digit runs of its components — never a borrow of a parsed value, always a lazy,
-/// skippable decode. Each run is an owned-shared [`ByteVec`] sub-rope of the source (zero-copy, ASCII
-/// digits `0`–`9` only, guaranteed by the decoder's grammar scan).
+/// A number, as owned-shared [`ByteVec`] sub-ropes of the source — never a borrow of a parsed value,
+/// always a lazy, skippable decode. All runs are O(1) structural shares of the same source chunks
+/// (numbers are short), so the token is self-contained: the [`Visitor`] can decode without any handle
+/// on the source rope.
 ///
-/// A value is produced on demand by handing these validated components to a value-type constructor
-/// (the decoder ↔ value boundary, §6): the coefficient digits are `integer` then `fraction`, and the
-/// effective power of ten is `±exponent − fraction.len()`.
+/// It is a *superset* handoff (design §5/§6, settled):
+/// - [`lexeme`](NumberToken::lexeme) is the **primary** payload — the whole validated number lexeme as
+///   one sub-rope. Its byte iterator (`lexeme.chunks().flat_map(|c| c.iter().copied())`) feeds a
+///   from-text value constructor such as `Decimal::parse(impl IntoIterator<Item = u8>)`. One slice, no
+///   re-synthesis of the `.`/`e`/sign.
+/// - The component runs + flags below are cheap structural metadata for a consumer that wants
+///   integer-detection without re-scanning, or a value type that wants pre-split digits
+///   (`Decimal::from_components(sign, int_digits, frac_digits, exp)`). The coefficient digits are
+///   `integer` then `fraction`; the effective power of ten is `±exponent − fraction.len()`.
 ///
-/// NOTE (fit-feedback for the design): §5 sketches a number token as "a raw `Span` + int/frac/exp
-/// flags", but a bare `Span` is *not self-contained* — the [`Visitor`] receiving it has no handle on
-/// the source rope, so it cannot resolve the span to digits, and flags alone cannot feed
-/// `Decimal::from_components(sign, int_digits, frac_digits, exp)`. Carrying the component runs as
-/// owned-shared sub-ropes keeps the token self-contained and still zero-copy (numbers are short; a
-/// sub-rope is O(1) structural sharing). A decoder builds these from its recorded component spans
-/// (`etude_json::Token::number_parts`) with one `ByteVec::slice` each.
+/// A decoder builds all of these from its recorded spans (`etude_json::Token::span` for the lexeme,
+/// `Token::number_parts` for the components) with one `ByteVec::slice` each. (A bare `Span` would not
+/// work at the visit boundary — the Visitor has no handle on the source rope to resolve it.)
 #[derive(Clone, Debug)]
 pub struct NumberToken {
+    /// The whole number lexeme (sign, integer, optional fraction, optional exponent) as one sub-rope —
+    /// the primary payload for a from-text value constructor.
+    pub lexeme: ByteVec,
     /// The lexeme has a leading `-`.
     pub negative: bool,
     /// The integer-part digits (no sign) — a non-empty run for a valid number.
