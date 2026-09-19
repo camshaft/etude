@@ -207,6 +207,33 @@ fn division_of_fractions() {
     assert_eq!(r.recip().unwrap().recip().unwrap(), r);
 }
 
+#[test]
+fn mul_div_cross_reduction() {
+    let s = |n, d| Rational::from_ratio_i64(n, d).unwrap();
+    // Products that cancel cross-wise: (6/5)*(10/9) = 4/3 [gcd(6,9)=3, gcd(10,5)=5].
+    assert_eq!(s(6, 5).mul(&s(10, 9)).to_decimal_string(), "4/3");
+    // Sign travels through cancellation: (-2/3)*(3/4) = -1/2.
+    assert_eq!(s(-2, 3).mul(&s(3, 4)).to_decimal_string(), "-1/2");
+    assert_eq!(s(-2, 3).mul(&s(-3, 4)).to_decimal_string(), "1/2");
+    // Multiply by zero canonicalizes to 0/1 (must NOT leave 0/den).
+    assert_eq!(Rational::zero().mul(&s(7, 9)).to_decimal_string(), "0");
+    assert_eq!(s(7, 9).mul(&Rational::zero()).to_decimal_string(), "0");
+
+    // Division with cancellation: (3/4)/(9/8) = 2/3 [gcd(3,9)=3, gcd(8,4)=4].
+    assert_eq!(s(3, 4).div(&s(9, 8)).unwrap().to_decimal_string(), "2/3");
+    // Divisor's sign is placed on the numerator: (1/2)/(-3/4) = -2/3.
+    assert_eq!(s(1, 2).div(&s(-3, 4)).unwrap().to_decimal_string(), "-2/3");
+    assert_eq!(s(-1, 2).div(&s(-3, 4)).unwrap().to_decimal_string(), "2/3");
+    // Zero dividend / zero divisor.
+    assert_eq!(
+        Rational::zero().div(&s(3, 4)).unwrap().to_decimal_string(),
+        "0"
+    );
+    assert!(s(3, 4).div(&Rational::zero()).is_none());
+    // Results are truly canonical (coprime): (4/6)*(9/8) = 3/4, not 36/48.
+    assert_eq!(s(4, 6).mul(&s(9, 8)).to_decimal_string(), "3/4");
+}
+
 // ─── the differential op-driver (the growing oracle) ──────────────────────────────────────────────
 
 /// One operation over a small register file of rationals. Binary ops read two registers and push the

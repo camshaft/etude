@@ -17,6 +17,30 @@ Numbers below are medians from one `aarch64-linux` run and are **indicative, not
 absolute times vary by machine; what matters is the **ratio to num-rational** and its movement as
 optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (**bold**), `>1.00` = slower.
 
+## Current — mul/div cross-reduction (slice 5)
+
+`mul`/`div` now cross-reduce BEFORE multiplying: since both operands are canonical, the only common
+factors in `(a*c)/(b*d)` are between `a`&`d` and `c`&`b`, so cancelling `gcd(a,d)` and `gcd(c,b)` first
+leaves the result already in lowest terms — **the final gcd-normalize is eliminated entirely**. This
+replaces one gcd over the `~2n`-bit product with two gcds over `~n`-bit operands. Measured on the random
+board (no artifact — random reduced operands): **mul and div now WIN every tier**, ~2.4–2.8× faster than
+num-rational and ~2.5–3.3× faster than the previous cross-multiply path:
+
+| op  | tier   | etude (was → now) | num-rational | ratio (was → now) |
+|-----|--------|-------------------|--------------|-------------------|
+| mul | 64b    | 3.81 → 2.08 µs    | 5.02 µs      | 0.76 → **0.41**   |
+| mul | 256b   | 23.3 → 8.16 µs    | 20.8 µs      | 1.14 → **0.39**   |
+| mul | 1024b  | 167 → 50.1 µs     | 117 µs       | 1.44 → **0.43**   |
+| div | 64b    | 3.45 → 1.86 µs    | 5.24 µs      | 0.67 → **0.36**   |
+| div | 256b   | 23.7 → 8.98 µs    | 21.9 µs      | 1.11 → **0.41**   |
+| div | 1024b  | 160 → 48.5 µs     | 114 µs       | 1.42 → **0.42**   |
+
+Standing scoreboard after slice 5: **we now beat num-rational on mul, div, recip, and cmp (64b/256b)**,
+and match/beat on the eqden add/sub and the 64b tier generally. The remaining losses are the
+**random-operand add/sub at ≥256b** (still `(a*d+c*b)/(b*d)` + a gcd-normalize — the next cross-reduction
+target: reduce via `gcd(b,d)` to a common denominator) and **cmp @1024b** (needs the O(1) size accessor
+for a clean hybrid — see the note below).
+
 ## Current — equal-denominator add/sub fast path (slice 4)
 
 `add`/`sub` now fast-path a common real-world pattern: when the two denominators are equal, the result is

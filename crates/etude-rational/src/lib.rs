@@ -182,19 +182,42 @@ impl Rational {
         normalize(num, den).expect("product of positive denominators is nonzero")
     }
 
-    /// Exact product `self * other`. `(a/b) * (c/d) = (a*c)/(b*d)`, renormalized.
+    /// Exact product `self * other` = `(a/b) * (c/d)`.
+    ///
+    /// Cross-reduces BEFORE multiplying: since both operands are canonical (`gcd(a,b) = gcd(c,d) = 1`),
+    /// the only common factors in `(a*c)/(b*d)` are between `a`&`d` and `c`&`b`. Cancelling `gcd(a,d)` and
+    /// `gcd(c,b)` first leaves the result ALREADY in lowest terms — no final gcd-normalize — and both
+    /// multiplies run on smaller operands. This trades one gcd over the `~2n`-bit product for two gcds
+    /// over `~n`-bit operands (roughly half the work), and shrinks the products when factors do cancel.
     pub fn mul(&self, other: &Rational) -> Rational {
-        let num = self.num.mul(&other.num);
-        let den = self.den.mul(&other.den);
-        normalize(num, den).expect("product of positive denominators is nonzero")
+        if self.num.is_zero() || other.num.is_zero() {
+            return Rational::zero();
+        }
+        // `a*c / (b*d)`: cancel gcd(a,d) and gcd(c,b). `b,d > 0` and the cancelled factors are positive,
+        // so the resulting denominator is positive — the sign stays on the numerator.
+        let (num, den) = cross_reduce_mul(&self.num, &self.den, &other.num, &other.den);
+        Rational { num, den }
     }
 
-    /// Exact quotient `self / other`. `(a/b) / (c/d) = (a*d)/(b*c)`, renormalized. Returns `None` when
-    /// `other` is zero.
+    /// Exact quotient `self / other` = `(a/b) / (c/d) = (a*d)/(b*c)`. Returns `None` when `other` is zero.
+    ///
+    /// Same cross-reduction as [`Rational::mul`] (dividing by `c/d` is multiplying by `d/c`): cancel
+    /// `gcd(a,c)` and `gcd(d,b)` first, so no final gcd-normalize is needed. Because the divisor's
+    /// numerator `c` can be negative, the resulting denominator's sign is fixed up onto the numerator.
     pub fn div(&self, other: &Rational) -> Option<Rational> {
-        let num = self.num.mul(&other.den);
-        let den = self.den.mul(&other.num);
-        normalize(num, den)
+        if other.num.is_zero() {
+            return None;
+        }
+        if self.num.is_zero() {
+            return Some(Rational::zero());
+        }
+        // Multiply `a/b` by `d/c` (both coprime pairs): cancel gcd(a,c) and gcd(d,b).
+        let (mut num, mut den) = cross_reduce_mul(&self.num, &self.den, &other.den, &other.num);
+        if den.is_negative() {
+            num = num.neg();
+            den = den.neg();
+        }
+        Some(Rational { num, den })
     }
 
     /// The decimal string `"num/den"` (e.g. `"-3/10"`), or just `"num"` when the value is an integer.
@@ -252,6 +275,29 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
         num: num_reduced,
         den: den_reduced,
     })
+}
+
+/// `|_ n = a/g` helper: divide exactly by `g` (a known divisor of `n`), skipping the divmod when `g == 1`.
+fn div_exact(n: &Big, g: &Big, one: &Big) -> Big {
+    if g == one {
+        n.clone()
+    } else {
+        n.divmod(g).expect("g is a nonzero divisor of n").0
+    }
+}
+
+/// Cross-reduced multiply of two CANONICAL fractions `a/b` and `c/d` (`gcd(a,b) = gcd(c,d) = 1`, and both
+/// nonzero). Cancels `g1 = gcd(a,d)` and `g2 = gcd(c,b)` before multiplying, returning `((a/g1)*(c/g2),
+/// (b/g2)*(d/g1))` — which is ALREADY in lowest terms (the four cross-pairs are pairwise coprime), so no
+/// further gcd-normalize is needed. `gcd` is sign-agnostic, so the quotients keep their operands' signs;
+/// the caller owns any final sign placement.
+fn cross_reduce_mul(a: &Big, b: &Big, c: &Big, d: &Big) -> (Big, Big) {
+    let one = Big::from_i64(1);
+    let g1 = a.gcd(d); // gcd(|a|, |d|)
+    let g2 = c.gcd(b); // gcd(|c|, |b|)
+    let num = div_exact(a, &g1, &one).mul(&div_exact(c, &g2, &one));
+    let den = div_exact(b, &g2, &one).mul(&div_exact(d, &g1, &one));
+    (num, den)
 }
 
 #[cfg(test)]
