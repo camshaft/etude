@@ -223,6 +223,67 @@ fn utf8_char_width(b: u8) -> usize {
     }
 }
 
+/// Length of the largest prefix of `bytes` that ends on a codepoint boundary — i.e. everything except a
+/// trailing codepoint that continues into the next chunk. Given the whole content is valid UTF-8, an
+/// incomplete tail is at most 3 bytes and its leading byte lies within the last 4 bytes.
+fn valid_prefix_len(bytes: &[u8]) -> usize {
+    let n = bytes.len();
+    let mut i = n;
+    while i > 0 && n - i < 4 {
+        i -= 1;
+        let b = bytes[i];
+        if b < 0x80 {
+            return n; // ASCII byte at/near the end: nothing is mid-codepoint
+        }
+        if b >= 0xC0 {
+            // Leading byte at `i`: the tail codepoint is complete iff its full width fits in the chunk.
+            let width = utf8_char_width(b);
+            return if i + width <= n { n } else { i };
+        }
+        // continuation byte: keep scanning back for its leading byte
+    }
+    n
+}
+
+/// Feed the content to `emit` as a sequence of valid `&str` pieces, stitching a codepoint that straddles a
+/// chunk boundary into a small stack buffer — so the bulk of the content is written in whole-chunk `&str`
+/// runs (fast, no allocation), and only the ≤3-byte seams are handled specially. The backbone of
+/// [`Display`](core::fmt::Display) / [`Debug`](core::fmt::Debug).
+fn for_each_str<F>(rope: &StrRope, mut emit: F) -> core::fmt::Result
+where
+    F: FnMut(&str) -> core::fmt::Result,
+{
+    let mut carry = [0u8; 4];
+    let mut carry_len = 0usize;
+    for chunk in rope.0.chunks() {
+        let mut bytes: &[u8] = chunk;
+        // 1. Complete a codepoint carried from the previous chunk, using the front of this one.
+        if carry_len > 0 {
+            let width = utf8_char_width(carry[0]);
+            let need = (width - carry_len).min(bytes.len());
+            carry[carry_len..carry_len + need].copy_from_slice(&bytes[..need]);
+            carry_len += need;
+            bytes = &bytes[need..];
+            if carry_len < width {
+                continue; // still incomplete; wait for the next chunk
+            }
+            if let Ok(s) = core::str::from_utf8(&carry[..width]) {
+                emit(s)?;
+            }
+            // carry_len is unconditionally reset by step 2's assignment below.
+        }
+        // 2. Emit the valid prefix in bulk; stash any trailing incomplete codepoint as the new carry.
+        let end = valid_prefix_len(bytes);
+        if let Ok(s) = core::str::from_utf8(&bytes[..end]) {
+            emit(s)?;
+        }
+        let tail = &bytes[end..];
+        carry[..tail.len()].copy_from_slice(tail);
+        carry_len = tail.len();
+    }
+    Ok(())
+}
+
 /// Iterator over the [`char`]s of a [`StrRope`] (see [`StrRope::chars`]). Reassembles a codepoint that
 /// spans a chunk boundary by pulling bytes across chunks.
 pub struct Chars<'a> {
@@ -393,27 +454,19 @@ impl PartialEq<&str> for StrRope {
 
 impl core::fmt::Display for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        use core::fmt::Write as _;
-        // Stream chars (reassembling any codepoint that spans a chunk boundary) — no whole-content
-        // allocation, unlike a linearize-then-write.
-        for c in self.chars() {
-            f.write_char(c)?;
-        }
-        Ok(())
+        // Bulk-write whole-chunk `&str` runs (stitching only the ≤3-byte codepoint seams) — no
+        // whole-content allocation, and no per-char overhead.
+        for_each_str(self, |s| f.write_str(s))
     }
 }
 
 impl core::fmt::Debug for StrRope {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         use core::fmt::Write as _;
-        // Same alloc-free char stream, with `str`-style escaping (matches `<str as Debug>`, which
-        // escapes each char via `escape_debug`).
+        // Same bulk `&str` runs, escaped per `<str as Debug>` (`str::escape_debug` is a bulk-writing
+        // Display adapter, so escaping stays out of the per-char path).
         f.write_char('"')?;
-        for c in self.chars() {
-            for esc in c.escape_debug() {
-                f.write_char(esc)?;
-            }
-        }
+        for_each_str(self, |s| write!(f, "{}", s.escape_debug()))?;
         f.write_char('"')
     }
 }
