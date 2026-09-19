@@ -329,6 +329,27 @@ blocks in one bottom-up pass — so bulk pulls ~20–30% ahead and stays there. 
 gate is well-placed: the bulk machinery is spent only once it is solidly the cheaper path, and small
 builds stay on the plain loop.
 
+### Access pattern: sequential vs random point `get` (runnable: `cargo bench -p etude-bytevec -- access_pattern`)
+
+Point access (`get(index)`) descends the size table O(log₃₂) from the root on every call. That descent
+is cache-order-sensitive in a way a flat deque's O(1) index is not — measured on a tall 100k-chunk tree
+(aarch64, jemalloc, release):
+
+| access order | rope `get` | naive deque `get` |
+|--------------|------------|-------------------|
+| sequential | 54.2 ns | 3.66 ns |
+| random | 93.3 ns | 4.96 ns |
+
+Sequential indices reuse almost the same root→branch→leaf path (crossing a leaf boundary only every
+`FANOUT`), so the descent stays cache-warm and well-predicted; random indices land on cold nodes and miss
+cache on each hop — a **1.72×** penalty for the rope (the deque shows a smaller 1.35× effect, just from
+touching `Bytes` handles scattered across the 140 MB of backing). The takeaway is an API one, not a
+missing optimization: for *sequential* traversal use `chunks()`, which keeps the descent stacks alive and
+yields each chunk in ~2 ns amortized (`chunks_iter`), ~27× cheaper per element than re-descending from the
+root with `get`. A cursor cache on `get` could close the sequential gap, but it would need interior
+mutability on the `&self` read path (breaking `Sync`) to serve exactly the access pattern `chunks()`
+already serves — so `get` stays the clean random-access primitive and `chunks()` the sequential one.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat

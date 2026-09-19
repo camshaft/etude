@@ -1196,11 +1196,57 @@ fn bench_churn_sweep(c: &mut Criterion) {
     }
 }
 
+/// Sequential vs random point access. The rope descends its size table O(log₃₂) from the root on
+/// every `get`; consecutive *sequential* indices reuse almost the same descent path (cache-warm,
+/// well-predicted branches, crossing a leaf boundary only every `FANOUT`), while *random* indices land
+/// on cold nodes and miss cache on each hop. A flat deque indexes O(1) either way, so it is the
+/// invariant reference that isolates the rope's access-order sensitivity. Uses a tall tree (100k
+/// chunks) so the descent is several levels deep and the cache effect is visible.
+fn bench_access_pattern(c: &mut Criterion) {
+    const N: usize = DEEP * 100;
+    let rope = rope_of(N);
+    let naive = naive_of(N);
+    let mut g = group(c, "access_pattern");
+
+    g.bench_function(BenchmarkId::new("rope", "sequential"), |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            let v = rope.get(i).map(|c| c.len());
+            i = (i + 1) % N;
+            black_box(v)
+        })
+    });
+    g.bench_function(BenchmarkId::new("rope", "random"), |b| {
+        let mut st = 0x9E37_79B9u64;
+        b.iter(|| {
+            st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+            black_box(rope.get((st >> 33) as usize % N).map(|c| c.len()))
+        })
+    });
+    g.bench_function(BenchmarkId::new("naive_deque", "sequential"), |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            let v = naive.get(i).map(|c| c.len());
+            i = (i + 1) % N;
+            black_box(v)
+        })
+    });
+    g.bench_function(BenchmarkId::new("naive_deque", "random"), |b| {
+        let mut st = 0x9E37_79B9u64;
+        b.iter(|| {
+            st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+            black_box(naive.get((st >> 33) as usize % N).map(|c| c.len()))
+        })
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_stream,
     bench_build_crossover,
     bench_churn_sweep,
+    bench_access_pattern,
     bench_push_back,
     bench_push_front,
     bench_mutating,
