@@ -996,8 +996,94 @@ fn bench_compact(c: &mut Criterion) {
     g.finish();
 }
 
+/// Streaming FIFO workload — the canonical byte-rope use (socket / pipe buffering), which the isolated
+/// `push_back` and `pop_front` benches do not cover because they never *interleave*. Two shapes:
+///
+/// - `stream_fifo`: a buffer held at a steady backlog while bytes flow through it — each round pushes
+///   one chunk at the back and pops one at the front, so the length stays ~constant. At `deep` this
+///   interleaves the push-freeze and pop-adopt tree machinery; at `boundary` it stays in the flat tier
+///   without churning; at `shallow` it is a small flat buffer.
+/// - `stream_churn`: the worst case for tiering — the backlog oscillates across *both* thresholds
+///   (grow past `PROMOTE_AT` = 64, drain below `DEMOTE_AT` = 32, repeat), so every cycle pays a full
+///   `promote` (deque → tree) and `demote` (tree → deque). Measures whether the hysteresis band is
+///   wide enough to keep a realistically-oscillating buffer from thrashing the representation.
+fn bench_stream(c: &mut Criterion) {
+    const ROUNDS: usize = 64;
+    let feed: Vec<Bytes> = (0..ROUNDS).map(|i| mtu_chunk(i as u8)).collect();
+
+    // Steady-state FIFO: push one, pop one, holding the length at `backlog`.
+    for &backlog in &[SHALLOW, 48usize, DEEP] {
+        let label = match backlog {
+            SHALLOW => "shallow".to_string(),
+            DEEP => "deep".to_string(),
+            n => format!("boundary_{n}"),
+        };
+        let mut g = group(c, "stream_fifo");
+        g.bench_function(BenchmarkId::new("rope", &label), |b| {
+            b.iter_batched_ref(
+                || rope_of(backlog),
+                |r| {
+                    for chunk in &feed {
+                        r.push_back(chunk.clone());
+                        black_box(r.pop_front());
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("naive_deque", &label), |b| {
+            b.iter_batched_ref(
+                || naive_of(backlog),
+                |v| {
+                    for chunk in &feed {
+                        v.push_back(chunk.clone());
+                        black_box(v.pop_front());
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+
+    // Boundary-crossing churn: grow 20 -> 80 (promotes at 64), then drain 80 -> 20 (demotes at 32).
+    const LO: usize = 20;
+    const HI: usize = 80;
+    let mut g = group(c, "stream_churn");
+    g.bench_function(BenchmarkId::new("rope", "oscillate_20_80"), |b| {
+        b.iter_batched_ref(
+            || rope_of(LO),
+            |r| {
+                for chunk in feed.iter().take(HI - LO) {
+                    r.push_back(chunk.clone());
+                }
+                for _ in 0..(HI - LO) {
+                    black_box(r.pop_front());
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.bench_function(BenchmarkId::new("naive_deque", "oscillate_20_80"), |b| {
+        b.iter_batched_ref(
+            || naive_of(LO),
+            |v| {
+                for chunk in feed.iter().take(HI - LO) {
+                    v.push_back(chunk.clone());
+                }
+                for _ in 0..(HI - LO) {
+                    black_box(v.pop_front());
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    bench_stream,
     bench_push_back,
     bench_push_front,
     bench_mutating,
