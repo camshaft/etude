@@ -38,11 +38,31 @@ use etude_json::{Span, Token, TokenKind, Tokenizer};
 use etude_serde::{Deserializer, Error, MapAccess, NumberToken, RopeStr, SeqAccess, Visitor};
 use etude_strrope::StrRope;
 
-/// Deserialize the single JSON value in `input` (a rope), driving `visitor`. Errors if the bytes are
-/// not exactly one grammatical JSON value (trailing tokens, unterminated containers, missing
-/// separators, …) — i.e. this enforces the grammar the lexer does not.
+/// Re-exported so a caller can select the parse mode for [`from_rope_with`] without depending on
+/// [`etude_json`] directly.
+pub use etude_json::Strictness;
+
+/// Deserialize the single JSON value in `input` (a rope), driving `visitor`, in the default
+/// [`Strictness::Strict`] mode (accept/reject matches `serde_json`). Errors if the bytes are not
+/// exactly one grammatical JSON value (trailing tokens, unterminated containers, missing separators,
+/// …) — i.e. this enforces the grammar the lexer does not.
 pub fn from_rope<V: Visitor>(input: &ByteVec, visitor: V) -> Result<V::Value, Error> {
-    let mut stream = Stream::new(input);
+    from_rope_with(input, Strictness::Strict, visitor)
+}
+
+/// Deserialize the single JSON value in `input` with an explicit [`Strictness`] mode.
+///
+/// [`Strictness::Strict`] matches `serde_json` (string content must be valid UTF-8, `\u` surrogates
+/// must be paired) and lets the escape-free string path take a zero-copy O(1) borrow of the source
+/// rope. [`Strictness::Lenient`] accepts the documented superset — non-UTF-8 content and lone
+/// surrogates — resolving both lossily (invalid content is rejected here rather than borrowed, since
+/// a [`RopeStr::Borrowed`] must be valid UTF-8).
+pub fn from_rope_with<V: Visitor>(
+    input: &ByteVec,
+    strictness: Strictness,
+    visitor: V,
+) -> Result<V::Value, Error> {
+    let mut stream = Stream::with_strictness(input, strictness);
     let value = de(&mut stream).deserialize_any(visitor)?;
     match stream.next()? {
         None => Ok(value),
@@ -69,15 +89,17 @@ struct Stream<'a> {
     input: &'a ByteVec,
     peeked: Option<Result<Option<Token>, Error>>,
     depth: usize,
+    strictness: Strictness,
 }
 
 impl<'a> Stream<'a> {
-    fn new(input: &'a ByteVec) -> Self {
+    fn with_strictness(input: &'a ByteVec, strictness: Strictness) -> Self {
         Stream {
-            iter: Tokenizer::new(input),
+            iter: Tokenizer::with_strictness(input, strictness),
             input,
             peeked: None,
             depth: 0,
+            strictness,
         }
     }
 
@@ -132,13 +154,6 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                 // Copy-avoidance payoff: an escape-free string's content is handed as an O(1) structural
                 // share (RopeStr::Borrowed) — no unescape, no allocation; only an escaped string is
                 // materialized into an Owned buffer, chosen from the cheap has-escapes flag.
-                //
-                // Content validity is INPUT-derived, so it is an Err path, never a panic: the tokenizer
-                // currently accepts string content that is not valid UTF-8 (a raw non-UTF-8 byte lexes as
-                // a String), which serde_json rejects. Until that is resolved at the lexer (the pending
-                // strict-vs-lossy policy call), the adapter rejects it here — a Deserializer must return
-                // Err, not panic. (When the lexer validates UTF-8, from_utf8 becomes infallible and this
-                // Borrowed arm can move to the zero-copy from_utf8_unchecked.)
                 let has_escapes = token
                     .string_has_escapes()
                     .expect("String token has an escapes flag");
@@ -151,8 +166,23 @@ impl Deserializer for JsonDeserializer<'_, '_> {
                     let span = token
                         .string_span()
                         .expect("String token has a content span");
-                    let rope = StrRope::from_utf8(input.slice(span.range()))
-                        .map_err(|_| Error::custom("string content is not valid UTF-8"))?;
+                    let content = input.slice(span.range());
+                    let rope = match self.stream.strictness {
+                        // A Strict tokenizer validates string-content UTF-8 at lex, so this span is
+                        // guaranteed valid UTF-8 and the O(1) unchecked conversion is the zero-copy
+                        // fast path — no redundant re-scan of the borrowed content.
+                        Strictness::Strict => {
+                            // SAFETY: `content` is the content span of a String token produced by a
+                            // `Strictness::Strict` tokenizer, which rejects non-UTF-8 string content at
+                            // lex time; the bytes are therefore valid UTF-8.
+                            unsafe { StrRope::from_utf8_unchecked(content) }
+                        }
+                        // A Lenient tokenizer accepts non-UTF-8 content, so the borrowed bytes are not
+                        // known-valid: validate here and reject (never borrow) invalid content — a
+                        // Deserializer must return Err, not construct an invalid `StrRope` or panic.
+                        Strictness::Lenient => StrRope::from_utf8(content)
+                            .map_err(|_| Error::custom("string content is not valid UTF-8"))?,
+                    };
                     visitor.visit_str(RopeStr::Borrowed(rope))
                 }
             }

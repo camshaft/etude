@@ -245,18 +245,23 @@ fn whitespace_and_bom_match_serde_json() {
 }
 
 #[test]
-fn lone_surrogates_decode_lossily_a_deliberate_divergence_from_serde() {
-    // KNOWN, INTENTIONAL divergence from serde_json: etude-json's string decoder is *infallible* — a
-    // lone surrogate (a `\u` escape in D800..=DFFF with no valid pair) is replaced with U+FFFD rather
-    // than rejected (see etude-json's decode_string docs). serde_json instead rejects. This is a
-    // spec-policy choice (lossy-infallible vs strict-reject), flagged to the operator; pinned here so
-    // the behavior is explicit and a future policy flip is a conscious test change, not a silent one.
+fn lone_surrogates_reject_in_strict_decode_lossily_in_lenient() {
+    // A lone `\u` surrogate (a `\u` escape in D800..=DFFF with no valid pair) is the configurable
+    // strict-vs-lenient axis:
+    // - Strict (the default `from_rope`): rejected — parity with serde_json, which also rejects.
+    // - Lenient (`from_rope_with(Strictness::Lenient, …)`): decoded lossily to U+FFFD by etude-json's
+    //   infallible decoder — a deliberate accept-superset divergence from serde_json.
     for lone in [&b"\"\\uD83D\""[..], b"\"\\uDE00\""] {
-        // adapter accepts and yields the replacement character...
-        let got = from_rope(&rope(lone, 1), BuildValue).unwrap();
-        assert_eq!(got, Value::String("\u{FFFD}".to_string()));
-        // ...whereas serde_json rejects it. (The divergence, made explicit.)
+        // serde_json rejects the bytes outright.
         assert!(serde_json::from_slice::<Value>(lone).is_err());
+        // Strict (default): the adapter rejects too (no panic — a clean Err).
+        assert!(
+            from_rope(&rope(lone, 1), BuildValue).is_err(),
+            "Strict should reject a lone surrogate"
+        );
+        // Lenient: the adapter accepts and yields the replacement character.
+        let got = from_rope_with(&rope(lone, 1), Strictness::Lenient, BuildValue).unwrap();
+        assert_eq!(got, Value::String("\u{FFFD}".to_string()));
     }
 }
 
