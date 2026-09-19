@@ -903,13 +903,36 @@ impl ByteRope {
             return self.chunks().next().expect("one chunk").clone();
         }
         let mut out = bytes::BytesMut::with_capacity(self.len);
-        for chunk in self.chunks() {
-            out.extend_from_slice(chunk);
-        }
+        self.extend_into(&mut out);
         out.freeze()
     }
 
     // --- internal helpers -------------------------------------------------
+
+    /// Appends every byte of the rope to `out`, in order, via a direct traversal of the underlying
+    /// storage — bypassing the [`Chunks`] iterator's per-chunk bookkeeping (and, in the deep tier, its
+    /// resumable tree walk). The hot path behind flatten (`copy_to_bytes`/`copy_to_bytes_mut`).
+    fn extend_into(&self, out: &mut bytes::BytesMut) {
+        match &self.repr {
+            Repr::Small { head, additional } => {
+                if !head.is_empty() {
+                    out.extend_from_slice(head);
+                }
+                for c in additional {
+                    out.extend_from_slice(c);
+                }
+            }
+            Repr::Deep(d) => {
+                for c in &d.head {
+                    out.extend_from_slice(c);
+                }
+                d.tree.for_each_chunk(&mut |c| out.extend_from_slice(c));
+                for c in &d.tail {
+                    out.extend_from_slice(c);
+                }
+            }
+        }
+    }
 
     #[inline]
     fn front_chunk_len(&self) -> Option<usize> {
@@ -1962,9 +1985,7 @@ impl ByteRope {
             return bytes::BytesMut::from(head.clone());
         }
         let mut out = bytes::BytesMut::with_capacity(self.len);
-        for chunk in self.chunks() {
-            out.extend_from_slice(chunk);
-        }
+        self.extend_into(&mut out);
         out
     }
 

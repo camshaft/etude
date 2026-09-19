@@ -204,6 +204,22 @@ impl Node {
         }
     }
 
+    /// Recursively visits every chunk in this subtree, in order.
+    fn for_each_chunk(&self, f: &mut impl FnMut(&Bytes)) {
+        match self {
+            Node::Leaf(b) => {
+                for c in b.chunks.iter() {
+                    f(c);
+                }
+            }
+            Node::Branch(b) => {
+                for child in &b.children {
+                    child.for_each_chunk(f);
+                }
+            }
+        }
+    }
+
     /// The byte at `offset` (`offset < self.byte_len()`). O(log₃₂) via the per-child size scan.
     fn byte_at(&self, offset: usize) -> u8 {
         match self {
@@ -399,6 +415,14 @@ impl Tree {
     #[inline]
     pub(crate) fn chunk_count(&self) -> usize {
         self.chunk_count
+    }
+
+    /// Visits every chunk in order via a simple recursive DFS — cheaper than the resumable [`Chunks`]
+    /// iterator (no per-chunk stack save/restore), for hot bulk reads like flatten.
+    pub(crate) fn for_each_chunk(&self, f: &mut impl FnMut(&Bytes)) {
+        if let Some(root) = &self.root {
+            root.for_each_chunk(f);
+        }
     }
 
     /// Validates the tree's structural invariants and cached sizes/counts against the actual nodes.
