@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Property/differential fuzz of the adapter (the parser layer) against `serde_json`, complementing
-//! `etude-json`'s tokenizer-level bolero tests. For a generated input the adapter and serde_json must
-//! agree on accept/reject, and on the built value when both accept.
+//! `etude-json`'s tokenizer-level bolero tests. Two targets, both bounded under `cargo test` and
+//! fuzzable with `cargo bolero test <name>`:
 //!
-//! Inputs are arbitrary bytes mapped onto a JSON-biased alphabet that deliberately EXCLUDES backslash:
-//! with no `\` there are no string escapes, which keeps the oracle exact — it sidesteps the one known,
-//! intentional divergence (lone-surrogate `\u` escapes decode lossily to U+FFFD rather than being
-//! rejected; see `src/tests.rs`). The alphabet still exercises structure, numbers, whitespace, the
-//! literals, and simple strings exhaustively in random combination. Runs bounded under `cargo test`;
-//! fuzz it with `cargo bolero test adapter_matches_serde_json_on_backslash_free_input`.
+//! - `adapter_matches_serde_json_on_backslash_free_input` — grammar/accept-reject parity. Arbitrary
+//!   bytes mapped onto a JSON-biased alphabet that deliberately EXCLUDES backslash: with no `\` there
+//!   are no string escapes, which keeps the oracle exact — it sidesteps the one known, intentional
+//!   divergence (lone-surrogate `\u` escapes decode lossily to U+FFFD rather than being rejected; see
+//!   `src/tests.rs`). Still exercises structure, numbers, whitespace, the literals, and simple strings.
+//! - `escape_roundtrip_matches_serde` — the escape-DECODE path. serde emits an arbitrary string's
+//!   escaped JSON literal; the adapter must decode it back identically, including across rope-chunk
+//!   boundaries (the cross-chunk escape hazard).
 
 use bytes::Bytes;
 use etude_bytevec::ByteVec;
@@ -35,6 +37,49 @@ fn rope(bytes: &[u8]) -> ByteVec {
         r.push_back(Bytes::copy_from_slice(bytes));
     }
     r
+}
+
+/// Build a rope with a fixed chunk size, so escapes / multi-byte chars can be forced to straddle leaf
+/// boundaries (`chunk == 1` splits every byte into its own leaf).
+fn rope_chunked(bytes: &[u8], chunk: usize) -> ByteVec {
+    let chunk = chunk.max(1);
+    let mut r = ByteVec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let j = (i + chunk).min(bytes.len());
+        r.push_back(Bytes::copy_from_slice(&bytes[i..j]));
+        i = j;
+    }
+    r
+}
+
+/// Decodes a single JSON string value to its `String`, erroring on any other shape.
+struct StringVisitor;
+
+impl Visitor for StringVisitor {
+    type Value = String;
+
+    fn visit_str(self, s: RopeStr) -> Result<String, Error> {
+        Ok(s.to_string())
+    }
+    fn visit_null(self) -> Result<String, Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_bool(self, _: bool) -> Result<String, Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_bytes(self, _: RopeBytes) -> Result<String, Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_number(self, _: NumberToken) -> Result<String, Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_seq<A: SeqAccess>(self, _: A) -> Result<String, Error> {
+        Err(Error::custom("not a string"))
+    }
+    fn visit_map<A: MapAccess>(self, _: A) -> Result<String, Error> {
+        Err(Error::custom("not a string"))
+    }
 }
 
 /// Builds a `serde_json::Value`, so the adapter's output can be compared directly to serde's.
@@ -103,6 +148,31 @@ fn adapter_matches_serde_json_on_backslash_free_input() {
                     shown()
                 )
             }
+        }
+    });
+}
+
+#[test]
+fn escape_roundtrip_matches_serde() {
+    use bolero::check;
+
+    // Fuzz the escape-DECODE path (the riskiest JSON code) cleanly: let serde emit an arbitrary Rust
+    // string's properly-escaped JSON literal (control chars -> `\uXXXX`, quote/backslash/newline/…, raw
+    // UTF-8 for the rest — and never a lone surrogate, since a Rust `String` cannot hold one), then
+    // require the adapter to decode it back to the same string. `chunk == 1` forces every escape and
+    // every multi-byte char to straddle a rope leaf boundary — the rope-specific decode hazard.
+    check!().with_type::<String>().cloned().for_each(|s| {
+        let json = serde_json::to_string(&s).expect("string serializes");
+        // Sanity: serde round-trips its own output.
+        let via_serde: String = serde_json::from_str(&json).expect("serde parses its own output");
+        assert_eq!(via_serde, s);
+        for chunk in [1usize, json.len().max(1)] {
+            let got = from_rope(&rope_chunked(json.as_bytes(), chunk), StringVisitor)
+                .expect("adapter parses a valid JSON string");
+            assert_eq!(
+                got, s,
+                "adapter decode mismatch (json {json:?}) at chunk={chunk}"
+            );
         }
     });
 }
