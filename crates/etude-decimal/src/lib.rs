@@ -125,21 +125,48 @@ impl Decimal {
 
     /// Strip trailing zero digits from the coefficient (raising `exp` to keep the value), and collapse a
     /// zero coefficient to `exp == 0`. Stops early rather than overflowing `exp` (a pathological input
-    /// with a coefficient of `~2^31` trailing zeros stays merely un-fully-stripped, never wrong).
+    /// with a coefficient of `~2^63` trailing zeros stays merely un-fully-stripped, never wrong).
+    ///
+    /// Strips in base-`10^9` chunks: `10^9` fits in a single machine limb, so each `divmod` costs the
+    /// same as a `divmod` by 10 while clearing up to nine zero digits at once — turning the strip from
+    /// `O(trailing zeros)` divisions into `O(zeros / 9)`. The common case (a coefficient with no
+    /// trailing zero) is a single `divmod`, exactly as the naive one-at-a-time loop was.
     fn normalize(&mut self) {
         if self.coeff.is_zero() {
             self.exp = 0;
             return;
         }
-        let ten = Big::from_i64(10);
-        while self.exp < i64::MAX {
-            // divmod by 10 is None only for a zero divisor, which `ten` is not.
-            let (q, r) = self.coeff.divmod(&ten).expect("divisor 10 is nonzero");
-            if !r.is_zero() {
-                break;
+        const CHUNK_DIGITS: i64 = 9;
+        let chunk = Big::from_i64(1_000_000_000); // 10^9, a single-limb divisor
+        loop {
+            if self.exp > i64::MAX - CHUNK_DIGITS {
+                return; // refuse to overflow exp; leaving it un-fully-stripped is still correct
             }
-            self.coeff = q;
-            self.exp += 1;
+            // divmod is None only for a zero divisor, which `chunk` is not.
+            let (q, r) = self.coeff.divmod(&chunk).expect("divisor 10^9 is nonzero");
+            if r.is_zero() {
+                // All nine low digits are zero — strip the whole chunk and continue.
+                self.coeff = q;
+                self.exp += CHUNK_DIGITS;
+                continue;
+            }
+            // The low ≤9 digits are `r` (nonzero, so `r < 10^9` fits an `i64`); the coefficient's
+            // remaining trailing zeros are exactly `r`'s, counted cheaply on the native integer.
+            let mut v = r.to_i64_checked().expect("remainder below 10^9 fits i64");
+            let mut tz = 0i64;
+            while v % 10 == 0 {
+                v /= 10;
+                tz += 1;
+            }
+            if tz > 0 {
+                self.coeff = self
+                    .coeff
+                    .divmod(&pow10(tz as u64))
+                    .expect("power of ten is nonzero")
+                    .0;
+                self.exp += tz; // tz ≤ 8, and exp ≤ i64::MAX - 9 was guarded above
+            }
+            return;
         }
     }
 

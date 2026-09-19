@@ -126,7 +126,10 @@ cached-length ~6 ns.
 1. ~~**`cmp` equal-exponent fast path**~~ — DONE: compares `Big` coefficients directly; 30×–1000× faster.
    Residual: a magnitude-only `Big` compare (no `abs()` clone) plus an unequal-exponent path that avoids
    decimal strings.
-2. **Cheaper `normalize`** — trailing-base-10-zero count / chunked strip on `Big` to cut the
-   `add`/`sub`/`mul` canonicalization tax.
+2. **Cheaper `normalize`** — the strip is now base-`10^9` chunked (`O(zeros / 9)` divisions instead of
+   `O(zeros)`), but the *common* case (a result with no trailing zero) still pays one `divmod(10^9)` to
+   discover it is not divisible by ten — that is the residual `add`/`sub`/`mul` tax. Removing it needs a
+   cheap divisibility/parity primitive on `Big` (an `is_even` / `rem_u64`), requested from `etude-bigint`;
+   `coeff` divisible by 10 iff even *and* divisible by 5, and the even check is `O(1)`.
 3. **Chunked base-`10^k` parse/render** — push the digit loop down into `etude-bigint` for
    `from_str`/`to_string`.

@@ -71,6 +71,27 @@ fn canonicalizes_trailing_zeros() {
         Decimal::from_str("1e-1").unwrap(),
         Decimal::from_str("0.1").unwrap()
     );
+    // Many trailing zeros crossing the 9-digit strip chunk boundary: coefficient must reduce fully to
+    // its non-zero-terminated form with the exponent carrying every stripped zero.
+    for (lit, coeff, exp) in [
+        ("1000000000", "1", 9),                     // exactly one chunk (9 zeros)
+        ("1000000000000000000", "1", 18),           // exactly two chunks (18 zeros)
+        ("100000000000000000000", "1", 20),         // 20 zeros — spans chunks + a partial
+        ("25000000000", "25", 9),                   // interior digits, 9 trailing zeros
+        ("123000000000000000000", "123", 18),       // interior digits, 18 trailing zeros
+        ("70000000000000000000000000000", "7", 28), // 28 zeros
+    ] {
+        let d = Decimal::from_str(lit).unwrap();
+        assert_eq!(d.coefficient().to_decimal_string(), coeff, "{lit} coeff");
+        assert_eq!(d.exponent(), exp, "{lit} exp");
+        assert_eq!(d.to_string(), lit, "{lit} round-trip");
+    }
+    // The same via arithmetic: 2 * 5e9 = 1e10 canonicalizes to coeff 1, exp 10.
+    let prod = Decimal::from_str("2")
+        .unwrap()
+        .mul(&Decimal::from_str("5e9").unwrap());
+    assert_eq!(prod.coefficient().to_decimal_string(), "1");
+    assert_eq!(prod.exponent(), 10);
     // A zero is always the one canonical zero regardless of scale/exponent/sign.
     for s in ["0", "0.0", "0.000", "0e5", "-0", "-0.0", "0E-3"] {
         let z = Decimal::from_str(s).unwrap();
