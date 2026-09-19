@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Exact base-10 arbitrary-precision decimal numbers — a `coeff * 10^exp` value over
-//! [`etude_bigint::Big`]. Pure over `alloc`, no I/O, no dependency but `etude-bigint`. Built for the
-//! JSON decoder: a JSON number literal (`-?int(.frac)?([eE][+-]?exp)?`) decodes into a [`Decimal`]
-//! LOSSLESSLY, unlike an `f64` (which loses precision) or a rational (which would need gcd reduction and
-//! cannot preserve scale). Exact arithmetic ([`Decimal::add`]/[`Decimal::sub`]/[`Decimal::mul`]) never
-//! rounds a digit away; division (which needs a rounding policy) is a later addition. Correctness is
-//! pinned by a differential test against `bigdecimal` (a dev-dependency) as the reference.
+//! [`etude_bigint::Big`]. Pure over `alloc`, no I/O, no dependency but `etude-bigint`. A decimal number
+//! literal (`-?int(.frac)?([eE][+-]?exp)?`) decodes into a [`Decimal`] LOSSLESSLY, unlike an `f64` (which
+//! loses precision) or a rational (which would need gcd reduction and cannot preserve scale). Exact
+//! arithmetic ([`Decimal::add`]/[`Decimal::sub`]/[`Decimal::mul`]) never rounds a digit away; division
+//! (which needs a rounding policy) is a later addition. Correctness is pinned by a differential test
+//! against `bigdecimal` (a dev-dependency) as the reference.
 //!
 //! # Representation and the canonical-form invariant
 //! A [`Decimal`] is the exact value `coeff * 10^exp`, where `coeff` is an [`etude_bigint::Big`] signed
@@ -191,8 +191,8 @@ impl Decimal {
         Decimal::new(self.coeff.mul(&other.coeff), exp)
     }
 
-    /// Parse a JSON number from ASCII bytes into an exact `Decimal`, or `None` if the bytes are not a
-    /// well-formed JSON number. The accepted grammar is exactly JSON's:
+    /// Parse a decimal number literal from ASCII bytes into an exact `Decimal`, or `None` if the bytes
+    /// are not a well-formed decimal literal. The accepted grammar is:
     ///
     /// ```text
     /// -? ( 0 | [1-9][0-9]* ) ( . [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
@@ -210,7 +210,7 @@ impl Decimal {
             return None;
         }
 
-        // Optional leading minus (JSON forbids a leading plus).
+        // Optional leading minus (a leading plus is not accepted).
         let neg = bytes[0] == b'-';
         if neg {
             i += 1;
@@ -366,9 +366,9 @@ impl Decimal {
     }
 
     /// Write the canonical decimal rendering DIRECTLY into a [`core::fmt::Write`] sink — the
-    /// allocation-conscious rendering path that [`Display`] uses (no intermediate `String` is built for
-    /// the framing). The output is always a valid JSON number and re-parses via [`Decimal::from_ascii`]
-    /// to the same value: a plain (point) form for modest exponents, and a bounded `<digits>e<exp>`
+    /// allocation-conscious rendering path that [`Display`](core::fmt::Display) uses (no intermediate `String` is built for
+    /// the framing). The output always re-parses via [`Decimal::from_ascii`] to the same value: a plain
+    /// (point) form for modest exponents, and a bounded `<digits>e<exp>`
     /// scientific form for large magnitudes so the output stays small.
     ///
     /// One residual allocation remains: the coefficient's digits come from
@@ -483,13 +483,13 @@ impl core::fmt::Display for Decimal {
 }
 
 /// Parse error for [`Decimal::from_str`] / [`str::parse`]. Carries no detail — the input was not a
-/// well-formed JSON number (see [`Decimal::from_ascii`] for the grammar).
+/// well-formed decimal literal (see [`Decimal::from_ascii`] for the grammar).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ParseDecimalError;
 
 impl core::fmt::Display for ParseDecimalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("invalid decimal (not a well-formed JSON number)")
+        f.write_str("invalid decimal number literal")
     }
 }
 
