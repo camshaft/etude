@@ -123,19 +123,27 @@ negatives) — no `abs()` coefficient clone. Flat ~6 ns at every width, near par
 
 ### `cmp_uneq` — three-way ordering, unequal exponents (bit-length adjusted-exponent bound)
 
-The unequal-exponent path compares adjusted exponents `(digit count - 1) + exp`. When either operand is
-multi-limb it first bounds the adjusted exponent from `bit_len` alone (`O(1)`: the digit count lies in a
-small interval around `bit_len · log10 2`); if the bounds are disjoint — the common case, magnitudes at
-different scales — the order is decided with no `decimal_digit_count` at all. This flattened the large
-tiers from hundreds of ns / microseconds to a constant ~25 ns.
+When both coefficients fit `i128` and aligning them to the smaller exponent stays within `i128` — the
+common small mixed-scale case (e.g. two prices at different scales) — the unequal-exponent path scales the
+two integers natively and compares them directly (`64b` below). Otherwise it compares adjusted exponents
+`(digit count - 1) + exp`: when either operand is multi-limb it first bounds the adjusted exponent from
+`bit_len` alone (`O(1)`: the digit count lies in a small interval around `bit_len · log10 2`); if the bounds
+are disjoint — magnitudes at different scales — the order is decided with no `decimal_digit_count` at all.
+This keeps the large tiers a constant ~24 ns rather than the hundreds of ns / microseconds a full digit
+count would cost.
 
-| tier | etude (before) | etude (now) | bigdecimal | ratio |
-|------|---------------:|------------:|-----------:|------:|
-| 64b   | 16.01 ns  | 18.15 ns | 5.87 ns | 3.09 |
-| 256b  | 391.98 ns | 24.78 ns | 5.89 ns | 4.20 |
-| 1024b | 887.32 ns | 24.77 ns | 5.87 ns | 4.22 |
-| 2048b | 1.985 µs  | 24.73 ns | 5.89 ns | 4.20 |
-| 4096b | 5.364 µs  | 24.82 ns | 5.92 ns | 4.19 |
+| tier | etude | bigdecimal | ratio |
+|------|------:|-----------:|------:|
+| 64b   | 12.93 ns | 5.80 ns | 2.23 |
+| 256b  | 24.10 ns | 5.83 ns | 4.13 |
+| 1024b | 24.13 ns | 5.87 ns | 4.11 |
+| 2048b | 24.73 ns | 5.89 ns | 4.20 |
+| 4096b | 24.82 ns | 5.92 ns | 4.19 |
+
+The `64b` tier (single-limb, fits `i128`) takes the native scale-and-compare (`18.15 → 12.93 ns`); the
+wider tiers exceed `i128` and stay on the `bit_len` bound. All still trail `bigdecimal`'s ~6 ns by the
+coefficient inspection an unequal-scale compare needs (`bigdecimal` pays it too, but on a smaller stored
+integer); this path never renders or allocates.
 
 ### `to_string` — render to a decimal literal — we win at scale
 
@@ -289,10 +297,11 @@ rejecting it, so there is no same-semantics comparison to run.
   `add`/`sub`, so the `64b` add/sub tier now beats `bigdecimal` too.
 - **`cmp`** (equal exponents) is a flat ~6 ns at every width — near parity with `bigdecimal` — now that
   the magnitude compare is a signed `Big` compare with no `abs()` clone. The **`cmp_uneq`** (unequal
-  exponent) path bounds the adjusted exponent from `bit_len` (`O(1)`) and decides disjoint magnitudes with
-  no digit count — a constant ~25 ns at every width — falling to the exact `decimal_digit_count` only when
-  the bounds overlap (near-equal orders of magnitude). It trails `bigdecimal`'s ~6 ns by the `bit_len` +
-  bound arithmetic.
+  exponent) path scales both coefficients to a common exponent in `i128` and compares natively when they
+  fit (the common small mixed-scale case — `64b` `18 → 13 ns`); otherwise it bounds the adjusted exponent
+  from `bit_len` (`O(1)`) and decides disjoint magnitudes with no digit count — a constant ~24 ns at every
+  wider width — falling to the exact `decimal_digit_count` only when the bounds overlap. It trails
+  `bigdecimal`'s ~6 ns by the coefficient inspection an unequal-scale compare needs.
 - **`from_str` and `to_string` now win at scale.** `from_str` groups digits into base-`10¹⁹` limbs
   (`from_base_10_pow_k_limbs`); `to_string` streams digits via `Big::write_decimal` and splits a wide
   coefficient with a single-limb divide. `from_str` beats `bigdecimal` from 1024b up; `to_string` from
