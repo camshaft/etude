@@ -23,6 +23,14 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// (label, magnitude byte count). 8 bytes ≈ 64 bits.
 const TIERS: &[(&str, usize)] = &[("64b", 8), ("256b", 32), ("1024b", 128), ("4096b", 512)];
 
+/// Larger magnitude tiers, run only for the operations whose asymptotic complexity matters (mul,
+/// divmod). They probe where num-bigint's subquadratic algorithms (Toom-3 multiply, recursive
+/// division) pull ahead of our Karatsuba multiply and schoolbook Knuth division — the measured data
+/// that decides whether those algorithms are worth building. Kept off the O(n) ops (add/sub/cmp),
+/// whose ratio is flat and already known across the standard tiers. 2048 bytes ≈ 16 Kbit (256 limbs),
+/// 8192 bytes ≈ 64 Kbit (1024 limbs).
+const LARGE_TIERS: &[(&str, usize)] = &[("16384b", 2048), ("65536b", 8192)];
+
 struct Rng(u64);
 impl Rng {
     fn byte(&mut self) -> u8 {
@@ -99,6 +107,33 @@ fn bench_sub(c: &mut Criterion) {
 }
 fn bench_mul(c: &mut Criterion) {
     binop(c, "mul", TIERS, |a, b| a.mul(b), |a, b| a * b);
+}
+
+/// mul at the large tiers — Karatsuba (ours) vs num-bigint's Toom-3-capable multiply. Reveals the
+/// asymptotic crossover above the 4096b (64-limb) standard tier.
+fn bench_mul_large(c: &mut Criterion) {
+    binop(c, "mul_large", LARGE_TIERS, |a, b| a.mul(b), |a, b| a * b);
+}
+
+/// divmod (`2n / n` shape) at the large tiers — schoolbook Knuth D (ours) vs num-bigint's division.
+/// Reveals whether a recursive (Burnikel-Ziegler) divide is worth building above the standard tiers.
+fn bench_divmod_large(c: &mut Criterion) {
+    let mut g = group(c, "divmod_large");
+    let mut rng = Rng(0x2b1c_0ffe_e0dd_f00d);
+    for &(label, nbytes) in LARGE_TIERS {
+        let a = rng.big(nbytes * 2);
+        let b = rng.big(nbytes);
+        let (na, nb) = (to_num(&a), to_num(&b));
+        g.bench_with_input(BenchmarkId::new("etude", label), &(a, b), |bch, (a, b)| {
+            bch.iter(|| black_box(a.divmod(black_box(b))))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &(na, nb),
+            |bch, (a, b)| bch.iter(|| black_box((a / b, a % b))),
+        );
+    }
+    g.finish();
 }
 
 /// divmod: dividend twice the divisor's width (the classic `2n / n` shape).
@@ -635,7 +670,9 @@ criterion_group!(
     bench_add,
     bench_sub,
     bench_mul,
+    bench_mul_large,
     bench_divmod,
+    bench_divmod_large,
     bench_div_exact,
     bench_div_small,
     bench_gcd,
