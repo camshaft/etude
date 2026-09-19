@@ -107,6 +107,117 @@ fn utf8_append_and_insert_bytes_match_string_model() {
     assert_eq!(&s.copy_to_bytes()[..], b"<fooXYZbar>");
 }
 
+/// The streaming validator accepts every valid codepoint no matter WHERE a chunk boundary falls —
+/// including inside a 2/3/4-byte codepoint — over every way of cutting the content into up to three
+/// chunks, and preserves the content on the accept path.
+#[test]
+fn utf8_streaming_validates_codepoints_split_at_every_boundary() {
+    let samples: &[&str] = &["", "a", "é", "€", "𝄞", "aé€𝄞z", "héllo wörld 𝄞!"];
+    for s in samples {
+        let full = s.as_bytes();
+        for i in 0..=full.len() {
+            for j in i..=full.len() {
+                let mut rope = ByteVec::new();
+                if i > 0 {
+                    rope.push_back(chunk(&full[..i]));
+                }
+                if j > i {
+                    rope.push_back(chunk(&full[i..j]));
+                }
+                if full.len() > j {
+                    rope.push_back(chunk(&full[j..]));
+                }
+                let r = Rope::<Utf8>::try_from_bytes(rope);
+                assert!(r.is_ok(), "valid {s:?} split at {i},{j} must validate");
+                assert_eq!(
+                    &r.unwrap().copy_to_bytes()[..],
+                    full,
+                    "content preserved {s:?} @ {i},{j}"
+                );
+            }
+        }
+    }
+}
+
+/// The streaming validator rejects truncated (missing continuation), malformed (lead + non-
+/// continuation), and overlong sequences — even when the bad bytes straddle a chunk boundary.
+#[test]
+fn utf8_streaming_rejects_truncated_and_malformed() {
+    // Truncated: drop the final continuation byte of a multi-byte codepoint.
+    for s in ["é", "€", "𝄞", "aé", "x€y𝄞"] {
+        let full = s.as_bytes();
+        let truncated = &full[..full.len() - 1];
+        for i in 0..=truncated.len() {
+            let mut rope = ByteVec::new();
+            if i > 0 {
+                rope.push_back(chunk(&truncated[..i]));
+            }
+            if truncated.len() > i {
+                rope.push_back(chunk(&truncated[i..]));
+            }
+            assert!(
+                Rope::<Utf8>::try_from_bytes(rope).is_err(),
+                "truncated {s:?} @ {i} must reject"
+            );
+        }
+    }
+    // Lead byte followed by a non-continuation byte, plus overlong NUL — at every split.
+    let bad: &[&[u8]] = &[
+        &[0xC3, 0x28],
+        &[0xE2, 0x82, 0x28],
+        &[0xF0, 0x9F, 0x28],
+        &[0xC0, 0x80],
+    ];
+    for seq in bad {
+        for i in 0..=seq.len() {
+            let mut rope = ByteVec::new();
+            if i > 0 {
+                rope.push_back(chunk(&seq[..i]));
+            }
+            if seq.len() > i {
+                rope.push_back(chunk(&seq[i..]));
+            }
+            assert!(
+                Rope::<Utf8>::try_from_bytes(rope).is_err(),
+                "malformed {seq:?} @ {i} must reject"
+            );
+        }
+    }
+}
+
+/// Differential: for arbitrary content bytes cut into arbitrary chunk sizes, the streaming
+/// `try_from_bytes` agrees EXACTLY with `core::str::from_utf8` over the concatenation (no false
+/// accept, no false reject) and preserves the content when it accepts.
+#[test]
+fn utf8_streaming_matches_from_utf8_oracle() {
+    use bolero::check;
+    check!()
+        .with_type::<(Vec<u8>, Vec<u8>)>()
+        .cloned()
+        .for_each(|(content, splits)| {
+            let sizes: Vec<usize> = if splits.is_empty() {
+                vec![1]
+            } else {
+                splits.iter().map(|b| (*b as usize % 5) + 1).collect()
+            };
+            let mut rope = ByteVec::new();
+            let mut pos = 0;
+            let mut si = 0;
+            while pos < content.len() {
+                let n = sizes[si % sizes.len()].min(content.len() - pos);
+                rope.push_back(chunk(&content[pos..pos + n]));
+                pos += n;
+                si += 1;
+            }
+            let oracle_ok = core::str::from_utf8(&content).is_ok();
+            let r = Rope::<Utf8>::try_from_bytes(rope);
+            assert_eq!(r.is_ok(), oracle_ok, "content={content:?} sizes={sizes:?}");
+            if let Ok(s) = r {
+                assert_eq!(&s.copy_to_bytes()[..], &content[..], "content preserved");
+            }
+        });
+}
+
 #[test]
 fn single_chunk_is_flat_and_allocation_light() {
     let mut rope = ByteVec::new();
