@@ -585,6 +585,34 @@ fn bench_decimal_digit_count(c: &mut Criterion) {
     g.finish();
 }
 
+/// `from_i128` / `to_i128_checked` — the limb-level i128 pair etude-decimal uses to widen its native
+/// small-operand add/sub path to values in `[2^63, 2^64)` and beyond, without a `Big` byte round-trip.
+/// A two-limb value (needs both limbs, so past the i64 fast path) vs num-bigint's `From<i128>` /
+/// `ToPrimitive::to_i128`.
+fn bench_i128(c: &mut Criterion) {
+    use num_traits::ToPrimitive;
+    const V: i128 = -0x0123_4567_89ab_cdef_7654_3210_fedc_ba98; // two full limbs
+    let mut g = group(c, "from_i128");
+    g.bench_function("etude", |bch| {
+        bch.iter(|| black_box(Big::from_i128(black_box(V))))
+    });
+    g.bench_function("num-bigint", |bch| {
+        bch.iter(|| black_box(BigInt::from(black_box(V))))
+    });
+    g.finish();
+
+    let b = Big::from_i128(V);
+    let nb = BigInt::from(V);
+    let mut g = group(c, "to_i128_checked");
+    g.bench_with_input(BenchmarkId::new("etude", "2-limb"), &b, |bch, b| {
+        bch.iter(|| black_box(black_box(b).to_i128_checked()))
+    });
+    g.bench_with_input(BenchmarkId::new("num-bigint", "2-limb"), &nb, |bch, b| {
+        bch.iter(|| black_box(black_box(b).to_i128()))
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -611,6 +639,7 @@ criterion_group!(
     bench_to_sign_magnitude_into,
     bench_o1_accessors,
     bench_from_base_10_pow_k,
-    bench_decimal_digit_count
+    bench_decimal_digit_count,
+    bench_i128
 );
 criterion_main!(benches);
