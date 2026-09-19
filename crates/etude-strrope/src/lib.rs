@@ -701,6 +701,57 @@ mod tests {
         );
     }
 
+    /// Ordering between two ropes must match `str` ordering for arbitrary content pairs under
+    /// independently chosen chunk layouts. The cross-chunking checks in the construction
+    /// differential only compare equal contents (always `Ordering::Equal`), so the less/greater
+    /// comparison paths across misaligned chunk boundaries — where a windowed chunk-aligned
+    /// compare can misstep — were unfuzzed. Also pins Eq and the `PartialEq<str>` view against the
+    /// same oracle, and both operand orders for antisymmetry.
+    #[test]
+    fn ord_between_ropes_matches_str_for_content_pairs() {
+        use bolero_generator::TypeGenerator;
+
+        #[derive(Debug, Clone, TypeGenerator)]
+        struct Input {
+            a: String,
+            b: String,
+            a_chunk: u8,
+            b_chunk: u8,
+        }
+
+        fn build(content: &str, chunk: u8) -> StrRope {
+            let width = usize::from(chunk % 7) + 1;
+            let mut bytes = ByteVec::new();
+            for piece in content.as_bytes().chunks(width) {
+                bytes.push_back(bytes::Bytes::copy_from_slice(piece));
+            }
+            StrRope::from_utf8(bytes).expect("source is a valid str")
+        }
+
+        bolero::check!()
+            .with_type::<Input>()
+            .cloned()
+            .for_each(|inp| {
+                let ra = build(&inp.a, inp.a_chunk);
+                let rb = build(&inp.b, inp.b_chunk);
+                let want = inp.a.as_str().cmp(inp.b.as_str());
+                assert_eq!(
+                    ra.cmp(&rb),
+                    want,
+                    "Ord vs str for {:?} vs {:?}",
+                    inp.a,
+                    inp.b
+                );
+                assert_eq!(rb.cmp(&ra), want.reverse(), "Ord antisymmetry");
+                assert_eq!(ra == rb, inp.a == inp.b, "Eq vs str");
+                assert_eq!(
+                    ra == *inp.b.as_str(),
+                    inp.a == inp.b,
+                    "PartialEq<str> vs str"
+                );
+            });
+    }
+
     #[test]
     fn from_str_and_basic_queries() {
         let s = StrRope::from("héllo");
