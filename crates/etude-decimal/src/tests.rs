@@ -299,6 +299,22 @@ fn checked_integer_extraction() {
 }
 
 #[test]
+fn display_renders_canonical_and_ignores_format_flags() {
+    // Contract (matching num-rational): Display streams the canonical form and ignores width / fill /
+    // alignment / sign / zero-padding / precision flags. `{:>8.2}` renders identically to `{}`.
+    for s in ["3.14", "-0.001", "1500", "0", "42", "12345678.9012345"] {
+        let d = Decimal::from_str(s).unwrap();
+        let plain = format!("{d}");
+        assert_eq!(plain, d.to_string(), "{s}");
+        assert_eq!(format!("{d:>8}"), plain, "{s} width ignored");
+        assert_eq!(format!("{d:08}"), plain, "{s} zero-pad ignored");
+        assert_eq!(format!("{d:+}"), plain, "{s} sign flag ignored");
+        assert_eq!(format!("{d:.2}"), plain, "{s} precision ignored");
+        assert_eq!(format!("{d:^12.4}"), plain, "{s} align+precision ignored");
+    }
+}
+
+#[test]
 fn to_f64_matches_float_parse() {
     // Correctly-rounded direct conversion must agree bit-for-bit with the std float parser (itself
     // correctly rounded) across normals, rounding boundaries, subnormals, overflow, and underflow.
