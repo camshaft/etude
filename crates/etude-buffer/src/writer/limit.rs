@@ -30,11 +30,16 @@ impl<S: Buffer + ?Sized> Buffer for Limit<'_, S> {
 
     #[inline]
     fn put_slice(&mut self, bytes: &[u8]) {
-        debug_assert!(bytes.len() <= self.remaining_capacity);
+        // Enforce the limit with a REAL check BEFORE forwarding to storage: `bytes.len()` is
+        // caller-controlled, so an `assume!` here would (in release) both let the oversized write
+        // bypass the cap into storage AND make the capacity subtraction underflow into UB.
+        assert!(
+            bytes.len() <= self.remaining_capacity,
+            "put_slice of {} bytes exceeds the write limit's {} remaining",
+            bytes.len(),
+            self.remaining_capacity
+        );
         self.storage.put_slice(bytes);
-        unsafe {
-            assume!(self.remaining_capacity >= bytes.len());
-        }
         self.remaining_capacity -= bytes.len();
     }
 
@@ -43,12 +48,14 @@ impl<S: Buffer + ?Sized> Buffer for Limit<'_, S> {
     where
         F: FnOnce(&mut UninitSlice) -> Result<(), Error>,
     {
-        debug_assert!(payload_len <= self.remaining_capacity);
+        assert!(
+            payload_len <= self.remaining_capacity,
+            "put_uninit_slice of {} bytes exceeds the write limit's {} remaining",
+            payload_len,
+            self.remaining_capacity
+        );
         let did_write = self.storage.put_uninit_slice(payload_len, f)?;
         if did_write {
-            unsafe {
-                assume!(self.remaining_capacity >= payload_len);
-            }
             self.remaining_capacity -= payload_len;
         }
         Ok(did_write)
@@ -69,33 +76,36 @@ impl<S: Buffer + ?Sized> Buffer for Limit<'_, S> {
     #[inline]
     fn put_bytes(&mut self, bytes: Bytes) {
         let len = bytes.len();
-        debug_assert!(len <= self.remaining_capacity);
+        assert!(
+            len <= self.remaining_capacity,
+            "put_bytes of {len} bytes exceeds the write limit's {} remaining",
+            self.remaining_capacity
+        );
         self.storage.put_bytes(bytes);
-        unsafe {
-            assume!(self.remaining_capacity >= len);
-        }
         self.remaining_capacity -= len;
     }
 
     #[inline]
     fn put_bytes_mut(&mut self, bytes: BytesMut) {
         let len = bytes.len();
-        debug_assert!(len <= self.remaining_capacity);
+        assert!(
+            len <= self.remaining_capacity,
+            "put_bytes_mut of {len} bytes exceeds the write limit's {} remaining",
+            self.remaining_capacity
+        );
         self.storage.put_bytes_mut(bytes);
-        unsafe {
-            assume!(self.remaining_capacity >= len);
-        }
         self.remaining_capacity -= len;
     }
 
     #[inline]
     fn put_chunk(&mut self, chunk: Chunk) {
         let len = chunk.len();
-        debug_assert!(len <= self.remaining_capacity);
+        assert!(
+            len <= self.remaining_capacity,
+            "put_chunk of {len} bytes exceeds the write limit's {} remaining",
+            self.remaining_capacity
+        );
         self.storage.put_chunk(chunk);
-        unsafe {
-            assume!(self.remaining_capacity >= len);
-        }
         self.remaining_capacity -= len;
     }
 }
@@ -133,5 +143,15 @@ mod tests {
             let writer = writer.with_write_limit(0);
             assert!(!writer.has_remaining_capacity());
         }
+    }
+
+    /// A write past the cap must panic (a real limit check), not bypass the limit into storage and
+    /// hit UB on the underflowing capacity subtraction as the pre-fix `assume!` allowed in release.
+    #[test]
+    #[should_panic(expected = "exceeds the write limit")]
+    fn put_slice_over_limit_panics() {
+        let mut storage: Vec<u8> = vec![];
+        let mut writer = storage.with_write_limit(4);
+        writer.put_slice(b"toolong"); // 7 bytes past a 4-byte limit -> must panic
     }
 }
