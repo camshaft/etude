@@ -211,6 +211,48 @@ impl Decimal {
         self.coeff.is_zero() || self.exp >= 0
     }
 
+    /// This value as an `i64`, or `None` unless it is an exact integer that fits `i64`. `1.5` and `1e40`
+    /// return `None`; `42`, `4.2e1`, and `100` return `Some`.
+    pub fn to_i64(&self) -> Option<i64> {
+        self.to_integer()?.to_i64_checked()
+    }
+
+    /// This value as an `i128`, or `None` unless it is an exact integer that fits `i128`.
+    pub fn to_i128(&self) -> Option<i128> {
+        self.to_integer()?.to_i128_checked()
+    }
+
+    /// This value as a `u64`, or `None` unless it is an exact integer in `0..=u64::MAX` (a negative value
+    /// returns `None`).
+    pub fn to_u64(&self) -> Option<u64> {
+        let v = self.to_integer()?.to_i128_checked()?;
+        (0..=u64::MAX as i128).contains(&v).then_some(v as u64)
+    }
+
+    /// The exact integer value as a [`Big`] when this decimal is an integer (`exp >= 0`), else `None`.
+    /// Guards against materializing an oversized power of ten: a value with more decimal digits than the
+    /// widest integer target (`i128` = 39 digits) cannot fit any of them, so it is rejected before the
+    /// scaling multiply. The remaining fit check is left to the caller's checked conversion.
+    fn to_integer(&self) -> Option<Big> {
+        if self.exp < 0 {
+            return None; // canonical: a nonzero coefficient with exp < 0 has a fractional part
+        }
+        if self.coeff.is_zero() {
+            return Some(Big::zero());
+        }
+        if self.exp == 0 {
+            return Some(self.coeff.clone());
+        }
+        let digits = self
+            .coeff
+            .decimal_digit_count()
+            .saturating_add(self.exp as u64);
+        if digits > 39 {
+            return None; // wider than i128 — no integer target can hold it
+        }
+        Some(self.coeff.mul(&pow10(self.exp as u64)))
+    }
+
     /// Negate the value (`-self`). Preserves canonical form (a sign flip cannot create a trailing zero).
     pub fn neg(&self) -> Decimal {
         Decimal {

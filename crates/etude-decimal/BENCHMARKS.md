@@ -239,7 +239,11 @@ strip). `iter_batched` clones the input in unmeasured setup so only `new` is tim
 
 Every real-work public function is benchmarked (above). Simple O(1) getters — `coefficient`, `exponent`,
 `is_zero`, `is_negative`, `is_integer` — are intentionally not benchmarked (per the operator directive
-that simple getters need no bench). `parse`/`parse_prefix` share their work with `from_str`.
+that simple getters need no bench). `parse`/`parse_prefix` share their work with `from_str`. The checked
+integer extractors `to_i64` / `to_u64` / `to_i128` (`Some` iff the value is an exact integer that fits the
+target) are checked getters — `O(1)` for the common `exp == 0` case, a single scale multiply otherwise —
+and are not head-to-head benched: `bigdecimal`'s `ToPrimitive` *truncates* a fractional value rather than
+rejecting it, so there is no same-semantics comparison to run.
 
 ## Reading the board
 
