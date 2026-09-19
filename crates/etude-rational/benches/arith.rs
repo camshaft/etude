@@ -199,6 +199,17 @@ fn bench(c: &mut Criterion) {
             |be, (a, b)| be.iter(|| black_box(*a - *b)),
         );
         g.finish();
+
+        let mut g = group(c, "cmp_i64");
+        g.bench_with_input(BenchmarkId::new("etude", "48b"), &(&a, &b), |be, (a, b)| {
+            be.iter(|| black_box(a.cmp(black_box(b))))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-rational", "48b"),
+            &(&ra, &rb),
+            |be, (a, b)| be.iter(|| black_box(a.cmp(black_box(b)))),
+        );
+        g.finish();
     }
 
     // Equal-denominator add/sub (a common real-workload pattern: accumulating fractions over a shared

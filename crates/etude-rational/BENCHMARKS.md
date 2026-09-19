@@ -75,10 +75,12 @@ num-rational always uses `BigInt`, so this is a large win:
 | div_i64 | 48-bit   | ~0.43 µs | ~4.1 µs      | **~0.11** |
 | add_i64 | 48-bit   | 0.40 µs  | 3.14 µs      | **0.126** |
 | sub_i64 | 48-bit   | ~0.40 µs | ~3.1 µs      | **~0.13** |
+| cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
 
-**~8–9× faster than num-rational on small operands** — all four arithmetic ops now take the native path
-(`add`/`sub` via `(a*d ± c*b)/(b*d)` with a checked `i128` numerator for the overflow edge, falling back to
-`Big`). (The byte-width tiers below UNDER-represent this case: their top magnitude bit is set, so a "64b"
+**~6–9× faster than num-rational on small operands** — all four arithmetic ops AND `cmp` now take the
+native path (`add`/`sub` via `(a*d ± c*b)/(b*d)` with a checked `i128` numerator for the overflow edge;
+`cmp` via `a*d ? c*b` in `i128`; falling back to `Big`). `cmp_small` also skips the `byte_len` size probe
+for the common i64-fitting case. (The byte-width tiers below UNDER-represent this case: their top magnitude bit is set, so a "64b"
 coefficient exceeds `i64` and takes the `Big` path.) The residual ~0.4 µs is the two result-`Big`
 allocations (`from_i64`) — both implementations must allocate the result; only our *arithmetic* went
 native, and etude-bigint's 1-limb `Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr
@@ -140,6 +142,9 @@ bignum-render-bound, not addressable locally.
 - **slice 12** — extended the native `i128` fast path to `add`/`sub` (`(a*d ± c*b)/(b*d)` with a checked
   `i128` numerator for the `2^126 + 2^126` overflow edge → falls back to `Big`). `add_i64` 0.126×
   num-rational (~8× faster); `sub` symmetric. All four arithmetic ops now native on small operands.
+- **slice 13** — native `i128` `cmp` on i64-fitting operands (`a*d ? c*b` directly, no `Big` multiply and
+  no `byte_len` probe). `cmp_i64` ~0.16× num-rational (~6× faster). Now all arithmetic + `cmp` are native
+  on the small case.
 - **slice 10** — re-add the `to_string` render bench (now a 64b WIN, 0.66, via etude-bigint's single-limb
   `to_decimal` fast path #82 + our alloc-lean Display) + corrected the large-tier scaling analysis:
   Karatsuba is already landed (#53), so add/sub@4096b parity is expected (num-bigint has it too) — a lead

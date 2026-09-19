@@ -354,6 +354,11 @@ impl Ord for Rational {
         if self.den == other.den {
             return self.num.cmp(&other.num);
         }
+        // Native i128 path when all components fit i64 (the common small case): `a/b ? c/d` ⟺ `a*d ? c*b`,
+        // and both products fit i128 — a direct integer compare, no Big multiply and no size probe.
+        if let Some(ord) = self.cmp_small(other) {
+            return ord;
+        }
         // Small components: the cross-multiply is two cheap multiplies and beats the continued-fraction
         // bookkeeping (measured crossover between the 256b and 1024b tiers).
         if self.is_cmp_small() && other.is_cmp_small() {
@@ -384,6 +389,18 @@ impl Rational {
     /// comparison is cheaper than the continued-fraction method.
     fn is_cmp_small(&self) -> bool {
         self.num.byte_len() <= CMP_SMALL_BYTES && self.den.byte_len() <= CMP_SMALL_BYTES
+    }
+
+    /// Native i128 comparison when every component fits i64: `a/b ? c/d` ⟺ `a*d ? c*b` (both `> 0`
+    /// denominators). `a*d` and `c*b` fit i128 (`|·| <= 2^126`), so this is an exact integer compare with
+    /// no `Big` multiply or allocation. Returns `None` (fall back to the `Big`/CF path) when any component
+    /// exceeds i64.
+    fn cmp_small(&self, other: &Rational) -> Option<Ordering> {
+        let a = self.num.to_i64_checked()? as i128;
+        let b = self.den.to_i64_checked()? as i128;
+        let c = other.num.to_i64_checked()? as i128;
+        let d = other.den.to_i64_checked()? as i128;
+        Some((a * d).cmp(&(c * b)))
     }
 }
 
