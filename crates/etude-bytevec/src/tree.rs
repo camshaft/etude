@@ -716,6 +716,16 @@ impl Tree {
         it
     }
 
+    /// Reverse (last-to-first) chunk iterator. Descends the *rightmost* spine, so consuming only the
+    /// last few chunks touches only O(1) nodes per chunk rather than the whole tree.
+    pub(crate) fn chunks_rev(&self) -> RevChunks<'_> {
+        let mut it = RevChunks::empty();
+        if let Some(root) = &self.root {
+            it.descend(root);
+        }
+        it
+    }
+
     /// Concatenates `left ++ right`, sharing all subtrees away from the seam. O(log₃₂).
     ///
     /// Consumes both operands by value: an empty operand is returned whole (no work), and the seam
@@ -1285,6 +1295,77 @@ impl<'a> Iterator for Chunks<'a> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match self.leaf.next() {
+            some @ Some(_) => some,
+            None => self.next_leaf(),
+        }
+    }
+}
+
+/// Reverse (last-to-first) counterpart of [`Chunks`]. Keeps its OWN rightmost-descent stack — it is a
+/// one-directional reverse walk, not a `DoubleEndedIterator` over [`Chunks`] (a single DFS stack
+/// cannot serve both ends of this relaxed-radix tree correctly), so it is correct by construction.
+pub(crate) struct RevChunks<'a> {
+    stack: Vec<alloc::collections::vec_deque::Iter<'a, Node>>,
+    leaf: core::slice::Iter<'a, Bytes>,
+}
+
+impl<'a> RevChunks<'a> {
+    fn empty() -> Self {
+        RevChunks {
+            stack: Vec::new(),
+            leaf: [].iter(),
+        }
+    }
+
+    /// Walks the rightmost spine of `node`, pushing each branch's children iterator (consumed from
+    /// the back) and leaving `self.leaf` on the rightmost leaf.
+    fn descend(&mut self, node: &'a Node) {
+        let mut node = node;
+        loop {
+            match node {
+                Node::Leaf(b) => {
+                    self.leaf = b.chunks.iter();
+                    return;
+                }
+                Node::Branch(b) => {
+                    let mut it = b.children.iter();
+                    match it.next_back() {
+                        Some(last) => {
+                            self.stack.push(it);
+                            node = last;
+                        }
+                        None => return,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cold path: the current leaf is exhausted — walk the branch stack (from the back) to the
+    /// previous leaf.
+    #[cold]
+    fn next_leaf(&mut self) -> Option<&'a Bytes> {
+        loop {
+            let top = self.stack.last_mut()?;
+            if let Some(node) = top.next_back() {
+                self.descend(node);
+                if let Some(chunk) = self.leaf.next_back() {
+                    return Some(chunk);
+                }
+            } else {
+                self.stack.pop();
+            }
+        }
+    }
+}
+
+impl<'a> Iterator for RevChunks<'a> {
+    type Item = &'a Bytes;
+
+    /// Hot path is a single `leaf.next_back()`; the stack walk is out-of-line.
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.leaf.next_back() {
             some @ Some(_) => some,
             None => self.next_leaf(),
         }
