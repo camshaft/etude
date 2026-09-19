@@ -6,7 +6,7 @@
 //! Everywhere a value would otherwise be a `String` (or `Arc<str>`) — an id, a name, a reason, a
 //! target — [`Str`] is the cheaper choice. Why: such text values are cloned constantly as they thread
 //! through routing, dispatch, and results, and a `String` clone is an allocation + copy; a `Str` clone
-//! is an O(1) `bytes::Bytes` refcount bump. It also gives text and bytes ONE representation, so a value
+//! is an O(1) `bytes::Bytes` refcount bump. It also gives text and bytes one representation, so a value
 //! crosses the text/binary boundary without re-allocating.
 //!
 //! It is a newtype over `bytes::Bytes`. Invariant: the wrapped `Bytes` is always valid UTF-8 — every
@@ -83,7 +83,7 @@ impl Str {
         Ok(Self(bytes))
     }
 
-    /// Wrap `Bytes` as a `Str` WITHOUT validating UTF-8.
+    /// Wrap `Bytes` as a `Str` without validating UTF-8.
     ///
     /// # Safety
     /// The caller must guarantee `bytes` is valid UTF-8; otherwise [`Str::as_str`] is undefined behaviour.

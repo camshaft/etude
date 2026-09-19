@@ -89,7 +89,7 @@ macro_rules! ensure {
 ///
 /// # Safety
 ///
-/// The condition MUST hold. Violating it in a release build is undefined behavior.
+/// The condition must hold. Violating it in a release build is undefined behavior.
 #[macro_export]
 macro_rules! assume {
     (false) => {
