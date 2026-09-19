@@ -95,10 +95,13 @@ fn actual(tokens: &[Token], input: &ByteVec) -> Vec<Expect> {
         .iter()
         .map(|t| match t.kind() {
             TokenKind::String => Expect::Str(t.decode_string(input).unwrap()),
+            // The Number token spans the exact bytes serde_json serialized (check_valid tokenizes
+            // serde_json's own canonical output), which equals the expected `Number::to_string()`.
+            // Compare the lexeme directly: a reparse-then-reserialize is NOT the identity for some
+            // subnormal doubles (a serde_json f64 round-trip artifact, off by 1 ULP in the string),
+            // which would spuriously fail even though the tokenizer spanned the correct bytes.
             TokenKind::Number => {
-                let s = String::from_utf8(span_bytes(input, t.span())).unwrap();
-                let n: serde_json::Number = s.parse().expect("number lexeme reparses");
-                Expect::Num(n.to_string())
+                Expect::Num(String::from_utf8(span_bytes(input, t.span())).unwrap())
             }
             k => Expect::Kind(k),
         })
@@ -378,13 +381,15 @@ fn differential_concrete_documents() {
 // ─── property tests ─────────────────────────────────────────────────────────────────────────────
 
 /// A generatable JSON document model. Serialized through `serde_json`, it produces valid JSON that
-/// the tokenizer must reproduce token-for-token. Integers only (no floats), so a number token's
-/// lexeme is exact; strings carry arbitrary text, exercising escape emission and decoding.
+/// the tokenizer must reproduce token-for-token. `Int` and `Float` exercise the integer and
+/// fraction/exponent number-lexeme paths; strings carry arbitrary text, exercising escape emission
+/// and decoding.
 #[derive(Debug, Clone, bolero_generator::TypeGenerator)]
 enum Doc {
     Null,
     Bool(bool),
     Int(i64),
+    Float(f64),
     Str(String),
     Arr(Vec<Doc>),
     Obj(Vec<(String, Doc)>),
@@ -396,6 +401,11 @@ fn doc_to_value(d: &Doc) -> serde_json::Value {
         Doc::Null => Value::Null,
         Doc::Bool(b) => Value::Bool(*b),
         Doc::Int(i) => Value::Number((*i).into()),
+        // JSON has no NaN/Infinity; `from_f64` returns `None` for those, so a non-finite generated
+        // float degrades to `null` (still a valid document to tokenize).
+        Doc::Float(f) => serde_json::Number::from_f64(*f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         Doc::Str(s) => Value::String(s.clone()),
         Doc::Arr(items) => Value::Array(items.iter().map(doc_to_value).collect()),
         Doc::Obj(kvs) => Value::Object(
