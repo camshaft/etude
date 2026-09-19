@@ -706,6 +706,65 @@ fn bench_socket_read(c: &mut Criterion) {
     g.finish();
 }
 
+/// `Rope<Utf8>`'s caller-trusted mutators against `String`:
+/// - `append_bytes` (backs `StrRope::push_str`) pushes each fragment as its own chunk, so many small
+///   appends accumulate chunks — expected to trail `String::push_str`'s amortized contiguous growth;
+/// - `insert_bytes` splits at the byte offset and stitches (O(log n)), against `String::insert_str`
+///   which shifts the tail (O(n) memmove) — expected to win as the content grows.
+fn bench_utf8_mutate(c: &mut Criterion) {
+    let frag = "hello ";
+    for &n in &[SHALLOW, DEEP] {
+        let label = if n == SHALLOW { "shallow" } else { "deep" };
+        let mut g = group(c, "append_bytes");
+        g.bench_function(BenchmarkId::new("rope_utf8", label), |b| {
+            b.iter(|| {
+                let mut s = Rope::<Utf8>::default();
+                for _ in 0..n {
+                    s.append_bytes(frag.as_bytes());
+                }
+                black_box(s)
+            })
+        });
+        g.bench_function(BenchmarkId::new("std_string", label), |b| {
+            b.iter(|| {
+                let mut s = String::new();
+                for _ in 0..n {
+                    s.push_str(frag);
+                }
+                black_box(s)
+            })
+        });
+        g.finish();
+
+        // insert into the middle of pre-built content (ascii, so every byte is a char boundary).
+        let content = frag.repeat(n);
+        let mut g = group(c, "insert_bytes");
+        g.bench_function(BenchmarkId::new("rope_utf8", label), |b| {
+            b.iter_batched(
+                || Rope::<Utf8>::from(content.clone()),
+                |mut s| {
+                    let mid = s.len() / 2;
+                    s.insert_bytes(mid, b"XYZ");
+                    black_box(s)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("std_string", label), |b| {
+            b.iter_batched(
+                || content.clone(),
+                |mut s| {
+                    let mid = s.len() / 2;
+                    s.insert_str(mid, "XYZ");
+                    black_box(s)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_push_back,
@@ -723,6 +782,7 @@ criterion_group!(
     bench_starts_ends_with,
     bench_validate_utf8,
     bench_copy_to_bytes_mut,
-    bench_socket_read
+    bench_socket_read,
+    bench_utf8_mutate
 );
 criterion_main!(benches);
