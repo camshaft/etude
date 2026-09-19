@@ -42,7 +42,6 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use core::cmp::Ordering;
 use core::str::FromStr;
 use etude_bigint::Big;
@@ -332,15 +331,112 @@ impl Decimal {
         Decimal::from_parts(neg, int_digits, frac_digits, exp_val)
     }
 
-    /// Convert to the nearest `f64` (correctly rounded via the standard library's float parser).
-    /// Magnitudes beyond `f64` range become `±∞`, matching `f64` decimal parsing.
+    /// Convert to the nearest `f64` — correctly rounded (round-to-nearest, ties-to-even), computed
+    /// DIRECTLY from the coefficient and exponent with no string round-trip. Magnitudes beyond `f64`
+    /// range become `±∞`, and magnitudes below the smallest subnormal round to `±0.0`, matching
+    /// IEEE-754 decimal-to-binary conversion.
+    ///
+    /// The value `|coeff| * 10^exp` is the exact rational `N / D` (`N, D > 0`); the nearest `f64` is
+    /// found by locating the binary exponent `e = ⌊log2(N/D)⌋`, dividing to obtain the 53-bit mantissa
+    /// with the remainder as the round/sticky information, and assembling the IEEE-754 bits. An initial
+    /// `log2` estimate short-circuits over/underflow so no oversized power of ten is ever materialized.
     pub fn to_f64(&self) -> f64 {
-        // f64 parsing needs a contiguous string, so this path builds one (it is NOT the Display path,
-        // which stays allocation-conscious via `write_to`). Letting the correctly-rounded std parser do
-        // the decimal→binary conversion is exact-input rounding without reimplementing it.
-        let mut s = String::new();
-        let _ = self.write_to(&mut s);
-        s.parse::<f64>().unwrap_or(f64::NAN)
+        if self.coeff.is_zero() {
+            return 0.0;
+        }
+        let neg = self.coeff.is_negative();
+        let sign = if neg { 1u64 << 63 } else { 0 };
+        let inf = if neg {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+
+        // Cheap magnitude estimate to short-circuit over/underflow WITHOUT materializing a huge power of
+        // ten: log2(value) ≈ (bit_len(|coeff|) - 1) + exp*log2(10). The estimate under-counts the true
+        // log2 by < 1, so the generous margins never shortcut a value the exact path would keep finite.
+        let m = self.coeff.abs();
+        let approx_log2 = (m.bit_len() as f64 - 1.0) + self.exp as f64 * core::f64::consts::LOG2_10;
+        if approx_log2 > 1025.0 {
+            return inf;
+        }
+        if approx_log2 < -1080.0 {
+            return f64::from_bits(sign); // ±0.0
+        }
+
+        // Exact value = |coeff| * 10^exp = N / D. Within the window above |exp| is bounded, so these
+        // powers of ten stay small.
+        let (n, d) = if self.exp >= 0 {
+            (m.mul(&pow10(self.exp as u64)), Big::from_i64(1))
+        } else {
+            (m, pow10((-self.exp) as u64))
+        };
+
+        // e = ⌊log2(N/D)⌋. The value lies in (2^(bn-bd-1), 2^(bn-bd+1)), so refine from that candidate.
+        let bn = n.bit_len() as i64;
+        let bd = d.bit_len() as i64;
+        // N/D >= 2^k  ⇔  (k>=0: N >= D*2^k) or (k<0: N*2^-k >= D).
+        let ge_pow2 = |k: i64| -> bool {
+            if k >= 0 {
+                n.cmp(&d.mul(&pow2(k as u32))) != Ordering::Less
+            } else {
+                n.mul(&pow2((-k) as u32)).cmp(&d) != Ordering::Less
+            }
+        };
+        let mut e = bn - bd - 1;
+        while ge_pow2(e + 1) {
+            e += 1;
+        }
+        while !ge_pow2(e) {
+            e -= 1;
+        }
+
+        // Rounded mantissa M = round(value * 2^shift). For normals shift = 52 - e (M carries the implicit
+        // leading bit at position 52); for subnormals the exponent is pinned to the minimum (2^-1074), so
+        // shift = 1074 and M directly encodes the [exponent-field, fraction] bit pattern.
+        let normal = e >= -1022;
+        let shift: i64 = if normal { 52 - e } else { 1074 };
+        let (num, den) = if shift >= 0 {
+            (n.mul(&pow2(shift as u32)), d.clone())
+        } else {
+            (n.clone(), d.mul(&pow2((-shift) as u32)))
+        };
+        let (q, r) = num.divmod(&den).expect("denominator is nonzero");
+        // Round half to even: compare 2*r to den; a tie rounds toward the even mantissa.
+        let two = Big::from_i64(2);
+        let q_odd = !q.divmod(&two).expect("2 is nonzero").1.is_zero();
+        let round_up = match r.add(&r).cmp(&den) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => q_odd,
+        };
+        let m_big = if round_up {
+            q.add(&Big::from_i64(1))
+        } else {
+            q
+        };
+        // M fits u64: normals ≤ 2^53, subnormals ≤ 2^52.
+        let mant = m_big.to_i64_checked().expect("mantissa fits i64") as u64;
+
+        if normal {
+            let mut e = e;
+            let mut mant = mant;
+            if mant == 1u64 << 53 {
+                // Rounded up across a power of two: renormalize (mantissa 2^53 → 2^52, exponent +1).
+                mant = 1u64 << 52;
+                e += 1;
+            }
+            if e > 1023 {
+                return inf;
+            }
+            let biased = (e + 1023) as u64; // e ∈ [-1022, 1023] ⇒ biased ∈ [1, 2046]
+            let frac = mant - (1u64 << 52);
+            f64::from_bits(sign | (biased << 52) | frac)
+        } else {
+            // Subnormal (or a round-up to the smallest normal): the low 63 bits of `mant` are exactly the
+            // exponent+fraction pattern (M < 2^52 ⇒ subnormal; M == 2^52 ⇒ smallest normal).
+            f64::from_bits(sign | mant)
+        }
     }
 
     /// Exact three-way comparison, consistent with the numeric value. Public callers use the [`Ord`] /
@@ -487,6 +583,15 @@ fn scale_pow10(coeff: &Big, k: u64) -> Big {
     } else {
         coeff.mul(&pow10(k))
     }
+}
+
+/// `2^k` as a nonnegative [`Big`], built directly by setting bit `k` in a little-endian buffer (a
+/// trailing zero byte keeps the two's-complement value positive). Used by the decimal→`f64` conversion.
+fn pow2(k: u32) -> Big {
+    let byte = (k / 8) as usize;
+    let mut buf = alloc::vec![0u8; byte + 2]; // +1 for the set bit's byte, +1 zero byte = positive sign
+    buf[byte] = 1u8 << (k % 8);
+    Big::from_le_twos_complement_bytes(&buf)
 }
 
 /// Build a nonnegative [`Big`] from the concatenation of two ASCII digit slices (integer part, then
