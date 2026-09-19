@@ -22,6 +22,9 @@ etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features =
 etude-span = { version = "0.1", path = "../etude-span", default-features = false }
 
 [dev-dependencies]
+# Turn on etude-bytevec's invariant checker in this crate's tests (structural validation at the
+# source for every rope the tokenizer tests build).
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", features = ["testing"] }
 # Differential oracle: the tokenizer is checked against serde_json (the reference implementation) —
 # serde_json supplies the ground-truth value for every generated document and is the arbiter of
 # accept/reject. Kept out of the shipped crate so nothing but core + alloc is a build dependency.

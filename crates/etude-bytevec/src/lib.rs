@@ -494,7 +494,7 @@ impl<K> Rope<K> {
     /// Invariants: `len` equals the actual byte content; no chunk is empty; the `Small` tier upholds
     /// "empty head ⇒ empty additional"; and the deep tier's buffered ends are non-empty with a tree
     /// whose cached sizes/counts match its nodes.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     fn check_invariants(&self) {
         let actual: usize = self.chunks().map(|c| c.len()).sum();
         assert_eq!(actual, self.len, "len {} != content {actual}", self.len);
@@ -516,8 +516,10 @@ impl<K> Rope<K> {
         }
     }
 
-    /// No-op outside test builds — the invariant checks impose zero cost on downstream crates.
-    #[cfg(not(test))]
+    /// No-op outside test/`testing` builds — the invariant checks impose zero cost on downstream
+    /// crates unless they opt in (a consumer crate's dev-dependency enabling the `testing` feature
+    /// turns them on in that crate's tests, so cross-crate op compositions are checked too).
+    #[cfg(not(any(test, feature = "testing")))]
     #[inline(always)]
     fn check_invariants(&self) {}
 
