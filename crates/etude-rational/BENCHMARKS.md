@@ -89,7 +89,7 @@ num-rational always uses `BigInt`, so this is a large win:
 | sub_i64 | 48-bit   | ~0.40 µs | ~3.1 µs      | **~0.13** |
 | cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
 | add_eqden_i64 | 48-bit | 0.12 µs | 0.47 µs   | **0.26**  |
-| from_ratio_i64 | 48-bit | 0.18 µs | 1.16 µs  | **0.16**  |
+| from_ratio_i64 | 48-bit | 0.12 µs | 1.14 µs  | **0.103** |
 
 **~6–9× faster than num-rational on small operands** — all four arithmetic ops AND `cmp` now take the
 native path (`add`/`sub` via `(a*d ± c*b)/(b*d)` with a checked `i128` numerator for the overflow edge;
@@ -104,10 +104,12 @@ native, and etude-bigint's 1-limb `Big` allocation is itself ~1.8× num-bigint's
 item), so that residual will shrink further when that lands.
 
 `normalize` also takes this native path for i64-fitting components, so **small-rational construction**
-(`from_ratio_i64`, `new` on small `Big`s) reduces with a native `u128` gcd instead of a `Big` gcd:
-`from_ratio_i64` went 0.83 µs → **0.18 µs** (0.73× → **0.16×**, ~6.4× faster than num-rational). The `Big`
-normalize tiers are unaffected (their components exceed `i64`, so the `to_i64_checked` probe fails O(1) and
-falls through).
+(`from_ratio_i64`, `new` on small `Big`s) reduces with a native gcd instead of a `Big` gcd. The native
+`gcd_u128` further dispatches to a `u64` gcd when both operands fit `u64` (always so on the `normalize`
+path): the `u128` remainder step is an `__umodti3` libcall on aarch64, so the `u64` hardware-divide gcd
+avoids a libcall per Euclidean step. Together: `from_ratio_i64` went 0.83 µs → 0.18 µs → **0.12 µs**
+(0.73× → **0.103×**, ~9.7× faster than num-rational). The `Big` normalize tiers and the u128-path native
+arithmetic (`mul_i64`/`add_i64`, whose products exceed `u64`) are unaffected.
 
 ## Construction and accessors
 
@@ -225,3 +227,8 @@ not addressable locally; re-bench on each etude-bigint render land.
   cut `from_ratio_i64` 0.83 µs → **0.18 µs** (0.73× → **0.16×**), no regression on the `Big` normalize tiers
   (they exceed `i64` and fall through). Documented the `n/1` ctors as clone-bound (etude-bigint inline-repr)
   and the O(1) accessors as intentionally unbenched.
+- **slice 19** — `gcd_u128` dispatches to a native `u64` gcd when both operands fit `u64` (the `normalize`
+  small-construction path always does). The `u128` remainder is an `__umodti3` libcall on aarch64; the
+  `u64` hardware-divide gcd avoids a libcall per Euclidean step. `from_ratio_i64` 0.18 µs → **0.12 µs**
+  (0.16× → **0.103×**, ~9.7× faster than num-rational); no regression on the u128-path native arithmetic
+  (`mul_i64`/`add_i64` products exceed `u64`, so they keep the `u128` gcd).
