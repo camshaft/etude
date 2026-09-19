@@ -48,10 +48,22 @@ the rope scan — it is the per-token **handoff**. Two attributed costs and thei
   lazy (one eager `lexeme` slice + on-demand component accessors, replacing four eager slices) cut
   `digest_numbers` **~130 µs → ~86 µs (−34%)**. Done. The residual over `raw_tokenize` is the one
   unavoidable `lexeme` slice (self-containment) + the `Stream` one-token lookahead + per-value dispatch.
-- **Strings** — `StrRope::from_utf8` re-validates each escape-free string's UTF-8 that the tokenizer
-  already guaranteed (an O(n)/string redundant scan). The fix is `StrRope::from_utf8_unchecked`
-  (approved by the strrope owner, `etude-str-migration`; PR pending operator review of its first
-  `unsafe` surface). Wiring the `Borrowed` arm to it is a one-line change once it lands.
+- **Strings** — `StrRope::from_utf8` re-validated each escape-free string's UTF-8 that the tokenizer
+  already guaranteed (an O(n)/string redundant scan). Fixed: with the tokenizer's `Strictness::Strict`
+  mode validating content UTF-8 at lex, the `Borrowed` arm now uses `StrRope::from_utf8_unchecked`
+  (sound by construction) — one validation pass instead of two, `digest_strings` **−6.1%**. `Lenient`
+  keeps the checked path (no UB). Done.
+- **Dispatch / handoff (the Token memcpy)** — the per-token handoff cost was dominated by `Token`
+  itself: it is moved through the parser's one-token lookahead several times per value, and it was
+  **120 bytes** (it stored an `Option<StringInfo>` *and* an `Option<NumberParts>`, sizes adding).
+  Folding the mutually-exclusive payload into one enum shrank it to **96 bytes (−20%)**, which cut
+  `digest_containers` **76 µs → 54 µs (−29.7%, clean A/B isolating just the shrink)** and
+  `raw_tokenize` −17.4% — so the adapter/`serde_json` ratio on containers fell **3.76× → 2.64×**. The
+  time win far exceeds the 20% size cut because the token is copied several times per element. Done
+  (`etude-json` #247). Further compaction (relative-`u32` number offsets, ~another halving) is
+  **declined**: it truncates on a pathological >4 GB number lexeme — a correctness risk vs the oracle.
 
 The `raw_tokenize` baseline is what re-attributed this gap: an earlier reading blamed the tokenizer's
 `byte_at` scan, and a fresh measurement falsified it — the scan is competitive, the handoff is the lever.
+The remaining ~2.64× is now the generic `Visitor` dispatch + per-element recursive re-entry + the
+lookahead fill/take, not memcpy — the next lever, if pursued, lives there.
