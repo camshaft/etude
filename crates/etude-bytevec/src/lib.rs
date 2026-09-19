@@ -196,6 +196,84 @@ impl<K> Default for Rope<K> {
     }
 }
 
+/// Expected total byte length of a UTF-8 codepoint from its lead byte, or `None` if `b` is a
+/// continuation byte (`10xxxxxx`) or an invalid lead (`11111xxx`).
+#[inline]
+fn utf8_lead_len(b: u8) -> Option<usize> {
+    if b & 0x80 == 0 {
+        Some(1)
+    } else if b & 0xE0 == 0xC0 {
+        Some(2)
+    } else if b & 0xF0 == 0xE0 {
+        Some(3)
+    } else if b & 0xF8 == 0xF0 {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+/// Validates that a rope's *concatenated* content is valid UTF-8 by streaming its chunks, carrying at
+/// most a 3-byte partial codepoint across each chunk boundary — no full contiguous copy.
+///
+/// Every byte is validated exactly once, either as part of a completed carried codepoint or in a
+/// per-chunk [`core::str::from_utf8`] call, so codepoint-level rules (overlong / surrogate / range)
+/// are exactly `core`'s. Returns `false` for any invalid or truncated content; it never returns
+/// `true` for invalid input (so a caller may treat `false` as "run the authoritative check").
+fn concatenation_is_valid_utf8<K>(rope: &Rope<K>) -> bool {
+    // Bytes of an incomplete codepoint carried from the end of the previous chunk (0..=3 bytes).
+    let mut carry = [0u8; 4];
+    let mut carry_len = 0usize;
+    for chunk in rope.chunks() {
+        let mut data: &[u8] = chunk;
+        // 1. Complete a codepoint carried across the boundary, using the front of this chunk.
+        if carry_len > 0 {
+            let need = match utf8_lead_len(carry[0]) {
+                Some(n) => n,
+                None => return false, // carried lead is a continuation/invalid byte
+            };
+            while carry_len < need {
+                let Some((&b, rest)) = data.split_first() else {
+                    break; // whole chunk consumed, codepoint still incomplete
+                };
+                if b & 0xC0 != 0x80 {
+                    return false; // expected a continuation byte
+                }
+                carry[carry_len] = b;
+                carry_len += 1;
+                data = rest;
+            }
+            if carry_len < need {
+                continue; // carried into the next chunk
+            }
+            if core::str::from_utf8(&carry[..need]).is_err() {
+                return false; // completed sequence is overlong / out of range / a surrogate
+            }
+            carry_len = 0;
+        }
+        // 2. Validate the bulk of the chunk; stash any trailing incomplete codepoint into `carry`.
+        match core::str::from_utf8(data) {
+            Ok(_) => {}
+            Err(e) => match e.error_len() {
+                // A trailing incomplete sequence: valid up to `valid_up_to`, the rest is a partial
+                // codepoint (1..=3 bytes) to be completed by the next chunk.
+                None => {
+                    let tail = &data[e.valid_up_to()..];
+                    if tail.len() > 3 {
+                        return false;
+                    }
+                    carry[..tail.len()].copy_from_slice(tail);
+                    carry_len = tail.len();
+                }
+                // A genuine mid-content error.
+                Some(_) => return false,
+            },
+        }
+    }
+    // A leftover partial codepoint at the end is truncated (invalid) content.
+    carry_len == 0
+}
+
 /// The UTF-8 rope: conversions to/from [`ByteVec`] and the caller-trusted mutation entry points.
 ///
 /// The kind-agnostic reads and raw byte-offset structural ops (`len`/`is_empty`/`byte_at`/`chunks`/
@@ -209,10 +287,16 @@ impl Rope<kind::Utf8> {
     /// not per chunk (a codepoint may span a chunk boundary), so it linearizes the content to check
     /// it. Returns the [`Utf8Error`](core::str::Utf8Error) on the first invalid sequence.
     pub fn try_from_bytes(bytes: ByteVec) -> Result<Self, core::str::Utf8Error> {
-        // A codepoint may straddle chunk boundaries, so per-chunk validation would be wrong; check
-        // the contiguous logical content. (This is the documented O(n) validated path.)
-        let contiguous = bytes.copy_to_bytes();
-        core::str::from_utf8(&contiguous)?;
+        // A codepoint may straddle chunk boundaries, so per-chunk validation would be wrong.
+        // Fast path: validate the concatenation by STREAMING over the chunks (carrying at most a
+        // 3-byte partial codepoint across each boundary), which never allocates a full contiguous
+        // copy on the valid path — the ingest hot path. `concatenation_is_valid_utf8` never accepts
+        // invalid input, so only its (conservative) reject needs the authoritative check below, which
+        // both produces the precise `Utf8Error` and covers any over-conservative reject.
+        if !concatenation_is_valid_utf8(&bytes) {
+            let contiguous = bytes.copy_to_bytes();
+            core::str::from_utf8(&contiguous)?;
+        }
         let ByteVec { len, repr, .. } = bytes;
         Ok(Rope {
             len,
