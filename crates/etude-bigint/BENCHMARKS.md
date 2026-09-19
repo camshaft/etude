@@ -43,9 +43,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
-| to_decimal_string         | 64b    | 181 ns    | 71.6 ns    | 2.5       |
-| to_decimal_string         | 256b   | 603 ns    | 249 ns     | 2.4       |
-| to_decimal_string         | 1024b  | 4.37 µs   | 2.24 µs    | 1.95      |
+| to_decimal_string         | 64b    | 186 ns    | 72.3 ns    | 2.58      |
+| to_decimal_string         | 256b   | 623 ns    | 248 ns     | 2.51      |
+| to_decimal_string         | 1024b  | 4.03 µs   | 2.25 µs    | 1.79      |
+| to_decimal_string         | 4096b  | 25.3 µs   | 21.3 µs    | 1.19      |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
@@ -54,9 +55,9 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), and **cmp** (three of four
 tiers), and reach parity-or-better on **mul at 256b/1024b** and **sub at 256b**.
 
-(divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd and to_decimal_string are
-capped at 1024b because their Euclid / per-digit cost is steep. sign_magnitude_roundtrip is the
-canonical map-key encode+decode; num-bigint has no matching operation.)
+(divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd is capped at 1024b because
+its Euclid cost is steep. sign_magnitude_roundtrip is the canonical map-key encode+decode; num-bigint
+has no matching operation.)
 
 ## Landed optimizations
 
@@ -93,21 +94,32 @@ canonical map-key encode+decode; num-bigint has no matching operation.)
 - **Direct signed subtract** — a shared `add_signed` core takes the second operand's sign as a
   parameter, so `sub` no longer allocates a negated copy of `other`: sub/256b 30.8 → 22.7 ns (**0.75×**),
   sub/1024b 50.3 → 39.6 ns (**0.91×**), sub/4096b 133 → 114 ns (1.20×, was 1.40×).
+- **In-place divide-by-limb in `to_decimal_string`** — the ÷10¹⁹ chunk loop divides the magnitude in
+  place (`div_rem_limb_inplace`), so no per-chunk quotient `Vec` is allocated: 1024b 4.84 → 4.37 µs.
+- **Recursive divide-and-conquer `to_decimal_string`** — above a 10-limb crossover, split the magnitude
+  by a half-width power of ten (`10^(19·2^i)`, built by repeated squaring) into two ≈equal-width halves,
+  each converted recursively; narrow magnitudes keep the linear chunk method. This is the subquadratic
+  base conversion num-bigint uses — the linear method's O(n²) chunk scan dominates as the value widens:
+
+  | tier   | before (linear) | after (recursive) | speedup | vs num-bigint |
+  |--------|-----------------|-------------------|---------|---------------|
+  | 1024b  | 4.37 µs         | 4.03 µs           | 1.08×   | 1.95 → 1.79   |
+  | 4096b  | ~77 µs (est.)   | 25.3 µs           | ~3×     | — → 1.19      |
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string — ~2.2–2.9×.** Now chunked; the residual is num-bigint's recursive/divide-and-
-   conquer base conversion. A recursive split (halve by a power of ten) would close more.
-2. **sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the 64b tiers (add/sub/mul ~1.1–1.25×).**
-   Largely at parity; num-bigint's edge at the largest tiers is Toom-3 mul and a Lehmer gcd, and at the
-   smallest an inline small-int fast path (avoiding a heap `Vec` for ≤1-limb values) would help.
+1. **to_decimal_string at the small tiers (64b/256b ~2.5×).** These stay on the linear chunk method
+   (below the recursive crossover); the residual is num-bigint's inline small-value handling — a
+   small-value fast path (avoiding a heap `Vec` for ≤1-limb values) would help here and elsewhere.
+2. **to_decimal_string at 4096b (1.19×), sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the
+   64b tiers (add/sub/mul ~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest tiers is a
+   subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd.
 
 ## Roadmap
 
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-recursive to_decimal_string → small-value inline fast path → (later) Toom-3 mul, Lehmer gcd. num-bigint
-stays both
-the correctness oracle and the perf yardstick.
+small-value inline fast path → (later) subquadratic divmod, Toom-3 mul, Lehmer gcd. num-bigint stays
+both the correctness oracle and the perf yardstick.
 
 ## Target notes: wasm / 32-bit
 

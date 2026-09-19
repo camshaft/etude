@@ -339,40 +339,19 @@ impl Big {
 
     /// The DECIMAL string of this value (leading `-` if negative), size-independent. `0` → `"0"`.
     ///
-    /// Extracts 19 digits per division step: `10^19` is the largest power of ten below `2^64`, so
-    /// dividing the magnitude by it (a single-limb divisor — the linear fast path) peels off a
-    /// 19-decimal-digit chunk at a time, ~19× fewer division passes than dividing by 10.
+    /// Small magnitudes take the linear chunk method (peel 19 digits per single-limb division by
+    /// `10^19`); wide magnitudes take a recursive divide-and-conquer split (halve by a power of ten),
+    /// which turns the linear method's O(n²) into the same subquadratic shape `num-bigint` uses.
     pub fn to_decimal_string(&self) -> alloc::string::String {
         use alloc::string::String;
         if self.is_zero() {
             return String::from("0");
         }
-        // Largest power of ten that fits a u64 limb, and its digit count.
-        const CHUNK: u64 = 10_000_000_000_000_000_000; // 10^19 < 2^64
-        const CHUNK_DIGITS: usize = 19;
-
-        // Peel chunks (each the value mod 10^19) off the magnitude, least-significant first. The
-        // division is IN PLACE (`cur` shrinks to the quotient each step), so no per-chunk quotient
-        // `Vec` is allocated.
-        let mut cur = self.mag.clone();
-        let mut chunks: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
-        while !cur.is_empty() {
-            chunks.push(div_rem_limb_inplace(&mut cur, CHUNK));
-        }
-
         let mut digits: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         if self.neg {
             digits.push(b'-');
         }
-        // Emit most-significant chunk first with its natural length, then the rest zero-padded to 19.
-        for (idx, &chunk) in chunks.iter().enumerate().rev() {
-            let pad = if idx + 1 == chunks.len() {
-                0
-            } else {
-                CHUNK_DIGITS
-            };
-            push_decimal_chunk(&mut digits, chunk, pad);
-        }
+        to_decimal_mag(&self.mag, &mut digits);
         String::from_utf8(digits).expect("ascii digits")
     }
 
@@ -692,6 +671,82 @@ fn wide_mul(a: u64, b: u64) -> (u64, u64) {
 /// Append the base-10 digits of `v` (most-significant first) to `digits`, zero-padded to at least
 /// `pad` digits. `pad == 0` emits the natural length (used for the most-significant chunk); a following
 /// chunk uses `pad == 19` so its leading zeros are preserved in the concatenation.
+/// Largest power of ten below `2^64` (fits one limb — the single-limb divisor fast path), and its
+/// decimal-digit count. Peeling by it extracts 19 digits per division step.
+const DECIMAL_CHUNK: u64 = 10_000_000_000_000_000_000; // 10^19 < 2^64
+const DECIMAL_CHUNK_DIGITS: usize = 19;
+
+/// At or below this many limbs the linear chunk method wins: the recursive split's big divmods and
+/// power-of-ten stack cost more than they save until the magnitude is wide. Tuned on the `to_decimal`
+/// benchmark (the 64b/256b tiers stay linear; the 1024b+ tiers go recursive).
+const DECIMAL_RECURSIVE_THRESHOLD: usize = 10;
+
+/// Render a nonzero canonical magnitude `mag` as decimal digits into `out` (no leading zeros).
+///
+/// Narrow magnitudes use [`emit_decimal_linear`] (peel `10^19` chunks). Wide ones use a recursive
+/// divide-and-conquer split: with `pow[i] = 10^(19·2^i)`, dividing by the half-width power `pow[level-1]`
+/// splits the value into a high and low half of ≈equal digit width, each converted recursively. The
+/// linear method is O(n²) (each of the n/19 chunk divisions scans the whole shrinking magnitude); the
+/// split makes the sub-divisions operate on geometrically smaller operands, the same subquadratic
+/// base conversion `num-bigint` uses.
+fn to_decimal_mag(mag: &[u64], out: &mut Vec<u8>) {
+    if mag.len() <= DECIMAL_RECURSIVE_THRESHOLD {
+        emit_decimal_linear(mag, out);
+        return;
+    }
+    // Power stack: pow[0] = 10^19, pow[i] = pow[i-1]² = 10^(19·2^i). Square up until it strictly
+    // exceeds the value, so the top entry bounds it (value < pow[level]).
+    let mut pow: Vec<Vec<u64>> = alloc::vec![alloc::vec![DECIMAL_CHUNK]];
+    while Big::cmp_mag(pow.last().unwrap(), mag) != Ordering::Greater {
+        let top = pow.last().unwrap();
+        let sq = Big::mul_mag(top, top);
+        pow.push(sq);
+    }
+    let level = pow.len() - 1; // pow[level] > value ≥ pow[level-1]
+    to_decimal_rec(mag, out, true, level, &pow);
+}
+
+/// Recursively render `value(mag) < pow[level]` into `out`. `top` nodes render at natural width (no
+/// leading zeros); non-`top` nodes render at exactly `19·2^level` digits (left-zero-padded), their
+/// fixed slot in the parent split. `pow[i] = 10^(19·2^i)`.
+fn to_decimal_rec(mag: &[u64], out: &mut Vec<u8>, top: bool, level: usize, pow: &[Vec<u64>]) {
+    if level == 0 {
+        // value < 10^19 fits a single limb → one chunk (width 19 unless it is the leading chunk).
+        let v = mag.first().copied().unwrap_or(0);
+        push_decimal_chunk(out, v, if top { 0 } else { DECIMAL_CHUNK_DIGITS });
+        return;
+    }
+    // Split at the half-width power: hi = value / pow[level-1], lo = value % pow[level-1]. Since
+    // value < pow[level] = pow[level-1]², both halves are < pow[level-1] (handled at level-1).
+    let (hi, lo) = divmod_mag(mag, &pow[level - 1]);
+    if top && hi.is_empty() {
+        // The high half is empty — the value is narrower than the balanced split; lo is the new top.
+        to_decimal_rec(&lo, out, true, level - 1, pow);
+    } else {
+        to_decimal_rec(&hi, out, top, level - 1, pow);
+        to_decimal_rec(&lo, out, false, level - 1, pow);
+    }
+}
+
+/// Linear base conversion: peel 19-digit chunks (value mod `10^19`) off `mag`, least-significant
+/// first, dividing IN PLACE (`cur` shrinks to the quotient each step, so no per-chunk quotient `Vec`),
+/// then emit most-significant chunk first at natural width, the rest zero-padded to 19. `mag` nonzero.
+fn emit_decimal_linear(mag: &[u64], out: &mut Vec<u8>) {
+    let mut cur = mag.to_vec();
+    let mut chunks: Vec<u64> = Vec::new();
+    while !cur.is_empty() {
+        chunks.push(div_rem_limb_inplace(&mut cur, DECIMAL_CHUNK));
+    }
+    for (idx, &chunk) in chunks.iter().enumerate().rev() {
+        let pad = if idx + 1 == chunks.len() {
+            0
+        } else {
+            DECIMAL_CHUNK_DIGITS
+        };
+        push_decimal_chunk(out, chunk, pad);
+    }
+}
+
 fn push_decimal_chunk(digits: &mut Vec<u8>, mut v: u64, pad: usize) {
     let mut buf = [0u8; 20]; // u64 is at most 20 decimal digits
     let mut n = 0;
