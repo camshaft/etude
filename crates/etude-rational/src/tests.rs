@@ -229,7 +229,15 @@ fn display_matches_numrational_under_flags() {
     // num-rational does; precision is ignored (an exact fraction has no decimal expansion). Cross-check
     // byte-for-byte against num-rational's `Ratio` (this crate is a drop-in) across flags and sign/width.
     use alloc::format;
-    for (n, d) in [(3, 10), (-3, 10), (10, 5), (0, 7), (7, 1), (-7, 1), (123, 4)] {
+    for (n, d) in [
+        (3, 10),
+        (-3, 10),
+        (10, 5),
+        (0, 7),
+        (7, 1),
+        (-7, 1),
+        (123, 4),
+    ] {
         let r = Rational::from_ratio_i64(n, d).unwrap();
         let rr = BigRational::new(BigInt::from(n), BigInt::from(d));
         assert_eq!(format!("{r}"), format!("{rr}"), "bare {n}/{d}");
@@ -239,8 +247,16 @@ fn display_matches_numrational_under_flags() {
         assert_eq!(format!("{r:*>8}"), format!("{rr:*>8}"), "fill {n}/{d}");
         assert_eq!(format!("{r:+}"), format!("{rr:+}"), "sign+ {n}/{d}");
         assert_eq!(format!("{r:08}"), format!("{rr:08}"), "zero-pad {n}/{d}");
-        assert_eq!(format!("{r:.2}"), format!("{rr:.2}"), "precision ignored {n}/{d}");
-        assert_eq!(format!("{r:+012}"), format!("{rr:+012}"), "sign+zeropad {n}/{d}");
+        assert_eq!(
+            format!("{r:.2}"),
+            format!("{rr:.2}"),
+            "precision ignored {n}/{d}"
+        );
+        assert_eq!(
+            format!("{r:+012}"),
+            format!("{rr:+012}"),
+            "sign+zeropad {n}/{d}"
+        );
     }
 }
 
