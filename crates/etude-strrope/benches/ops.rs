@@ -81,25 +81,10 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        // ---- O(1)/query ops (strrope only; std equivalents are trivially O(1) too) ----
-        let mut g = c.benchmark_group("len");
-        g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
-            b.iter(|| black_box(r.len()));
-        });
-        g.bench_with_input(BenchmarkId::new("std", n), &string, |b, s| {
-            b.iter(|| black_box(s.len()));
-        });
-        g.finish();
-
-        let mut g = c.benchmark_group("is_empty");
-        g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
-            b.iter(|| black_box(r.is_empty()));
-        });
-        g.bench_with_input(BenchmarkId::new("std", n), &string, |b, s| {
-            b.iter(|| black_box(s.is_empty()));
-        });
-        g.finish();
-
+        // Intentionally unbenched: `len`/`is_empty` are simple O(1) field reads on the underlying rope,
+        // so per the operator ruling (bench real-work fns + ctors, skip simple getters) they carry no
+        // bench. `is_char_boundary` stays below because it does real work — an O(log n) `byte_at` lookup
+        // into the rope to find the byte at `at`, not a field read.
         let mut g = c.benchmark_group("is_char_boundary");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.is_char_boundary(at)));
