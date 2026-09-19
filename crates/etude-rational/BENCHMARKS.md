@@ -44,7 +44,7 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | normalize  | 64b    | 894 ns    | 1.22 µs      | **0.74**  |
 | normalize  | 256b   | 4.16 µs   | 4.97 µs      | **0.84**  |
 | normalize  | 1024b  | 24.8 µs   | 24.5 µs      | 1.01      |
-| cmp        | 64b    | 50.5 ns   | 54.3 ns      | **0.93**  |
+| cmp        | 64b    | 9.7 ns    | 55.2 ns      | **0.18**  |
 | cmp        | 256b   | 62.4 ns   | 146 ns       | **0.43**  |
 | cmp        | 1024b  | 80.3 ns   | 180 ns       | **0.45**  |
 | cmp        | 2048b  | 812 ns    | 1.27 µs      | **0.64**  |
@@ -77,6 +77,14 @@ path** (`divmod_small_q`) that replaces the per-step `divmod` with a `Big` compa
 since similar-magnitude operands have quotient 0 or 1. The latter took 1024b 0.90× → **0.44×** and 4096b
 0.73× → **0.26×**. Only a same-integer-part tie with fractional remainders on both sides clones the two denominators
 and recurses. `abs` is now taken only when both operands are negative (denominators are already positive).
+
+The `64b` tier's win comes from a **native `u128` cross-multiply** (`cmp_small_u128`): its ~1-limb
+components have their top magnitude bit set, so they exceed `i64` and miss `cmp_small`, but their
+*magnitudes* fit `u64` — so `|a|*d` and `|c|*b` are `u64 * u64` products that fit `u128` with no overflow.
+Comparing them natively (with the sign, already resolved, applied — reversed for two negatives) replaces
+two `Big` multiplies + a `Big` compare with two `u128` multiplies + one compare, and allocates nothing:
+**64b `cmp` 50.9 ns → 9.7 ns (0.93× → 0.18×)**. Covered by the `cmp_native_u64_magnitude` test (all sign
+combinations across magnitudes in `(i64::MAX, u64::MAX]`, cross-checked vs num-rational).
 
 ## Native i128 fast path — small (i64-fitting) operands
 
@@ -260,6 +268,13 @@ very wide renders are unaffected. Re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 31** — native `u128` `cmp` for the `64b` tier (`cmp_small_u128`): ~1-limb components with the top
+  magnitude bit set exceed `i64` (missing `cmp_small`) but their magnitudes fit `u64`, so `|a|*d` and `|c|*b`
+  are `u64 * u64` products that fit `u128`. Compare them natively — sign already resolved by the caller,
+  reversed for two negatives — replacing two `Big` multiplies + a `Big` compare with two `u128` multiplies:
+  **64b `cmp` 50.9 ns → 9.7 ns (0.93× → 0.18×)**, the last non-decisive `cmp` cell. `cmp_i64` (i64 path)
+  and 256b+ (CF) unchanged. New `cmp_native_u64_magnitude` test covers the path (the oracle's i64 seeds
+  can't reach the `(i64::MAX, u64::MAX]` band) across all sign combinations vs num-rational.
 - **slice 30** — banked etude-bigint #197 (raised `to_decimal`'s `DECIMAL_RECURSIVE_THRESHOLD` 10 → 64
   limbs): the recursive split's per-node `divmod`+alloc was slower than the linear reciprocal-`÷10^19` peel
   through ~64 limbs, so the stale threshold routed 1024b/2048b renders onto the slower path. Retuning it

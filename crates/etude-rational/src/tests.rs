@@ -250,6 +250,51 @@ fn mul_div_cross_reduction() {
 }
 
 #[test]
+fn cmp_native_u64_magnitude() {
+    // Exercise the native u128 cmp path: components whose MAGNITUDE fits u64 but exceeds i64 (the `64b`
+    // bench tier), so `cmp_small` (i64) misses them and `cmp_small_u128` takes over. Cross-check the
+    // ordering against num-rational across sign combinations, including the both-negative magnitude reversal
+    // and equal-value / different-representation cases. Values in (i64::MAX, u64::MAX] force the path.
+    let vals: [u64; 5] = [
+        (i64::MAX as u64) + 1, // 2^63, just over i64
+        u64::MAX,              // 2^64 - 1, max magnitude
+        0xFFFF_FFFF_0000_0001,
+        0x8000_0000_0000_0003,
+        0xC0FF_EE00_1234_5678,
+    ];
+    // Sign-magnitude bytes for a u64 magnitude (exact width via the 0x80 high marker so the top byte, which
+    // may be a low value, isn't trimmed as leading zero).
+    fn sm_bytes(mag: u64, neg: bool) -> alloc::vec::Vec<u8> {
+        let mut sm = alloc::vec![if neg { 1u8 } else { 0u8 }];
+        sm.extend_from_slice(&mag.to_le_bytes());
+        *sm.last_mut().unwrap() |= 0x80;
+        sm
+    }
+    // Build (numerator magnitude `nmag`, sign `neg`) / (positive denominator magnitude `dmag`) as both our
+    // Rational and the num-rational reference, from the u64-band magnitudes directly (no i64 round-trip).
+    let mk = |nmag: u64, dmag: u64, neg: bool| {
+        let nb = Big::from_sign_magnitude_bytes(&sm_bytes(nmag, neg));
+        let db = Big::from_sign_magnitude_bytes(&sm_bytes(dmag, false));
+        let bn = BigInt::from_signed_bytes_le(&nb.to_le_twos_complement_bytes());
+        let bd = BigInt::from_signed_bytes_le(&db.to_le_twos_complement_bytes());
+        (Rational::new(nb, db).unwrap(), BigRational::new(bn, bd))
+    };
+    for &nm in &vals {
+        for &dm in &vals {
+            for &nm2 in &vals {
+                for &dm2 in &vals {
+                    for (s1, s2) in [(false, false), (true, false), (false, true), (true, true)] {
+                        let (a, ra) = mk(nm, dm, s1);
+                        let (b, rb) = mk(nm2, dm2, s2);
+                        assert_eq!(a.cmp(&b), ra.cmp(&rb), "cmp {a:?} vs {b:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn cmp_large_continued_fraction() {
     // Force the continued-fraction cmp path with components well above the small-threshold (64 bytes),
     // and cross-check the ordering against num-rational for many pairs, incl. negatives and equality.
