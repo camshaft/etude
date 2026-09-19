@@ -694,6 +694,11 @@ const DECIMAL_CHUNK_DIGITS: usize = 19;
 /// benchmark (the 64b/256b tiers stay linear; the 1024b+ tiers go recursive).
 const DECIMAL_RECURSIVE_THRESHOLD: usize = 10;
 
+/// Upper bound on the number of `10^19` chunks a `≤DECIMAL_RECURSIVE_THRESHOLD`-limb value produces:
+/// each limb is `< 2^64 ≈ 10^19.27`, so `L` limbs are `< 10^(19.27·L)` → `⌈19.27·L / 19⌉` chunks
+/// (11 at `L = 10`); `+2` is slack. Sizes the linear path's stack scratch so it needs no heap.
+const MAX_LINEAR_CHUNKS: usize = DECIMAL_RECURSIVE_THRESHOLD + 2;
+
 /// Render a nonzero canonical magnitude `mag` as decimal digits into the sink `w` (no leading zeros).
 ///
 /// A single-limb value (the common small case) writes directly in one chunk — no scratch allocation.
@@ -751,22 +756,36 @@ fn write_decimal_rec<W: core::fmt::Write>(
     }
 }
 
-/// Linear base conversion: peel 19-digit chunks (value mod `10^19`) off `mag`, least-significant
-/// first, dividing IN PLACE (`cur` shrinks to the quotient each step, so no per-chunk quotient `Vec`),
-/// then emit most-significant chunk first at natural width, the rest zero-padded to 19. `mag` nonzero.
+/// Linear base conversion for a narrow magnitude (`2..=DECIMAL_RECURSIVE_THRESHOLD` limbs — the
+/// single-limb case is handled upstream): peel 19-digit chunks (value mod `10^19`) off `mag`, dividing
+/// the running quotient IN PLACE, then emit most-significant chunk first at natural width, the rest
+/// zero-padded to 19. Both the quotient and the chunk list live in STACK buffers (bounded by the limb
+/// threshold), so this path allocates nothing. `mag` nonzero.
 fn emit_decimal_linear<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt::Result {
-    let mut cur = mag.to_vec();
-    let mut chunks: Vec<u64> = Vec::new();
-    while !cur.is_empty() {
-        chunks.push(div_rem_limb_inplace(&mut cur, DECIMAL_CHUNK));
+    let mut cur = [0u64; DECIMAL_RECURSIVE_THRESHOLD];
+    cur[..mag.len()].copy_from_slice(mag);
+    let mut len = mag.len();
+    let mut chunks = [0u64; MAX_LINEAR_CHUNKS];
+    let mut n = 0;
+    let d = DECIMAL_CHUNK as u128;
+    while len > 0 {
+        // Divide cur[..len] by 10^19 in place (most-significant limb first); `rem` is the peeled chunk.
+        let mut rem = 0u128;
+        for limb in cur[..len].iter_mut().rev() {
+            let c = (rem << 64) | *limb as u128; // rem < 10^19 ≤ 2^64, so this fits u128
+            *limb = (c / d) as u64;
+            rem = c % d;
+        }
+        while len > 0 && cur[len - 1] == 0 {
+            len -= 1; // strip high zero limbs off the shrinking quotient
+        }
+        chunks[n] = rem as u64;
+        n += 1;
     }
-    for (idx, &chunk) in chunks.iter().enumerate().rev() {
-        let pad = if idx + 1 == chunks.len() {
-            0
-        } else {
-            DECIMAL_CHUNK_DIGITS
-        };
-        write_decimal_chunk(w, chunk, pad)?;
+    // Emit most-significant chunk first at natural width, the rest zero-padded to 19.
+    for idx in (0..n).rev() {
+        let pad = if idx + 1 == n { 0 } else { DECIMAL_CHUNK_DIGITS };
+        write_decimal_chunk(w, chunks[idx], pad)?;
     }
     Ok(())
 }
