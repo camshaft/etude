@@ -195,6 +195,21 @@ impl PartialEq<&str> for Str {
     }
 }
 
+// Property/fuzz generation (the `bolero-generator` feature; also available inside this crate's own
+// tests). Generate a `String`, then `Str::from` — so the produced `Str` is always valid UTF-8 by
+// construction and the wrapped-bytes invariant can never be violated by a generated value.
+#[cfg(any(test, feature = "bolero-generator"))]
+impl bolero_generator::TypeGenerator for Str {
+    #[inline]
+    fn generate<D>(driver: &mut D) -> Option<Self>
+    where
+        D: bolero_generator::Driver,
+    {
+        let s: String = bolero_generator::TypeGenerator::generate(driver)?;
+        Some(Str::from(s))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Str;
@@ -310,6 +325,17 @@ mod tests {
             if let (Ok(e), Ok(g)) = (expected, &got) {
                 assert_eq!(g.as_str(), e);
             }
+        });
+    }
+
+    // The `TypeGenerator` impl yields only valid `Str` values: every generated `Str` is valid UTF-8
+    // (as_str/as_bytes agree with std), a clone is content-equal, and byte-length matches as_str.
+    #[test]
+    fn prop_generated_str_is_valid() {
+        check!().with_type::<Str>().for_each(|s: &Str| {
+            assert_eq!(std::str::from_utf8(s.as_bytes()), Ok(s.as_str()));
+            assert_eq!(s.len(), s.as_str().len());
+            assert_eq!(s.clone(), *s);
         });
     }
 }
