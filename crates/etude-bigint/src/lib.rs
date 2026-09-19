@@ -310,29 +310,42 @@ impl Big {
 
     // ─── conversions ──────────────────────────────────────────────────────────────────────────
 
-    /// The DECIMAL string of this value (leading `-` if negative), size-independent — extracts digits by
-    /// repeated division by 10 over the magnitude. `0` → `"0"`.
+    /// The DECIMAL string of this value (leading `-` if negative), size-independent. `0` → `"0"`.
+    ///
+    /// Extracts 19 digits per division step: `10^19` is the largest power of ten below `2^64`, so
+    /// dividing the magnitude by it (a single-limb divisor — the linear fast path) peels off a
+    /// 19-decimal-digit chunk at a time, ~19× fewer division passes than dividing by 10.
     pub fn to_decimal_string(&self) -> alloc::string::String {
         use alloc::string::String;
         if self.is_zero() {
             return String::from("0");
         }
-        let ten = Big::from_i64(10);
-        let mut cur = Big {
-            neg: false,
-            mag: self.mag.clone(),
-        }; // work over the magnitude
-        let mut digits: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        while !cur.is_zero() {
-            let (q, r) = cur.divmod(&ten).expect("divisor 10 is nonzero");
-            let d = r.mag.first().copied().unwrap_or(0) as u8; // 0..=9 fits one limb
-            digits.push(b'0' + d);
+        // Largest power of ten that fits a u64 limb, and its digit count.
+        const CHUNK: u64 = 10_000_000_000_000_000_000; // 10^19 < 2^64
+        const CHUNK_DIGITS: usize = 19;
+
+        // Peel chunks (each the value mod 10^19) off the magnitude, least-significant first.
+        let mut cur = self.mag.clone();
+        let mut chunks: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        while !cur.is_empty() {
+            let (q, r) = divmod_by_limb(&cur, CHUNK);
+            chunks.push(r.first().copied().unwrap_or(0));
             cur = q;
         }
+
+        let mut digits: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         if self.neg {
             digits.push(b'-');
         }
-        digits.reverse();
+        // Emit most-significant chunk first with its natural length, then the rest zero-padded to 19.
+        for (idx, &chunk) in chunks.iter().enumerate().rev() {
+            let pad = if idx + 1 == chunks.len() {
+                0
+            } else {
+                CHUNK_DIGITS
+            };
+            push_decimal_chunk(&mut digits, chunk, pad);
+        }
         String::from_utf8(digits).expect("ascii digits")
     }
 
@@ -647,6 +660,28 @@ fn wide_mul(a: u64, b: u64) -> (u64, u64) {
     lo = s;
     hi += (hl >> 32) + c2 as u64;
     (hi, lo)
+}
+
+/// Append the base-10 digits of `v` (most-significant first) to `digits`, zero-padded to at least
+/// `pad` digits. `pad == 0` emits the natural length (used for the most-significant chunk); a following
+/// chunk uses `pad == 19` so its leading zeros are preserved in the concatenation.
+fn push_decimal_chunk(digits: &mut Vec<u8>, mut v: u64, pad: usize) {
+    let mut buf = [0u8; 20]; // u64 is at most 20 decimal digits
+    let mut n = 0;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        while v > 0 {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+    }
+    // buf[..n] is least-significant first; emit most-significant first, padding with '0' up to `pad`.
+    for i in (0..n.max(pad)).rev() {
+        digits.push(if i < n { buf[i] } else { b'0' });
+    }
 }
 
 /// Strip trailing zero limbs from a magnitude (little-endian).

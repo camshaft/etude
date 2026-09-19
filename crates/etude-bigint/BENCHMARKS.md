@@ -43,9 +43,9 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
-| to_decimal_string         | 64b    | 660 ns    | 72.1 ns    | 9.2       |
-| to_decimal_string         | 256b   | 4.34 µs   | 249 ns     | 17.4      |
-| to_decimal_string         | 1024b  | 51.5 µs   | 2.26 µs    | 22.8      |
+| to_decimal_string         | 64b    | 207 ns    | 71.8 ns    | 2.9       |
+| to_decimal_string         | 256b   | 675 ns    | 249 ns     | 2.7       |
+| to_decimal_string         | 1024b  | 4.84 µs   | 2.25 µs    | 2.2       |
 | sign_magnitude_roundtrip  | 64b    | 72.8 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 135 ns    | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 250 ns    | —          | —         |
@@ -63,22 +63,29 @@ canonical map-key encode+decode; num-bigint has no matching operation.)
 - **base-2⁶⁴ u64 limbs** (u128 intermediates) — halved the limb count; improved every op over the
   original u32 baseline (mul 0.27–0.78, add/cmp 0.53–0.96 of the u32 time).
 - **Knuth Algorithm D divmod** (word-at-a-time, replacing bit-at-a-time long division; single-limb
-  divisors take a linear `u128`-per-limb fast path). This is the largest win so far:
+  divisors take a linear `u128`-per-limb fast path). The largest win so far:
 
   | op / tier      | before (u64 bit-at-a-time) | after (Knuth) | speedup | vs num-bigint |
   |----------------|----------------------------|---------------|---------|---------------|
   | divmod / 256b  | 5.53 µs                    | 207 ns        | 27×     | 0.53          |
   | divmod / 4096b | 412 µs                     | 11.1 µs       | 37×     | 0.54          |
-  | gcd / 1024b    | 2.71 ms                    | 59.5 µs       | 46×     | 2.56          |
-  | to_decimal / 1024b | 2.15 ms                | 51.5 µs       | 42×     | 22.8          |
 
   divmod went from 7–20× *slower* than num-bigint to ~2× *faster*; gcd (Euclid over divmod) fell from
-  ~115× to 2.6×, and to_decimal_string (repeated ÷10) from ~960× to ~23× as a side effect.
+  ~115× to 2.6× as a side effect.
+- **u128-free widening multiply on wasm** — `wide_mul` keeps u64 limbs but synthesizes `u64*u64` from
+  four native `u32*u32` partials on 32-bit/wasm (no `__multi3`); 64-bit keeps the `u128` path unchanged.
+- **Chunked `to_decimal_string`** — divide by `10¹⁹` (largest power of ten in a u64) for 19 digits per
+  step instead of one:
+
+  | tier   | before (÷10) | after (÷10¹⁹) | speedup | vs num-bigint |
+  |--------|--------------|---------------|---------|---------------|
+  | 256b   | 4.34 µs      | 675 ns        | 6.4×    | 2.7           |
+  | 1024b  | 51.5 µs      | 4.84 µs       | 10.6×   | 2.2           |
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string — 9–23×.** Still divides by 10 one digit at a time. Chunking (divide by 10¹⁹,
-   the largest power of ten in a u64, for 19 digits per step) collapses the step count ~19×.
+1. **to_decimal_string — ~2.2–2.9×.** Now chunked; the residual is num-bigint's recursive/divide-and-
+   conquer base conversion. A recursive split (halve by a power of ten) would close more.
 2. **gcd — up to 2.6×.** Now divmod-fast but still plain Euclid; a binary or Lehmer gcd closes the rest.
 3. **mul at 4096b (1.24×).** Schoolbook O(n·m); Karatsuba above a crossover for the large tier.
 4. **sub (1.0–1.76×).** Routes through `add(neg())`, allocating an extra magnitude; a direct signed
@@ -87,7 +94,7 @@ canonical map-key encode+decode; num-bigint has no matching operation.)
 ## Roadmap
 
 Next, in gap order, each landing with its scoreboard delta and the num-bigint differential oracle green:
-chunked to_decimal_string → binary/Lehmer gcd → Karatsuba mul → direct signed sub. num-bigint stays both
+binary/Lehmer gcd → Karatsuba mul → direct signed sub → recursive to_decimal_string. num-bigint stays both
 the correctness oracle and the perf yardstick.
 
 ## Target notes: wasm / 32-bit
