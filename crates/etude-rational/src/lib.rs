@@ -129,9 +129,30 @@ impl Rational {
         }
     }
 
-    /// The reciprocal `1/self` (`den/num`), normalized. Returns `None` when `self` is zero.
+    /// The reciprocal `1/self` (`den/num`). Returns `None` when `self` is zero.
+    ///
+    /// No gcd is needed: `self` is already canonical (`den > 0`, `gcd(|num|, den) == 1`), and coprimality
+    /// is symmetric, so `den/num` is ALREADY in lowest terms — only the sign is moved onto the numerator
+    /// to keep the denominator positive. This is an O(limbs) swap, not the O(gcd) full normalize.
     pub fn recip(&self) -> Option<Rational> {
-        normalize(self.den.clone(), self.num.clone())
+        if self.num.is_zero() {
+            return None;
+        }
+        if self.num.is_negative() {
+            // num < 0 ⇒ the raw reciprocal `den/num` has a negative denominator; negate both terms.
+            // Numerator `-den` is negative (den > 0), matching the sign of a negative input's reciprocal;
+            // denominator `-num = |num|` is positive. Coprime because `gcd(den, |num|) == 1` already.
+            Some(Rational {
+                num: self.den.neg(),
+                den: self.num.neg(),
+            })
+        } else {
+            // num > 0 ⇒ `den/num` already has a positive, coprime denominator.
+            Some(Rational {
+                num: self.den.clone(),
+                den: self.num.clone(),
+            })
+        }
     }
 
     /// Exact sum `self + other`. `a/b + c/d = (a*d + c*b)/(b*d)`, renormalized.
