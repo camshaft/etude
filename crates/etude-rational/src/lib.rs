@@ -194,10 +194,33 @@ impl Rational {
         if self.num.is_zero() || other.num.is_zero() {
             return Rational::zero();
         }
+        // Native i128 fast path when all components fit i64 (the common small-rational case): avoids all
+        // heap `Big` allocation and bignum ops. Falls back to the cross-reduced `Big` path otherwise.
+        if let Some(r) = self.mul_small(other) {
+            return r;
+        }
         // `a*c / (b*d)`: cancel gcd(a,d) and gcd(c,b). `b,d > 0` and the cancelled factors are positive,
         // so the resulting denominator is positive — the sign stays on the numerator.
         let (num, den) = cross_reduce_mul(&self.num, &self.den, &other.num, &other.den);
         Rational { num, den }
+    }
+
+    /// Native-integer product when every component fits `i64`. `a*c` and `b*d` then fit `i128`
+    /// (`|a*c| <= 2^126`), so there is no overflow; reduce with a native gcd and box the result. Returns
+    /// `None` (fall back to the `Big` path) when any component exceeds `i64`. `self`/`other` are nonzero
+    /// (the `mul` zero-guard ran first) and canonical, so `b, d > 0`.
+    fn mul_small(&self, other: &Rational) -> Option<Rational> {
+        let a = self.num.to_i64_checked()? as i128;
+        let b = self.den.to_i64_checked()? as i128;
+        let c = other.num.to_i64_checked()? as i128;
+        let d = other.den.to_i64_checked()? as i128;
+        let num = a * c;
+        let den = b * d; // b, d > 0 ⇒ den > 0
+        let g = gcd_u128(num.unsigned_abs(), den as u128) as i128; // g >= 1
+        Some(Rational {
+            num: big_from_i128(num / g),
+            den: big_from_i128(den / g),
+        })
     }
 
     /// Exact quotient `self / other` = `(a/b) / (c/d) = (a*d)/(b*c)`. Returns `None` when `other` is zero.
@@ -212,6 +235,10 @@ impl Rational {
         if self.num.is_zero() {
             return Some(Rational::zero());
         }
+        // Native i128 fast path (same overflow-freedom as `mul_small`).
+        if let Some(r) = self.div_small(other) {
+            return Some(r);
+        }
         // Multiply `a/b` by `d/c` (both coprime pairs): cancel gcd(a,c) and gcd(d,b).
         let (mut num, mut den) = cross_reduce_mul(&self.num, &self.den, &other.den, &other.num);
         if den.is_negative() {
@@ -219,6 +246,27 @@ impl Rational {
             den = den.neg();
         }
         Some(Rational { num, den })
+    }
+
+    /// Native-integer quotient when every component fits `i64` (`self`/`other` nonzero, checked by the
+    /// `div` caller). `a*d` and `b*c` fit `i128`, so no overflow; the divisor's numerator `c` may be
+    /// negative, so the sign is moved onto the numerator. Returns `None` to fall back to the `Big` path.
+    fn div_small(&self, other: &Rational) -> Option<Rational> {
+        let a = self.num.to_i64_checked()? as i128;
+        let b = self.den.to_i64_checked()? as i128;
+        let c = other.num.to_i64_checked()? as i128;
+        let d = other.den.to_i64_checked()? as i128;
+        let mut num = a * d;
+        let mut den = b * c; // b > 0, c != 0 ⇒ sign(den) = sign(c)
+        if den < 0 {
+            num = -num;
+            den = -den;
+        }
+        let g = gcd_u128(num.unsigned_abs(), den as u128) as i128; // g >= 1
+        Some(Rational {
+            num: big_from_i128(num / g),
+            den: big_from_i128(den / g),
+        })
     }
 
     /// The decimal string `"num/den"` (e.g. `"-3/10"`), or just `"num"` when the value is an integer.
@@ -370,6 +418,29 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
         num: num_reduced,
         den: den_reduced,
     })
+}
+
+/// Native binary-free Euclidean gcd of two `u128`s. `gcd(x, 0) = x`.
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
+/// Box an `i128` as a `Big`: `from_i64` when it fits (the usual case), else via the canonical
+/// sign-magnitude byte encoding (17 bytes holds any `i128`).
+fn big_from_i128(v: i128) -> Big {
+    if let Ok(v64) = i64::try_from(v) {
+        Big::from_i64(v64)
+    } else {
+        let mut buf = [0u8; 17]; // 1 sign byte + up to 16 magnitude bytes
+        let n =
+            Big::i128_to_sign_magnitude_bytes_into(v, &mut buf).expect("17 bytes holds any i128");
+        Big::from_sign_magnitude_bytes(&buf[..n])
+    }
 }
 
 /// `n / g` where `g` is a known divisor of `n`; skips the divmod when `g == 1` (an O(1), allocation-free

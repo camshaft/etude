@@ -59,6 +59,14 @@ impl Rng {
         }
         Big::from_sign_magnitude_bytes(&sm)
     }
+    /// A positive, nonzero `i64` of ~48 bits (fits `i64`; products of two fit `i128`).
+    fn i64_small(&mut self) -> i64 {
+        let mut v = 0i64;
+        for _ in 0..6 {
+            v = (v << 8) | i64::from(self.byte());
+        }
+        v | 1 // nonzero
+    }
     /// A `Rational` with `nbytes`-wide numerator and denominator (normalized on construction).
     fn rat(&mut self, nbytes: usize) -> Rational {
         let num = self.big(nbytes);
@@ -139,6 +147,37 @@ fn bench(c: &mut Criterion) {
     binop(c, "sub", |a, b| a.sub(b), |a, b| a - b);
     binop(c, "mul", |a, b| a.mul(b), |a, b| a * b);
     binop(c, "div", |a, b| a.div(b).expect("nonzero"), |a, b| a / b);
+
+    // Small (i64-fitting) operands: the common real-world case (e.g. `3/10`), and the one the byte-width
+    // tiers UNDER-represent (their top bit is set, so a 64b coefficient exceeds i64). Exercises the native
+    // i128 fast path (no Big allocation) vs num-rational, which always uses BigInt.
+    {
+        let mut g = group(c, "mul_i64");
+        let mut rng = Rng(0x1122_3344_5566_7788);
+        let a = Rational::from_ratio_i64(rng.i64_small(), rng.i64_small()).expect("nonzero den");
+        let b = Rational::from_ratio_i64(rng.i64_small(), rng.i64_small()).expect("nonzero den");
+        let (ra, rb) = (to_ref(&a), to_ref(&b));
+        g.bench_with_input(BenchmarkId::new("etude", "48b"), &(&a, &b), |be, (a, b)| {
+            be.iter(|| black_box(a.mul(black_box(b))))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-rational", "48b"),
+            &(&ra, &rb),
+            |be, (a, b)| be.iter(|| black_box(*a * *b)),
+        );
+        g.finish();
+
+        let mut g = group(c, "div_i64");
+        g.bench_with_input(BenchmarkId::new("etude", "48b"), &(&a, &b), |be, (a, b)| {
+            be.iter(|| black_box(a.div(black_box(b)).expect("nonzero")))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-rational", "48b"),
+            &(&ra, &rb),
+            |be, (a, b)| be.iter(|| black_box(*a / *b)),
+        );
+        g.finish();
+    }
 
     // Equal-denominator add/sub (a common real-workload pattern: accumulating fractions over a shared
     // denominator, or integer-valued rationals). Both implementations fast-path this, so it is a fair
