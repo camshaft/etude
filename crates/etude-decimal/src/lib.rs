@@ -240,6 +240,9 @@ impl Decimal {
         if let Some(d) = self.combine_small(other, i64::checked_add) {
             return d;
         }
+        if let Some(d) = self.combine_wide(other, i128::checked_add) {
+            return d;
+        }
         self.combine(other, Big::add)
     }
 
@@ -253,6 +256,9 @@ impl Decimal {
             return self.clone();
         }
         if let Some(d) = self.combine_small(other, i64::checked_sub) {
+            return d;
+        }
+        if let Some(d) = self.combine_wide(other, i128::checked_sub) {
             return d;
         }
         self.combine(other, Big::sub)
@@ -275,6 +281,28 @@ impl Decimal {
         let sb = cb.checked_mul(pow10_i64((other.exp - e) as u32)?)?;
         let r = op(sa, sb)?;
         Some(Decimal::new(Big::from_i64(r), e))
+    }
+
+    /// Wider native tier for [`Decimal::add`] / [`Decimal::sub`], between the `i64` fast path and the
+    /// exact `Big` path: when the coefficients exceed `i64` but fit `i128` (a full 64-bit magnitude, say),
+    /// align and combine in `i128`. Reads each coefficient's limbs straight into an `i128`
+    /// ([`etude_bigint::Big::to_i128_checked`], no `Vec` allocated to inspect it) and boxes only the result
+    /// ([`etude_bigint::Big::from_i128`]) — the direct limb conversions, not a sign-magnitude byte
+    /// round-trip (which cost more than [`etude_bigint::Big::add`] itself). Returns `None` on any overflow
+    /// (a coefficient past 127 bits, an exponent gap past `10^38`, or an `i128` combine overflow), so the
+    /// caller falls back to the exact `Big` path.
+    fn combine_wide(
+        &self,
+        other: &Decimal,
+        op: impl Fn(i128, i128) -> Option<i128>,
+    ) -> Option<Decimal> {
+        let ca = self.coeff.to_i128_checked()?;
+        let cb = other.coeff.to_i128_checked()?;
+        let e = self.exp.min(other.exp);
+        let sa = ca.checked_mul(pow10_i128((self.exp - e) as u32)?)?;
+        let sb = cb.checked_mul(pow10_i128((other.exp - e) as u32)?)?;
+        let r = op(sa, sb)?;
+        Some(Decimal::new(Big::from_i128(r), e))
     }
 
     /// Align two nonzero operands to the smaller exponent — scaling the larger-exponent coefficient by
@@ -869,6 +897,12 @@ const POW10_F64: [f64; 23] = [
 /// native small-value arithmetic fast paths to scale a coefficient by a power of ten.
 fn pow10_i64(k: u32) -> Option<i64> {
     10i64.checked_pow(k)
+}
+
+/// `10^k` as an `i128`, or `None` when it overflows (`k > 38`, since `10^39 > i128::MAX`). Used by the
+/// wider native arithmetic fast path to scale a coefficient by a power of ten.
+fn pow10_i128(k: u32) -> Option<i128> {
+    10i128.checked_pow(k)
 }
 
 /// `10^k` as a nonnegative [`Big`], by binary exponentiation (base-10, squaring). `10^0 == 1`.
