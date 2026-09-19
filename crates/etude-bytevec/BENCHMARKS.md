@@ -1,21 +1,24 @@
 <!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# `etude-byterope` vs `etude-bytevec` — head-to-head scoreboard
+# `etude-bytevec` — tiered rope vs. the flat deque it replaced (historical scoreboard)
 
-The delete-`etude-bytevec` gate: byterope must be a drop-in for bytevec (done — see the compat
-tests) **and** competitive on performance. This records the `benches/compare.rs` numbers so parity
-is measurable. Reproduce with `cargo bench -p etude-byterope`.
+`etude-bytevec` was reimplemented from a flat `VecDeque<Bytes>` deque to a tiered relaxed-radix
+(RRB) byte rope. This is the head-to-head scoreboard that justified that switch — the **rope** (the
+current implementation) vs. the **flat deque** (the previous implementation, now removed). It is
+kept as the design rationale and as the record of the one accepted performance exception
+(`chunks_iter`, below).
 
-- **Measured on:** aarch64 Linux, jemalloc (the bench's `#[global_allocator]`), release.
-- **Sizes:** `shallow` = 4 chunks (rope stays in its flat `Small` tier); `deep` = 1000 chunks (past
-  the promote threshold — exercises the radix tree). Chunks are 1400 B (MTU-ish).
-- **Ratio** = byterope ÷ bytevec median. `<1.0` ⇒ byterope faster. Numbers are medians; ±few % run
-  to run.
+- **Measured on:** aarch64 Linux, jemalloc, release.
+- **Sizes:** `shallow` = 4 chunks (the rope stays in its flat `Small` tier); `deep` = 1000 chunks
+  (past the promote threshold — exercises the radix tree). Chunks are 1400 B (MTU-ish).
+- **Ratio** = rope ÷ flat-deque median. `<1.0` ⇒ the rope is faster. Numbers are medians; ±few %
+  run to run. (The head-to-head bench was retired with the flat deque; these numbers are the
+  as-measured record from that comparison.)
 
-## Where byterope WINS (its reason to exist: O(1) clone, O(log) split, zero-copy slice)
+## Where the rope WINS (its reason to exist: O(1) clone, O(log) split, zero-copy slice)
 
-| op | size | byterope | bytevec | ratio |
+| op | size | rope | flat deque | ratio |
 |----|------|----------|---------|-------|
 | **clone** | 1000 chunks | **166 ns** | 15.1 µs | **0.011 (91× faster)** |
 | **clone** | 100000 chunks | **36 ns** | 1.64 ms | **~45000× faster** |
@@ -27,11 +30,11 @@ is measurable. Reproduce with `cargo bench -p etude-byterope`.
 | **append** | deep | 3.43 µs | 4.00 µs | 0.86 (1.16× faster) |
 | advance (drain) | shallow | 62.5 ns | 80.3 ns | 0.78 |
 
-¹ bytevec has no pointer-identity fast path, so a shared-clone compare still costs a full walk.
+¹ the flat deque had no pointer-identity fast path, so a shared-clone compare still costs a full walk.
 
 ## Parity (within ~5%)
 
-| op | size | byterope | bytevec | ratio |
+| op | size | rope | flat deque | ratio |
 |----|------|----------|---------|-------|
 | push_back | shallow | 80.4 ns | 82.1 ns | 0.98 |
 | copy_to_bytes | deep | 63.3 µs | 61.3 µs | 1.03 |
@@ -40,14 +43,14 @@ is measurable. Reproduce with `cargo bench -p etude-byterope`.
 | io_write / io_read | deep | 120.8 / 414 µs | 117.3 / 412 µs | ~1.03 / ~1.0 |
 | truncate | deep | 5.75 µs | 5.03 µs | 1.14 |
 
-## Where byterope TRAILS — the deep-tier per-chunk cost (the persistent-structure tradeoff)
+## Where the rope TRAILS — the deep-tier per-chunk cost (the persistent-structure tradeoff)
 
 These are all *sequential, per-chunk* operations in the **deep** tier: the radix tree pays a small
 O(log₃₂) bookkeeping cost per chunk that a flat `VecDeque<Bytes>` push/pop/index does in O(1). This
-is the price byterope pays to get the O(1) clone / O(log) split / zero-copy slice above. All shallow
+is the price the rope pays to get the O(1) clone / O(log) split / zero-copy slice above. All shallow
 variants are at parity or faster (the rope never touches a tree there).
 
-| op | size | byterope | bytevec | ratio |
+| op | size | rope | flat deque | ratio |
 |----|------|----------|---------|-------|
 | pop_back (drain) | deep | 15.0 µs | 10.0 µs | 1.50 (was 1.55; drain-in-place) |
 | from_iter | deep | 19.9 µs | 16.9 µs | 1.18 (bulk-built) |
@@ -62,7 +65,7 @@ variants are at parity or faster (the rope never touches a tree there).
 
 ## Interpretation
 
-byterope is **parity-or-faster on the shallow streaming path** (the common case) and **wins by 1.35×
+The rope is **parity-or-faster on the shallow streaming path** (the common case) and **wins by 1.35×
 to ~45000×** on the structural operations it exists for — clone, slice, split, concat, equality. It
 **trails 1.13×–1.50×** on deep-tier *sequential per-chunk* push/pop/drain/build/extend, and is slower
 in relative terms on `chunks_iter` (the documented 1.83× locality exception, below) and `get(index)`
@@ -86,9 +89,9 @@ chunk-by-chunk into the buffered end — the target deque is always empty at a r
 ### The `chunks_iter` exception (1.83×)
 
 `chunks_iter/deep` is the one operation held **above the 1.5× parity bar as a documented,
-measured exception**, because closing it is provably incompatible with byterope's reason to exist.
-The gap is **cache locality**, not algorithm: `etude-bytevec` iterates one *contiguous*
-`VecDeque<Bytes>` (hardware-prefetched, ~0 cache misses), while byterope's iterator walks a tree
+measured exception**, because closing it is provably incompatible with the rope's reason to exist.
+The gap is **cache locality**, not algorithm: the flat deque iterated one *contiguous*
+`VecDeque<Bytes>` (hardware-prefetched, ~0 cache misses), while the rope's iterator walks a tree
 whose leaf blocks are separate `Arc`-boxed allocations *scattered* across the heap (~one cache miss
 per leaf boundary). The two ways to close it each destroy a core guarantee:
 

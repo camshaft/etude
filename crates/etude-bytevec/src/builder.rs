@@ -1,16 +1,21 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
-use etude_buffer::writer::Buffer;
+//! A [`Builder`] for efficiently constructing a [`ByteVec`] by buffering writes into a head buffer
+//! and folding completed chunks into the rope.
+
+use super::{ByteVec, ByteVecError};
+use bytes::{Bytes, BytesMut};
+use etude_buffer::writer::Buffer as _;
+use etude_buffer::{reader, writer};
 
 const DEFAULT_CAPACITY: usize = 1 << 17;
 
 /// A builder for efficiently constructing a [`ByteVec`] by buffering writes.
 ///
-/// The builder maintains a head buffer for direct writes and a collection of
-/// completed chunks. This allows for efficient buffering of writes while
-/// maintaining the chunked nature of [`ByteVec`].
+/// The builder maintains a head buffer for direct writes and a rope of completed chunks. This allows
+/// for efficient buffering of writes while preserving the chunked, structurally-shared nature of
+/// [`ByteVec`].
 ///
 /// # Examples
 ///
@@ -23,8 +28,8 @@ const DEFAULT_CAPACITY: usize = 1 << 17;
 /// builder.put_slice(b"hello");
 /// builder.put_slice(b" world");
 ///
-/// let byte_vec = builder.finish();
-/// assert_eq!(byte_vec, b"hello world");
+/// let byte_rope = builder.finish();
+/// assert_eq!(byte_rope, b"hello world");
 /// ```
 #[derive(Debug)]
 pub struct Builder {
@@ -50,7 +55,7 @@ impl Builder {
     /// Creates a new [`Builder`] with the specified capacity for the head buffer.
     ///
     /// The capacity determines the size of the internal buffer used for direct writes.
-    /// When this buffer is full, it will be flushed to the chunks collection.
+    /// When this buffer is full, it will be flushed to the rope of chunks.
     ///
     /// # Examples
     ///
@@ -135,8 +140,7 @@ impl Builder {
 
     /// Appends the contents of another [`ByteVec`] to this builder.
     ///
-    /// This operation flushes the current head buffer before appending
-    /// the new bytes.
+    /// This operation flushes the current head buffer before appending the new bytes.
     ///
     /// # Examples
     ///
@@ -161,10 +165,9 @@ impl Builder {
         self.chunks.append(bytes);
     }
 
-    /// Appends the contents of another [`ByteVec`] to this builder.
+    /// Appends the contents of another [`ByteVec`] to this builder, leaving the source untouched.
     ///
-    /// This operation flushes the current head buffer before appending
-    /// the new bytes.
+    /// This operation flushes the current head buffer before appending the new bytes.
     ///
     /// # Examples
     ///
@@ -213,13 +216,12 @@ impl Builder {
 
     /// Splits the bytes into two at the given index.
     ///
-    /// After this operation, `self` contains elements `[at, len)`, and the
-    /// returned [`ByteVec`] contains elements `[0, at)`.
+    /// After this operation, `self` contains elements `[at, len)`, and the returned [`ByteVec`]
+    /// contains elements `[0, at)`.
     ///
     /// # Errors
     ///
-    /// Returns [`ByteVecError::OutOfBounds`] if `at` is greater than the
-    /// builder's length.
+    /// Returns [`ByteVecError::OutOfBounds`] if `at` is greater than the builder's length.
     ///
     /// # Examples
     ///
@@ -258,8 +260,8 @@ impl Builder {
 
     /// Finishes building and returns the constructed [`ByteVec`].
     ///
-    /// This operation consumes the builder and returns the final [`ByteVec`]
-    /// containing all written bytes.
+    /// This operation consumes the builder and returns the final [`ByteVec`] containing all written
+    /// bytes.
     ///
     /// # Examples
     ///
@@ -282,15 +284,12 @@ impl Builder {
         chunks
     }
 
-    /// Calls the provided function and prefixes the written data with a `u64` length
+    /// Calls the provided function and prefixes the written data with a `u64` big-endian length.
     pub fn write_with_len_prefix<F: FnOnce(&mut Self)>(&mut self, f: F) {
         // flush any data we have buffered
         self.flush();
 
-        // record the chunk index where to insert the length
-        let chunk_index = self.chunks.chunks().len();
-
-        // record the starting length
+        // record the starting byte length — everything already in `chunks` precedes the caller write
         let before_len = self.len();
 
         // have the caller write into the buffer
@@ -302,21 +301,24 @@ impl Builder {
         // compute the amount of data written by the caller
         let written_len = (self.len() - before_len) as u64;
 
-        // write the length into the `head` buffer ensuring it stays in one chunk
-        let written_len_bytes = written_len.to_be_bytes();
-        if written_len_bytes.len() > self.head.spare_capacity_mut().len() {
-            self.flush_and_reserve(written_len_bytes.len());
-        }
-        self.head.put_slice(&written_len_bytes);
-
-        // insert the length chunk where we recorded initially
-        let len_chunk = self.head.split().freeze();
+        // build the 8-byte big-endian length as its own chunk
+        let len_chunk = Bytes::copy_from_slice(&written_len.to_be_bytes());
         // make sure the length chunk is not torn
         debug_assert_eq!(len_chunk.len(), 8);
-        self.chunks.insert(chunk_index, len_chunk);
+
+        // splice the length chunk in immediately before the caller's write:
+        //   chunks = [0, before_len) ++ len_chunk ++ [before_len, end)
+        // (`before_len` is a chunk boundary because the pre-write flush emptied `head`).
+        let mut prefix = self
+            .chunks
+            .split_to(before_len)
+            .expect("before_len <= chunks.len()");
+        prefix.push_back(len_chunk);
+        prefix.append(&mut self.chunks);
+        self.chunks = prefix;
     }
 
-    /// Reserves buffer space for reading from a socket
+    /// Reserves buffer space for reading from a socket.
     pub fn for_socket_read<F: FnOnce(&mut bytes::buf::UninitSlice) -> usize>(
         &mut self,
         preferred_read_size: usize,
@@ -326,13 +328,25 @@ impl Builder {
             self.flush_and_reserve(preferred_read_size);
         }
 
-        let len = self
+        let reported = self
             .head
             .put_uninit_slice(preferred_read_size, |slice| {
                 let len = f(slice);
                 Err(len)
             })
             .unwrap_err();
+
+        // The callback was handed a slice of exactly `preferred_read_size` uninitialized bytes, so it
+        // can only have initialized bytes WITHIN that slice. A reported length beyond it (a buggy or
+        // hostile socket read claiming more than the buffer it was given) must NOT reach the unsafe
+        // `advance_mut`, or uninitialized heap memory past the slice would be committed as rope content
+        // (a safe-code info-leak). Clamp to the slice length so the commit is always sound; debug builds
+        // additionally assert the contract to surface caller misuse early.
+        debug_assert!(
+            reported <= preferred_read_size,
+            "for_socket_read callback reported {reported} bytes for a {preferred_read_size}-byte slice"
+        );
+        let len = reported.min(preferred_read_size);
 
         unsafe {
             use bytes::BufMut;
@@ -454,7 +468,7 @@ impl reader::Buffer for Builder {
         self.head.is_empty() && self.chunks.is_empty()
     }
 
-    fn read_chunk(&mut self, watermark: usize) -> Result<Chunk<'_>, Self::Error> {
+    fn read_chunk(&mut self, watermark: usize) -> Result<reader::Chunk<'_>, Self::Error> {
         if self.chunks.is_empty() {
             self.head.read_chunk(watermark)
         } else {
@@ -462,7 +476,7 @@ impl reader::Buffer for Builder {
         }
     }
 
-    fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<Chunk<'_>, Self::Error>
+    fn partial_copy_into<Dest>(&mut self, dest: &mut Dest) -> Result<reader::Chunk<'_>, Self::Error>
     where
         Dest: writer::Buffer + ?Sized,
     {
@@ -537,5 +551,80 @@ mod tests {
         let out = b.finish();
         assert_eq!(out.len(), 2 + 64);
         assert_eq!(out.chunks().len(), 2);
+    }
+
+    #[test]
+    fn write_with_len_prefix_frames_the_payload() {
+        let mut b = ByteVec::builder(1024);
+        b.put_slice(b"before");
+        b.write_with_len_prefix(|w| {
+            w.put_slice(b"payload");
+        });
+        b.put_slice(b"after");
+
+        let out = b.finish();
+        // "before" ++ (u64 be = 7) ++ "payload" ++ "after"
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"before");
+        expected.extend_from_slice(&7u64.to_be_bytes());
+        expected.extend_from_slice(b"payload");
+        expected.extend_from_slice(b"after");
+        assert_eq!(&out.copy_to_bytes()[..], &expected[..]);
+    }
+
+    #[test]
+    fn split_to_across_head_and_chunks() {
+        let mut b = ByteVec::builder(1024);
+        b.put_bytes(Bytes::from_static(b"abcd")); // held as a chunk (threshold 0)
+        b.put_slice(b"efgh"); // buffered in head
+        assert_eq!(b.len(), 8);
+
+        let front = b.split_to(6).expect("within bounds");
+        assert_eq!(front, b"abcdef");
+        assert_eq!(b.finish(), b"gh");
+    }
+
+    #[test]
+    fn from_rope_roundtrips_through_builder() {
+        let rope = ByteVec::from(b"seed");
+        let mut b = Builder::from(rope);
+        b.put_slice(b"-tail");
+        let out: ByteVec = b.into();
+        assert_eq!(out, b"seed-tail");
+    }
+
+    /// RED reproducer (breaker-bytevec): `for_socket_read` is a SAFE fn that trusts the SAFE
+    /// callback's returned length and feeds it to `unsafe BytesMut::advance_mut`. A callback that
+    /// returns `len > preferred_read_size` (but within the head's spare capacity) commits
+    /// UNINITIALIZED heap memory as rope content — safe code exposing uninit bytes (observed: a
+    /// 3-byte write claiming 100 yields a 100-byte rope whose tail is stale allocator garbage).
+    /// A sound implementation must either clamp the commit to the provided slice's length or
+    /// panic on the contract violation — either passes this test; committing past the slice fails.
+    #[test]
+    fn for_socket_read_never_commits_more_than_the_provided_slice() {
+        let result = std::panic::catch_unwind(|| {
+            let mut b = ByteVec::builder(1024);
+            b.for_socket_read(8, |slice| {
+                slice[0..3].copy_from_slice(b"abc");
+                100 // a buggy callback claims more than the 8-byte slice it was given
+            });
+            b
+        });
+        // A panicking defense is acceptable (Err); a clamping defense must not commit past the
+        // 8-byte slice the callback was actually handed.
+        if let Ok(b) = result {
+            assert!(
+                b.len() <= 8,
+                "committed {} bytes for an 8-byte read slice (uninitialized memory exposed)",
+                b.len()
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_bounds_split_to_errors() {
+        let mut b = ByteVec::builder(1024);
+        b.put_slice(b"abc");
+        assert_eq!(b.split_to(4), Err(ByteVecError::OutOfBounds(4)));
     }
 }

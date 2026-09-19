@@ -1,29 +1,19 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Accounting wrapper that tracks the bytes held by a [`ByteVec`] against an owner.
-//!
-//! Wrapping a [`ByteVec`] in [`Tagged`] reports its length to an [`Owner`] and keeps that count in
-//! step as the buffer grows and shrinks — useful for bounding or observing total buffered bytes
-//! across many buffers. The count follows the bytes: a clone of a `Tagged` adds its length again
-//! (the bytes are now referenced twice), and dropping one subtracts it.
-//!
-//! Implement [`Owner`]/[`Handle`] for a bespoke sink, or use [`crate::static_bytevec_tag`] to
-//! generate a zero-sized owner backed by a process-wide atomic counter.
+//! Ownership tagging for [`ByteVec`]. A [`Tagged`] wraps a buffer together with a [`Handle`] minted
+//! by an [`Owner`]; the handle tracks the wrapped byte count against the owner's running budget
+//! across `push_back`/`append`/`split_to`, `clone`, and `drop`.
 
 use bytes::Bytes;
 
 use super::{ByteVec, ByteVecError};
 use core::fmt;
-use std::ops;
+use core::ops;
 
-/// Generates a zero-sized [`Owner`] (`Tag`) and its [`Handle`] backed by a process-wide
-/// [`AtomicU64`](core::sync::atomic::AtomicU64) counter of outstanding tagged bytes.
-///
-/// The counter rises as bytes are tagged or pushed and falls as tagged buffers shrink or drop;
-/// read the current total with `Tag::current()`. Invoke inside a module so the generated `Tag`,
-/// `Handle`, and counter are scoped to it. The no-argument form additionally defines
-/// `pub type ByteVec = Tagged<Tag>` for that module.
+/// Declares a static byte-budget tag: a zero-sized [`Owner`] `Tag` backed by a process-global atomic
+/// counter, its paired [`Handle`], and (in the no-argument form) a `ByteVec` alias for the tagged
+/// buffer.
 #[macro_export]
 macro_rules! static_bytevec_tag {
     () => {
@@ -93,21 +83,18 @@ macro_rules! static_bytevec_tag {
     };
 }
 
-/// A sink that accounts for tagged bytes, producing a [`Handle`] per tagged buffer.
+/// Mints [`Handle`]s that track a byte budget owned by `Self`.
 pub trait Owner: 'static + fmt::Debug {
-    /// The per-buffer handle this owner hands out; its lifetime tracks the buffer's bytes.
+    /// The per-rope handle this owner hands out; its lifetime tracks the rope's bytes.
     type Handle: Handle;
 
-    /// Records `len` bytes as tagged and returns a handle that will keep the owner's count in
-    /// step as the buffer changes and until the handle is dropped.
+    /// Records `len` bytes as tagged and returns a handle that keeps the owner's budget in step
+    /// as the rope changes and until the handle is dropped.
     fn tag(&self, len: usize) -> Self::Handle;
 }
 
-/// The per-buffer accounting handle produced by an [`Owner`].
-///
-/// It represents `len` bytes currently charged to the owner; the wrapping [`Tagged`] calls
-/// [`increment`](Handle::increment) / [`decrement`](Handle::decrement) as its buffer grows and
-/// shrinks. A `Clone` charges the same bytes again; a `Drop` releases them.
+/// A live claim on some number of an [`Owner`]'s bytes; adjusts the budget as the tagged rope grows,
+/// shrinks, clones, and drops.
 pub trait Handle: 'static + fmt::Debug + Clone + Sized {
     /// Charges an additional `len` bytes to the owner.
     fn increment(&mut self, len: usize);
@@ -115,10 +102,8 @@ pub trait Handle: 'static + fmt::Debug + Clone + Sized {
     fn decrement(&mut self, len: usize);
 }
 
-/// A [`ByteVec`] whose length is accounted against an [`Owner`].
-///
-/// Derefs to the inner [`ByteVec`] for read-only access; the mutating methods here keep the
-/// owner's count in step. Convert back with [`untag`](Tagged::untag) to stop accounting.
+/// A [`ByteVec`] paired with an [`Owner`]'s [`Handle`], keeping the owner's byte budget in sync with
+/// the wrapped rope's length. Derefs to the inner rope for read-only access.
 #[derive(Debug)]
 pub struct Tagged<O: Owner> {
     bytes: ByteVec,
@@ -142,18 +127,18 @@ impl<O: Owner> Tagged<O> {
         self.bytes.push_back(bytes);
     }
 
-    /// Moves all of `other` onto the end of this buffer, charging its length to the owner and
+    /// Moves all of `other` onto the end of this rope, charging its length to the owner and
     /// leaving `other` empty.
     pub fn append(&mut self, other: &mut ByteVec) {
         self.tag.increment(other.len());
         self.bytes.append(other);
     }
 
-    /// Splits off the first `at` bytes, releasing them from the owner's count and returning them
+    /// Splits off the first `at` bytes, releasing them from the owner's budget and returning them
     /// as a plain (untagged) [`ByteVec`].
     ///
     /// # Errors
-    /// Returns [`ByteVecError::OutOfBounds`] if `at` exceeds the buffer's length.
+    /// Returns [`ByteVecError::OutOfBounds`] if `at` exceeds the rope's length.
     pub fn split_to(&mut self, at: usize) -> Result<ByteVec, ByteVecError> {
         let chunk = self.bytes.split_to(at)?;
         self.tag.decrement(chunk.len());
@@ -161,13 +146,13 @@ impl<O: Owner> Tagged<O> {
     }
 
     /// Consumes the wrapper, returning the inner [`ByteVec`] and releasing its bytes from the
-    /// owner's count.
+    /// owner's budget.
     #[inline]
     pub fn untag(self) -> ByteVec {
         self.bytes
     }
 
-    /// Clones the inner [`ByteVec`] out without accounting for the copy against the owner.
+    /// Clones the inner [`ByteVec`] out without charging the copy to the owner.
     #[inline]
     pub fn untag_clone(&self) -> ByteVec {
         self.bytes.clone()
@@ -260,40 +245,82 @@ mod tests {
         assert_eq!(tag_b::Tag::current(), 0);
     }
 
-    /// A `Tagged` that GROWS after creation must release its CURRENT length on drop, not the stale
-    /// initial length — otherwise grow-then-drop leaks the owner budget forever (the `Handle` used
-    /// to bump `COUNT` in `increment` but never its own remembered length). Mirrors the byterope
-    /// reproducer.
+    /// RED reproducer (breaker-bytevec): the static-tag macro's `Handle` adjusts the global
+    /// `COUNT` in `increment`/`decrement` but never updates its own remembered length (`self.0`),
+    /// while `Clone`/`Drop` charge/release that STALE initial length. Any `Tagged` that grows or
+    /// shrinks after creation corrupts the owner budget on clone/drop/untag: grow-then-drop leaks
+    /// the growth FOREVER (observed: budget 2 after dropping a 3-byte rope grown by 2; expected 0).
+    /// `etude-bytevec`'s `static_bytevec_tag!` has the IDENTICAL bug — fix both macros together
+    /// (`increment`/`decrement` must also do `self.0 += len` / `self.0 -= len`).
     #[test]
     fn handle_drop_releases_current_len_not_initial() {
         mod tag_d {
             static_bytevec_tag!(crate::tagged);
         }
         let mut t: Tagged<tag_d::Tag> = ByteVec::from(b"abc").tag(&tag_d::Tag);
-        t.push_back(bytes::Bytes::from_static(b"de"));
+        t.push_back(Bytes::from_static(b"de"));
         assert_eq!(tag_d::Tag::current(), 5);
         drop(t);
-        assert_eq!(tag_d::Tag::current(), 0, "grow-then-drop leaked owner budget");
+        assert_eq!(
+            tag_d::Tag::current(),
+            0,
+            "grow-then-drop leaked owner budget"
+        );
     }
 
-    /// A clone of a GROWN tagged buffer must charge the CURRENT length (not the stale initial), and a
-    /// shrink-then-drop must release exactly what remains (releasing the stale initial would wrap the
-    /// unsigned budget below zero). Mirrors the byterope reproducer.
+    /// Companion reproducer: a clone of a GROWN rope charges only the stale initial length, so the
+    /// owner budget undercounts live bytes (two 5-byte ropes charged 8, not 10), and shrink-then-
+    /// drop over-releases (a split_to below the initial length drives the budget NEGATIVE/wraps).
     #[test]
     fn handle_clone_charges_current_len_and_shrink_does_not_over_release() {
         mod tag_e {
             static_bytevec_tag!(crate::tagged);
         }
         let mut t: Tagged<tag_e::Tag> = ByteVec::from(b"abc").tag(&tag_e::Tag);
-        t.push_back(bytes::Bytes::from_static(b"de")); // 5 bytes live
+        t.push_back(Bytes::from_static(b"de")); // 5 bytes live
         let c = t.clone(); // must charge the CURRENT 5, not the initial 3
         assert_eq!(tag_e::Tag::current(), 10, "clone undercharged the owner");
         drop(c);
         assert_eq!(tag_e::Tag::current(), 5);
 
+        // shrink below the initial length, then drop: must release exactly the remaining 1 byte
         let _front = t.split_to(4).expect("in bounds"); // 1 byte remains tagged
         assert_eq!(tag_e::Tag::current(), 1);
         drop(t); // releasing the stale initial 3 would wrap the budget below zero
-        assert_eq!(tag_e::Tag::current(), 0, "shrink-then-drop over-released (budget wrapped)");
+        assert_eq!(
+            tag_e::Tag::current(),
+            0,
+            "shrink-then-drop over-released (budget wrapped)"
+        );
+    }
+
+    /// Exercises the `Tagged` op surface (push_back/append/split_to/untag) and its budget tracking.
+    #[test]
+    fn tagged_ops_track_budget() {
+        mod tag_c {
+            static_bytevec_tag!(crate::tagged);
+        }
+
+        let mut t: Tagged<tag_c::Tag> = ByteVec::from(b"abc").tag(&tag_c::Tag);
+        assert_eq!(tag_c::Tag::current(), 3);
+        assert_eq!(t.len(), 3);
+
+        t.push_back(Bytes::from_static(b"de"));
+        assert_eq!(tag_c::Tag::current(), 5);
+        assert_eq!(t.len(), 5);
+
+        let mut extra = ByteVec::from(b"fg");
+        t.append(&mut extra);
+        assert_eq!(tag_c::Tag::current(), 7);
+        assert_eq!(t.len(), 7);
+
+        let front = t.split_to(3).expect("split within bounds");
+        assert_eq!(front, b"abc");
+        assert_eq!(tag_c::Tag::current(), 4);
+        assert_eq!(t.len(), 4);
+
+        // `untag` yields the inner rope unchanged; the byte content is preserved end to end.
+        let rope = t.untag();
+        assert_eq!(rope, b"defg");
     }
 }

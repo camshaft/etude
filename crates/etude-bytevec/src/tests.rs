@@ -1,554 +1,1287 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
-use bolero::{TypeGenerator, check};
-use std::io::{Read, Write};
+//! Unit, oracle, and property tests for the `ByteVec` public surface and its internals.
 
-macro_rules! assert_eq_dump {
-    ($a:expr, $b:expr) => {
-        assert_eq!($a, $b, "bytes mismatch");
-    };
+use super::*;
+
+fn chunk(s: &[u8]) -> Bytes {
+    Bytes::copy_from_slice(s)
 }
 
-#[derive(Copy, Clone, Debug, TypeGenerator)]
-enum Operation {
-    Write { len: u16, zerocopy: bool },
-    Read { len: u16, zerocopy: bool },
-    Truncate { len: u16 },
-    Advance { len: u16 },
-    Clear,
-    PushBack { len: u16 },
-    SplitTo { len: u16, zerocopy: bool },
-    PopFront,
-    PopBack,
+/// A `ByteVec` must stay the footprint of the flat chunk buffer it replaced: the `Deep` variant is
+/// boxed, so the value is exactly `len + head Bytes + additional VecDeque`. Pinned to that footprint
+/// (not just `<=`) so the tiered representation can never quietly grow past the flat buffer's size.
+#[test]
+fn size_matches_flat_buffer() {
+    let flat_footprint = core::mem::size_of::<usize>()
+        + core::mem::size_of::<Bytes>()
+        + core::mem::size_of::<VecDeque<Bytes>>();
+    assert_eq!(
+        core::mem::size_of::<ByteVec>(),
+        flat_footprint,
+        "ByteVec must stay the flat-buffer footprint (len + head + deque)"
+    );
 }
 
 #[test]
-fn model_test() {
-    check!()
-        .with_type::<Vec<Operation>>()
-        .for_each(|operations| {
-            let mut byte_source = (0u32..).flat_map(|v| v.to_be_bytes());
-            let mut subject = ByteVec::new();
-            let mut oracle: VecDeque<u8> = VecDeque::new();
+fn single_chunk_is_flat_and_allocation_light() {
+    let mut rope = ByteVec::new();
+    assert!(rope.is_empty());
+    rope.push_back(chunk(b"hello"));
+    // a single chunk lives in `head`, with no `additional` deque allocated
+    match &rope.repr {
+        Repr::Small { head, additional } => {
+            assert_eq!(&head[..], b"hello");
+            assert_eq!(
+                additional.capacity(),
+                0,
+                "single chunk must not allocate a deque"
+            );
+        }
+        _ => panic!("single chunk should stay Small"),
+    }
+    assert_eq!(rope.len(), 5);
+    assert_eq!(rope, b"hello");
+}
 
-            for operation in operations {
-                match *operation {
-                    Operation::Write { len, zerocopy } => {
-                        let len = len as usize;
+#[test]
+fn empty_chunks_ignored() {
+    let mut rope = ByteVec::new();
+    rope.push_back(Bytes::new());
+    rope.push_front(Bytes::new());
+    rope.push_back(chunk(b"a"));
+    assert_eq!(rope.len(), 1);
+    assert_eq!(rope, b"a");
+}
 
-                        let mut chunk = BytesMut::with_capacity(len);
-                        chunk.extend((&mut byte_source).take(len));
-                        let chunk = chunk.freeze();
+#[test]
+fn push_front_back_and_flatten() {
+    let mut rope = ByteVec::new();
+    rope.push_back(chunk(b"world"));
+    rope.push_front(chunk(b"hello "));
+    assert_eq!(rope, b"hello world");
+    assert_eq!(rope.len(), 11);
+}
 
-                        oracle.extend(chunk.iter());
+#[test]
+fn pop_front_back() {
+    let mut rope: ByteVec = [chunk(b"a"), chunk(b"bb"), chunk(b"ccc")]
+        .into_iter()
+        .collect();
+    assert_eq!(rope.pop_front().unwrap(), &b"a"[..]);
+    assert_eq!(rope.pop_back().unwrap(), &b"ccc"[..]);
+    assert_eq!(rope.pop_front().unwrap(), &b"bb"[..]);
+    assert!(rope.pop_front().is_none());
+    assert!(rope.is_empty());
+}
 
-                        if zerocopy {
-                            subject.put_bytes(chunk);
-                        } else {
-                            subject.write_all(&chunk).unwrap();
-                        }
-                    }
-                    Operation::Read { len, zerocopy } => {
-                        let len = len as usize;
+#[test]
+fn advance_partial_and_whole_chunks() {
+    let mut rope: ByteVec = [chunk(b"hello"), chunk(b" "), chunk(b"world")]
+        .into_iter()
+        .collect();
+    rope.advance(3).unwrap(); // partial: inside "hello"
+    assert_eq!(rope, b"lo world");
+    rope.advance(3).unwrap(); // crosses "lo" + " " into "world"
+    assert_eq!(rope, b"world");
+    assert!(rope.advance(100).is_err()); // past the end errors, matching the flat buffer
+    rope.advance(5).unwrap(); // drain the remaining "world"
+    assert!(rope.is_empty());
+}
 
-                        let read_len = if zerocopy {
-                            let chunk = subject.infallible_read_chunk(len);
-                            let read_len = chunk.buffered_len();
+/// Drives the rope past `PROMOTE_AT` (into `Deep`) and back down (into `Small`), checking that
+/// order, length, and byte content stay correct across both transitions.
+#[test]
+fn promotes_and_demotes_preserving_contents() {
+    let n = PROMOTE_AT * 4 + 5;
+    let mut rope = ByteVec::new();
+    let mut expected: VecDeque<Vec<u8>> = VecDeque::new();
+    for i in 0..n {
+        let b = [(i % 251) as u8, (i % 253) as u8];
+        rope.push_back(chunk(&b));
+        expected.push_back(b.to_vec());
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)), "should have promoted");
+    assert_eq!(rope.len(), n * 2);
+    let flat: Vec<u8> = expected.iter().flatten().copied().collect();
+    assert_eq!(rope, flat);
 
-                            assert_eq!(oracle.make_contiguous()[..read_len], *chunk);
-                            read_len
-                        } else {
-                            let mut buf = vec![0; len];
-                            let read_len = subject.read(&mut buf).unwrap();
-                            buf.truncate(read_len);
+    // drain from the front; contents stay correct through the demotion boundary
+    while let Some(front) = rope.pop_front() {
+        let want = expected.pop_front().unwrap();
+        assert_eq!(&front[..], &want[..]);
+    }
+    assert!(rope.is_empty());
+    assert!(
+        matches!(rope.repr, Repr::Small { .. }),
+        "should have demoted"
+    );
+}
 
-                            assert_eq!(oracle.make_contiguous()[..read_len], buf);
-                            read_len
-                        };
+#[test]
+fn byte_at_matches_flat_in_both_tiers() {
+    for n in [3usize, PROMOTE_AT * 3 + 11] {
+        let mut rope = ByteVec::new();
+        let mut expected = Vec::new();
+        for i in 0..n {
+            let b = [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8];
+            rope.push_back(chunk(&b));
+            expected.extend_from_slice(&b);
+        }
+        for step in [1usize, 7, 53, 211] {
+            let mut idx = 0;
+            while idx < expected.len() {
+                assert_eq!(rope.byte_at(idx), Some(expected[idx]), "n={n} idx={idx}");
+                idx += step;
+            }
+        }
+        assert_eq!(rope.byte_at(expected.len()), None);
+        // `chunks().len()` is the chunk-count accessor (parity with ByteVec); it must be exact.
+        assert_eq!(rope.chunks().len(), rope.chunks().count(), "n={n}");
+    }
+}
 
-                        oracle.drain(..read_len);
-                    }
-                    Operation::Truncate { len } => {
-                        let len = len as usize;
+#[test]
+fn set_byte_in_both_tiers_and_cow_preserves_shared() {
+    for n in [3usize, PROMOTE_AT * 3 + 11] {
+        let mut rope = ByteVec::new();
+        let mut expected = Vec::new();
+        for i in 0..n {
+            let b = [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8];
+            rope.push_back(chunk(&b));
+            expected.extend_from_slice(&b);
+        }
+        // A clone shares every chunk (and, in the deep tier, the tree spine); writes to `rope`
+        // must copy-on-write and leave the snapshot untouched.
+        let snapshot = rope.clone();
+        let snap_bytes = expected.clone();
+        for step in [1usize, 7, 53, 211] {
+            let mut idx = step % expected.len();
+            while idx < expected.len() {
+                let v = (idx as u8).wrapping_mul(7).wrapping_add(step as u8);
+                rope.set_byte(idx, v).unwrap();
+                expected[idx] = v;
+                idx += 97;
+            }
+        }
+        assert_eq!(rope, expected, "n={n}");
+        assert_eq!(
+            snapshot, snap_bytes,
+            "shared snapshot observed a write, n={n}"
+        );
+        assert_eq!(
+            rope.set_byte(expected.len(), 0),
+            Err(ByteVecError::OutOfBounds(expected.len())),
+        );
+    }
+}
 
-                        oracle.truncate(len);
-                        subject.truncate(len);
-                    }
-                    Operation::Advance { len } => {
-                        let len = len as usize;
+#[test]
+fn replace_in_both_tiers_and_cow_preserves_shared() {
+    for n in [4usize, PROMOTE_AT * 3 + 7] {
+        let mut rope = ByteVec::new();
+        let mut model = Vec::new();
+        for i in 0..n {
+            let b = [
+                (i % 251) as u8,
+                (i % 241) as u8,
+                (i % 239) as u8,
+                (i % 233) as u8,
+            ];
+            rope.push_back(chunk(&b));
+            model.extend_from_slice(&b);
+        }
+        // A clone shares chunks/spine; every edit below must copy-on-write and leave it intact.
+        let snapshot = rope.clone();
+        let snap = model.clone();
 
-                        let res = subject.advance(len);
-                        assert_eq!(res.is_ok(), oracle.len() >= len);
+        // Replace a middle range with an owned Bytes.
+        let (a, b) = (model.len() / 4, model.len() / 2);
+        rope.replace(a..b, Bytes::from_static(b"HELLO")).unwrap();
+        model.splice(a..b, b"HELLO".iter().copied());
+        assert_eq!(rope, model, "replace-Bytes n={n}");
 
-                        if oracle.len() >= len {
-                            oracle.drain(..len);
-                        }
-                    }
-                    Operation::Clear => {
-                        oracle.clear();
-                        subject.clear();
-                    }
-                    Operation::PushBack { len } => {
-                        let len = len as usize;
-                        let mut chunk = BytesMut::with_capacity(len);
-                        chunk.extend((&mut byte_source).take(len));
-                        let chunk = chunk.freeze();
-                        oracle.extend(chunk.iter());
-                        subject.push_back(chunk);
-                    }
-                    Operation::SplitTo { len, zerocopy } => {
-                        let len = len as usize;
+        // Insert (empty range) with a borrowed slice — single byte is the same shape.
+        rope.replace(a..a, &b"+"[..]).unwrap();
+        model.splice(a..a, b"+".iter().copied());
+        assert_eq!(rope, model, "insert-slice n={n}");
 
-                        if zerocopy {
-                            let res = subject.split_to(len);
-                            assert_eq!(res.is_err(), len > oracle.len());
-                            if let Ok(chunk) = res {
-                                assert_eq!(chunk, &oracle.make_contiguous()[..len]);
-                                oracle.drain(..len);
+        // Delete (empty value).
+        rope.replace(0..3, &b""[..]).unwrap();
+        model.splice(0..3, core::iter::empty());
+        assert_eq!(rope, model, "delete n={n}");
+
+        // Replace the tail with another ByteVec (zero-copy chunk splice).
+        let vr: ByteVec = [chunk(b"aa"), chunk(b"bbb")].into_iter().collect();
+        let e = model.len();
+        rope.replace(e..e, vr).unwrap();
+        model.extend_from_slice(b"aabbb");
+        assert_eq!(rope, model, "append-rope n={n}");
+
+        assert_eq!(snapshot, snap, "shared snapshot observed a write, n={n}");
+        let l = rope.len();
+        assert!(matches!(
+            rope.replace(l + 1..l + 1, &b"x"[..]),
+            Err(ByteVecError::OutOfBounds(_))
+        ));
+    }
+}
+
+/// RED reproducer (breaker-bytevec): the range-bound resolution in `replace` (`resolve_range`)
+/// and `slice` computes `Included(e) => e + 1` / `Excluded(s) => s + 1` UNCHECKED. In release
+/// builds the add wraps: `replace(0..=usize::MAX, v)` resolves to `(0, 0)` and silently INSERTS
+/// at the front returning `Ok` (observed: b"Xhello world") instead of the documented
+/// `Err(OutOfBounds)`; `slice((Excluded(usize::MAX), Unbounded))` silently returns the whole
+/// rope instead of the documented panic. In debug builds both die with an arithmetic-overflow
+/// panic, which for `replace` also violates the documented `Err` contract. Fix shape:
+/// `checked_add(1)` — `None` maps to `Err(OutOfBounds(usize::MAX))` in `resolve_range` and to
+/// the documented out-of-bounds panic in `slice`. This test asserts the contract and FAILS in
+/// BOTH build modes today (debug: overflow panic; release: Ok + mutation).
+#[test]
+fn replace_with_inclusive_max_end_errors_instead_of_wrapping() {
+    let mut rope = ByteVec::from(b"hello world");
+    assert_eq!(
+        rope.replace(0..=usize::MAX, &b"X"[..]),
+        Err(ByteVecError::OutOfBounds(usize::MAX)),
+        "an out-of-bounds inclusive end must error, not wrap"
+    );
+    assert_eq!(
+        rope, b"hello world",
+        "the failed replace must not mutate the rope"
+    );
+    // excluded start overflow takes the same unchecked path in resolve_range
+    assert_eq!(
+        rope.replace(
+            (
+                core::ops::Bound::Excluded(usize::MAX),
+                core::ops::Bound::Unbounded
+            ),
+            &b"X"[..]
+        ),
+        Err(ByteVecError::OutOfBounds(usize::MAX)),
+        "an out-of-bounds excluded start must error, not wrap"
+    );
+    assert_eq!(rope, b"hello world");
+}
+
+/// Companion to `replace_with_inclusive_max_end_errors_instead_of_wrapping` for the `slice` path:
+/// an excluded start of `usize::MAX` must hit `slice`'s documented out-of-bounds panic, not wrap
+/// the `+ 1` to 0 and silently return the whole rope (release) or arithmetic-overflow (debug).
+#[test]
+#[should_panic(expected = "out of bounds")]
+fn slice_with_excluded_max_start_panics_instead_of_wrapping() {
+    let rope = ByteVec::from(b"hello world");
+    let _ = rope.slice((
+        core::ops::Bound::Excluded(usize::MAX),
+        core::ops::Bound::Unbounded,
+    ));
+}
+
+#[test]
+fn replace_equal_length_overwrite_is_in_place() {
+    // A unique single-chunk rope overwritten with equal-length values must stay ONE chunk (the
+    // Path-1 in-place write — no allocation, no fragmentation).
+    let mut rope: ByteVec = Bytes::from(vec![0u8; 1000]).into();
+    let mut model = vec![0u8; 1000];
+    for i in 0..300usize {
+        let at = (i * 7) % 997;
+        rope.replace(at..at + 3, &b"abc"[..]).unwrap();
+        model.splice(at..at + 3, b"abc".iter().copied());
+    }
+    assert_eq!(rope, model);
+    assert_eq!(
+        rope.chunks().len(),
+        1,
+        "equal-length overwrite fragmented the chunk"
+    );
+}
+
+#[test]
+fn replace_equal_length_overwrite_spans_chunks_in_place() {
+    let mut rope: ByteVec = [
+        chunk(b"aaaa"),
+        chunk(b"bbbb"),
+        chunk(b"cccc"),
+        chunk(b"dddd"),
+    ]
+    .into_iter()
+    .collect();
+    let mut model = b"aaaabbbbccccdddd".to_vec();
+    let before = rope.chunks().len();
+    // [2, 10) spans chunks 0,1,2 with an equal-length (8-byte) value — must stay in place.
+    rope.replace(2..10, &b"XYZWVUTS"[..]).unwrap();
+    model.splice(2..10, b"XYZWVUTS".iter().copied());
+    assert_eq!(rope, model);
+    assert_eq!(
+        rope.chunks().len(),
+        before,
+        "spanning overwrite changed chunk count"
+    );
+
+    // Copy-on-write: a shared snapshot must not observe the overwrite.
+    let snap: ByteVec = [
+        chunk(b"aaaa"),
+        chunk(b"bbbb"),
+        chunk(b"cccc"),
+        chunk(b"dddd"),
+    ]
+    .into_iter()
+    .collect();
+    let shared = snap.clone();
+    let mut editable = snap;
+    editable.replace(0..8, &b"01234567"[..]).unwrap();
+    assert_eq!(editable, b"01234567ccccdddd");
+    assert_eq!(
+        shared, b"aaaabbbbccccdddd",
+        "snapshot observed the overwrite"
+    );
+}
+
+#[test]
+fn uc5_brute_force() {
+    for nchunks in [6usize, 12, PROMOTE_AT * 2] {
+        let build = || {
+            let mut r = ByteVec::new();
+            let mut m = Vec::new();
+            for i in 0..nchunks {
+                let b = [(i * 3) as u8, (i * 3 + 1) as u8, (i * 3 + 2) as u8];
+                r.push_back(chunk(&b));
+                m.extend_from_slice(&b);
+            }
+            (r, m)
+        };
+        let total = nchunks * 3;
+        let step = if total > 60 { 7 } else { 1 };
+        for start in (0..=total).step_by(step) {
+            for end in (start..=total).step_by(step) {
+                for vlen in [0usize, 1, 5, 40] {
+                    for kind in 0..3 {
+                        let (mut r, mut m) = build();
+                        let val: Vec<u8> = (0..vlen).map(|k| 200u8.wrapping_add(k as u8)).collect();
+                        match kind {
+                            0 => r.replace(start..end, &val[..]).unwrap(),
+                            1 => r.replace(start..end, Bytes::from(val.clone())).unwrap(),
+                            _ => {
+                                let vr: ByteVec =
+                                    val.chunks(3).map(Bytes::copy_from_slice).collect();
+                                r.replace(start..end, vr).unwrap();
                             }
-                        } else {
-                            let res = subject.split_to_copy(len);
-                            assert_eq!(res.is_err(), len > oracle.len());
-                            if let Ok(chunk) = res {
-                                assert_eq!(chunk, &oracle.make_contiguous()[..len]);
-                                oracle.drain(..len);
-                            }
                         }
-                    }
-                    Operation::PopFront => {
-                        let chunk = subject.pop_front();
-                        assert_eq!(chunk.is_some(), !oracle.is_empty());
-                        if let Some(chunk) = chunk {
-                            assert_eq!(chunk, &oracle.make_contiguous()[..chunk.len()]);
-                            oracle.drain(..chunk.len());
-                        }
-                    }
-                    Operation::PopBack => {
-                        let chunk = subject.pop_back();
-                        assert_eq!(chunk.is_some(), !oracle.is_empty());
-                        if let Some(chunk) = chunk {
-                            let offset = oracle.len() - chunk.len();
-                            assert_eq!(chunk, &oracle.make_contiguous()[offset..]);
-                            oracle.drain(offset..);
-                        }
+                        m.splice(start..end, val.iter().copied());
+                        assert_eq!(r, m, "n={nchunks} [{start}..{end}) vlen={vlen} kind={kind}");
                     }
                 }
-
-                assert_eq!(oracle.len(), subject.len());
-                assert_eq!(oracle.is_empty(), subject.is_empty());
             }
-
-            assert!(oracle.iter().eq(subject.chunks().flat_map(|v| v.iter())));
-        });
+        }
+    }
 }
 
 #[test]
-fn iter_test() {
-    check!().with_type::<Vec<Vec<u8>>>().for_each(|chunks| {
-        let mut subject = ByteVec::new();
-        for chunk in chunks {
-            subject.write_all(chunk).unwrap();
+fn replace_small_inserts_coalesce_and_do_not_fragment() {
+    // Many single-byte inserts within a chunk must collapse (UC4), not leave ~1-byte chunks.
+    let mut rope = ByteVec::new();
+    let mut model: Vec<u8> = Vec::new();
+    for _ in 0..400usize {
+        let at = model.len() / 2;
+        rope.replace(at..at, &b"x"[..]).unwrap();
+        model.splice(at..at, core::iter::once(b'x'));
+    }
+    assert_eq!(rope, model);
+    let chunk_count = rope.chunks().len();
+    assert!(
+        chunk_count < 40,
+        "coalescing failed: {chunk_count} chunks for 400 bytes"
+    );
+}
+
+#[test]
+fn replace_structural_deep_tier() {
+    let n = PROMOTE_AT * 3 + 5;
+    let mut rope = ByteVec::new();
+    let mut model: Vec<u8> = Vec::new();
+    for i in 0..n {
+        let b = [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8];
+        rope.push_back(chunk(&b));
+        model.extend_from_slice(&b);
+    }
+    // Populate the head buffer so splices span head + tree + tail.
+    for i in 0..(FANOUT + 3) {
+        let b = [(140 + (i % 60)) as u8, (i % 37) as u8];
+        rope.push_front(chunk(&b));
+        model.splice(0..0, b.iter().copied());
+    }
+    let snapshot = rope.clone();
+    let snap = model.clone();
+
+    // Length-changing structural edits (insert / delete / replace) at varied offsets and sizes.
+    for &(at, del, ins) in &[
+        (0usize, 0usize, 5usize), // insert at front
+        (10, 40, 3),              // shrink, spanning chunks
+        (200, 5, 90),             // grow, spanning chunks
+        (0, 30, 0),               // delete at front
+    ] {
+        let at = at.min(model.len());
+        let del = del.min(model.len() - at);
+        let val: Vec<u8> = (0..ins).map(|k| ((at + k) as u8) ^ 0x71).collect();
+        rope.replace(at..at + del, Bytes::from(val.clone()))
+            .unwrap();
+        model.splice(at..at + del, val.iter().copied());
+        assert_eq!(rope, model, "deep structural at={at} del={del} ins={ins}");
+    }
+    // delete to the very end, and a borrowed-slice value
+    let l = model.len();
+    rope.replace(l - 7..l, &b"tail!"[..]).unwrap();
+    model.splice(l - 7..l, b"tail!".iter().copied());
+    assert_eq!(rope, model, "deep structural to-end");
+
+    assert_eq!(snapshot, snap, "shared snapshot observed a structural edit");
+}
+
+#[test]
+fn replace_equal_length_overwrite_deep_tier() {
+    let n = PROMOTE_AT * 3 + 5;
+    let mut rope = ByteVec::new();
+    let mut model: Vec<u8> = Vec::new();
+    for i in 0..n {
+        let b = [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8];
+        rope.push_back(chunk(&b));
+        model.extend_from_slice(&b);
+    }
+    // Populate the head buffer too, so overwrites exercise head + tree + tail.
+    for i in 0..(FANOUT + 3) {
+        let b = [(140 + (i % 60)) as u8, (i % 37) as u8];
+        rope.push_front(chunk(&b));
+        model.splice(0..0, b.iter().copied());
+    }
+    let chunks_before = rope.chunks().len();
+    let snapshot = rope.clone();
+    let snap = model.clone();
+
+    let total = model.len();
+    for &(at, len) in &[
+        (0usize, 10usize),
+        (total / 3, 100),
+        (total / 2, 120),
+        (total - 20, 20),
+    ] {
+        let val: Vec<u8> = (0..len).map(|k| ((at + k) as u8) ^ 0x33).collect();
+        rope.replace(at..at + len, Bytes::from(val.clone()))
+            .unwrap();
+        model.splice(at..at + len, val.iter().copied());
+        assert_eq!(rope, model, "deep overwrite at {at} len {len}");
+    }
+    // A borrowed-slice value (no allocation path).
+    rope.replace(50..60, &b"0123456789"[..]).unwrap();
+    model.splice(50..60, b"0123456789".iter().copied());
+    assert_eq!(rope, model, "deep overwrite with slice value");
+
+    // Equal-length overwrite never changes structure.
+    assert_eq!(
+        rope.chunks().len(),
+        chunks_before,
+        "deep overwrite changed chunk count"
+    );
+    assert_eq!(snapshot, snap, "shared snapshot observed a write");
+}
+
+/// Exercises split_to / split_to_copy / truncate / append / get / copy_to_bytes in both tiers,
+/// checking results against a flat `Vec<u8>` oracle.
+#[test]
+fn public_api_matches_oracle_in_both_tiers() {
+    for n in [5usize, PROMOTE_AT * 3 + 9] {
+        let make = || -> (ByteVec, Vec<u8>) {
+            let mut rope = ByteVec::new();
+            let mut flat = Vec::new();
+            for i in 0..n {
+                let b = [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8];
+                rope.push_back(chunk(&b));
+                flat.extend_from_slice(&b);
+            }
+            (rope, flat)
+        };
+
+        // split_to
+        let (mut rope, flat) = make();
+        let at = flat.len() / 3;
+        let front = rope.split_to(at).unwrap();
+        assert_eq!(front, &flat[..at]);
+        assert_eq!(rope, &flat[at..]);
+        assert!(rope.split_to(rope.len() + 1).is_err());
+
+        // split_to_copy
+        let (mut rope, flat) = make();
+        let copied = rope.split_to_copy(at).unwrap();
+        assert_eq!(&copied[..], &flat[..at]);
+        assert_eq!(rope, &flat[at..]);
+
+        // truncate
+        let (mut rope, flat) = make();
+        let keep = flat.len() / 2;
+        rope.truncate(keep);
+        assert_eq!(rope, &flat[..keep]);
+
+        // append
+        let (mut a, fa) = make();
+        let (mut b, fb) = make();
+        a.append(&mut b);
+        assert!(b.is_empty());
+        let mut expected = fa.clone();
+        expected.extend_from_slice(&fb);
+        assert_eq!(a, expected);
+
+        // copy_to_bytes
+        let (rope, flat) = make();
+        assert_eq!(&rope.copy_to_bytes()[..], &flat[..]);
+
+        // get (chunk index): first chunk is bytes 0..3
+        let (rope, _) = make();
+        assert_eq!(rope.get(0).unwrap().len(), 3);
+        assert_eq!(rope.get(n), None);
+    }
+}
+
+fn deep_rope(n: usize) -> (ByteVec, Vec<u8>) {
+    let mut rope = ByteVec::new();
+    let mut flat = Vec::new();
+    for i in 0..n {
+        // varied chunk sizes so the tree is genuinely relaxed
+        let clen = 1 + (i % 5);
+        let b: Vec<u8> = (0..clen).map(|k| (i + k) as u8).collect();
+        rope.push_back(Bytes::from(b.clone()));
+        flat.extend_from_slice(&b);
+    }
+    (rope, flat)
+}
+
+/// `concat` (via `append`) across many size pairs — including height mismatches — must equal the
+/// flat concatenation, with correct len/chunk bytes throughout.
+#[test]
+fn concat_matches_oracle() {
+    for &na in &[0usize, 1, 5, 40, 200, 1000] {
+        for &nb in &[0usize, 1, 5, 40, 200, 1000] {
+            let (mut a, fa) = deep_rope(na);
+            let (mut b, fb) = deep_rope(nb);
+            a.append(&mut b);
+            assert!(b.is_empty(), "other emptied ({na},{nb})");
+            let mut expected = fa.clone();
+            expected.extend_from_slice(&fb);
+            assert_eq!(a.len(), expected.len(), "len ({na},{nb})");
+            assert_eq!(a, expected, "bytes ({na},{nb})");
+            // spot-check random-access agrees end to end
+            if !expected.is_empty() {
+                for off in [0, expected.len() / 2, expected.len() - 1] {
+                    assert_eq!(a.byte_at(off), Some(expected[off]), "get {off} ({na},{nb})");
+                }
+            }
         }
+    }
+}
 
-        // the ByteVec does not store empty chunks so filter those out
-        let expected = chunks.iter().filter(|chunk| !chunk.is_empty());
-
-        for (actual, expected) in subject.chunks().zip(expected.clone()) {
-            assert_eq!(actual, expected);
+/// `split_to` at many offsets (both tiers) must produce the two exact halves, each internally
+/// consistent (len, bytes, random access).
+#[test]
+fn split_matches_oracle() {
+    for &n in &[1usize, 5, 40, 200, 1000] {
+        let (_, flat) = deep_rope(n);
+        let total = flat.len();
+        for at in [0, 1, total / 3, total / 2, total.saturating_sub(1), total] {
+            if at > total {
+                continue;
+            }
+            let (mut rope, _) = deep_rope(n);
+            let front = rope.split_to(at).unwrap();
+            assert_eq!(front.len(), at, "front len n={n} at={at}");
+            assert_eq!(front, &flat[..at], "front bytes n={n} at={at}");
+            assert_eq!(rope.len(), total - at, "back len n={n} at={at}");
+            assert_eq!(rope, &flat[at..], "back bytes n={n} at={at}");
+            // random access on both halves
+            if at > 0 {
+                assert_eq!(front.byte_at(at - 1), Some(flat[at - 1]));
+            }
+            if at < total {
+                assert_eq!(rope.byte_at(0), Some(flat[at]));
+            }
         }
+    }
+}
 
-        for (actual, expected) in subject.into_iter().zip(expected) {
-            assert_eq!(actual, expected);
+/// A split immediately re-concatenated must reproduce the original, for offsets across a deep
+/// rope (exercises subtree sharing on both operations).
+#[test]
+fn slice_matches_oracle_in_both_tiers() {
+    for &n in &[4usize, 1000] {
+        let (rope, flat) = deep_rope(n);
+        let total = flat.len();
+        for (a, b) in [
+            (0, total),
+            (0, total / 2),
+            (total / 4, total * 3 / 4),
+            (total / 2, total),
+            (total, total),
+            (7, 7),
+            (1, total - 1),
+        ] {
+            let s = rope.slice(a..b);
+            assert_eq!(s.len(), b - a, "n={n} {a}..{b}");
+            assert_eq!(s, &flat[a..b], "n={n} {a}..{b}");
+        }
+        // open-ended forms
+        assert_eq!(rope.slice(..), flat);
+        assert_eq!(rope.slice(10..), &flat[10..]);
+        assert_eq!(rope.slice(..total - 3), &flat[..total - 3]);
+    }
+}
+
+/// A deep rope with bytes in ALL THREE regions — buffered head, tree, buffered tail — so a slice
+/// can straddle the head→tree and tree→tail seams (`deep_rope` alone leaves the head empty).
+fn deep_rope_with_buffered_ends() -> (ByteVec, Vec<u8>) {
+    let (mut rope, mut flat) = deep_rope(1000);
+    for i in 0..9u8 {
+        let b = alloc::vec![200 + i; 2 + i as usize];
+        rope.push_front(Bytes::from(b.clone())); // populate the buffered head
+        let mut prefixed = b;
+        prefixed.extend_from_slice(&flat);
+        flat = prefixed;
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+    (rope, flat)
+}
+
+/// `slice` must match the flat oracle for EVERY range, including ones that straddle the buffered
+/// head/tail seams — the region-walking reattach path in the deep tier.
+#[test]
+fn slice_across_buffered_head_tree_tail() {
+    let (rope, flat) = deep_rope_with_buffered_ends();
+    let total = flat.len();
+    // coarse grid over all three regions + the near-boundary bytes at each end
+    let mut points: Vec<usize> = (0..=6).collect();
+    points.extend([total / 4, total / 2, total * 3 / 4]);
+    points.extend(total - 6..=total);
+    for &a in &points {
+        for &b in &points {
+            if a <= b {
+                let s = rope.slice(a..b);
+                assert_eq!(s.len(), b - a, "{a}..{b}");
+                assert_eq!(s, &flat[a..b], "{a}..{b}");
+            }
+        }
+    }
+}
+
+/// Appending a rope to a CLONE of itself must produce a shared DAG (the same subtree referenced
+/// twice), never a cyclic/exploding structure: length doubles, content is the original twice, the
+/// original is untouched, and a later in-place edit copies-on-write instead of aliasing.
+#[test]
+fn self_append_shares_structure_without_exploding() {
+    let (mut a, flat) = deep_rope(1000);
+    let mut b = a.clone(); // b aliases every one of a's subtrees (rc >= 2)
+    a.append(&mut b);
+
+    // Correct doubling, no infinite recursion.
+    assert_eq!(a.len(), 2 * flat.len());
+    let mut doubled = flat.clone();
+    doubled.extend_from_slice(&flat);
+    assert_eq!(a, doubled);
+    a.check_invariants();
+
+    // The clone we appended was drained; a fresh clone of the original is still intact.
+    let (orig, _) = deep_rope(1000);
+    assert_eq!(orig, flat);
+
+    // COW on the shared DAG: editing the doubled rope must not corrupt an independent clone.
+    let snapshot = a.clone();
+    a.set_byte(0, 0xAB).unwrap();
+    a.set_byte(flat.len(), 0xCD).unwrap(); // the seam byte, in the second (shared) copy
+    assert_eq!(snapshot, doubled, "COW: shared snapshot unchanged");
+    assert_eq!(a.byte_at(0), Some(0xAB));
+    assert_eq!(a.byte_at(flat.len()), Some(0xCD));
+}
+
+/// Repeatedly appending a rope to a clone of itself must NOT explode. Each append shares the whole
+/// prior structure (O(log) new spine nodes + Arc bumps), so 20 doublings — a logical length of
+/// millions — stays cheap in memory and completes instantly. We only touch O(1) length and O(log)
+/// random access; a full traversal would be O(logical length) precisely because the data is real.
+#[test]
+fn repeated_self_append_does_not_explode() {
+    let (mut r, _) = deep_rope(64);
+    let base = r.len();
+    r.check_invariants(); // structure is valid before we start sharing it
+    for i in 1..=20 {
+        let mut clone = r.clone(); // O(1): bumps the root Arc
+        r.append(&mut clone);
+        assert_eq!(r.len(), base << i, "length must double exactly at step {i}");
+    }
+    // Random access still resolves in O(log) against the shared DAG.
+    assert_eq!(r.byte_at(0), Some(0));
+    assert_eq!(r.byte_at(r.len() - 1), r.byte_at(base - 1));
+}
+
+#[test]
+fn split_then_concat_roundtrips() {
+    let (_, flat) = deep_rope(777);
+    for at in [0, 3, 100, 388, 776, 777] {
+        let (mut rope, _) = deep_rope(777);
+        let mut front = rope.split_to(at).unwrap();
+        front.append(&mut rope);
+        assert_eq!(front, flat, "roundtrip at={at}");
+        assert_eq!(front.len(), flat.len());
+    }
+}
+
+#[test]
+fn trait_impls_behave() {
+    use etude_buffer::{reader::Buffer as _, writer::Buffer as _};
+
+    // writer::Buffer + PartialEq + Debug
+    let mut w = ByteVec::new();
+    w.put_slice(b"hello ");
+    w.put_bytes(Bytes::from_static(b"world"));
+    assert_eq!(w, b"hello world");
+    assert_eq!(w, "hello world");
+    assert_eq!(&format!("{w:?}"), "[b\"hello \", b\"world\"]");
+
+    // Index (chunk-granular) + get
+    assert_eq!(&w[0][..], b"hello ");
+    assert_eq!(&w[1][..], b"world");
+
+    // bytes::Buf: chunk() / advance() / copy_to_bytes() (fully-qualified — inherent methods of the
+    // same name shadow the trait ones for method-call syntax, exactly as on ByteVec)
+    let mut b = w.clone();
+    assert_eq!(bytes::Buf::remaining(&b), 11);
+    assert_eq!(bytes::Buf::chunk(&b), b"hello ");
+    bytes::Buf::advance(&mut b, 6);
+    assert_eq!(bytes::Buf::copy_to_bytes(&mut b, 5), &b"world"[..]);
+    assert_eq!(bytes::Buf::remaining(&b), 0);
+
+    // reader::Buffer into a BytesMut destination (non-consuming reader over a clone)
+    let mut r = w.reader();
+    let mut dst = bytes::BytesMut::new();
+    r.copy_into(&mut dst).unwrap();
+    assert_eq!(&dst[..], b"hello world");
+    assert_eq!(w.len(), 11, "reader() must not consume the original");
+
+    // IntoIterator drains chunks
+    let chunks: Vec<Bytes> = w.clone().into_iter().collect();
+    assert_eq!(chunks.len(), 2);
+
+    // From/Into round-trips
+    assert_eq!(ByteVec::from(&b"abc"[..]), b"abc");
+    assert_eq!(ByteVec::from(vec![1u8, 2, 3]), [1u8, 2, 3]);
+    let v: Vec<Bytes> =
+        ByteVec::from_iter([Bytes::from_static(b"x"), Bytes::from_static(b"y")]).into();
+    assert_eq!(v.len(), 2);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn io_read_write() {
+    use std::io::{Read as _, Write as _};
+    let mut rope = ByteVec::new();
+    rope.write_all(b"hello ").unwrap();
+    rope.write_all(b"world").unwrap();
+    assert_eq!(rope, b"hello world");
+
+    let mut out = [0u8; 5];
+    let n = rope.read(&mut out).unwrap();
+    assert_eq!(&out[..n], b"hello");
+    assert_eq!(rope, b" world");
+}
+
+/// Differential fuzz: apply a random op sequence to a `ByteVec` and to a flat `Vec<u8>` model,
+/// asserting byte-for-byte equivalence (and per-op results) after every step. Exercises the tree
+/// paths across the promote/demote thresholds.
+#[test]
+fn differential_against_model() {
+    use bolero::check;
+    use bolero_generator::TypeGenerator;
+
+    #[derive(Debug, Clone, TypeGenerator)]
+    enum Op {
+        PushBack(Vec<u8>),
+        PushFront(Vec<u8>),
+        PopFront,
+        PopBack,
+        Advance(usize),
+        Truncate(usize),
+        SplitTo(usize),
+        Append(Vec<u8>),
+        Slice(usize, usize),
+        GetByte(usize),
+        SetByte(usize, u8),
+        Replace(usize, usize, Vec<u8>, u8),
+    }
+
+    check!().with_type::<Vec<Op>>().cloned().for_each(|ops| {
+        let mut rope = ByteVec::new();
+        let mut model: Vec<u8> = Vec::new();
+        for op in &ops {
+            match op {
+                Op::PushBack(d) => {
+                    rope.push_back(Bytes::from(d.clone()));
+                    model.extend_from_slice(d);
+                }
+                Op::PushFront(d) => {
+                    rope.push_front(Bytes::from(d.clone()));
+                    model.splice(0..0, d.iter().copied());
+                }
+                Op::PopFront => match rope.pop_front() {
+                    Some(c) => {
+                        assert_eq!(&c[..], &model[..c.len()]);
+                        model.drain(..c.len());
+                    }
+                    None => assert!(model.is_empty()),
+                },
+                Op::PopBack => match rope.pop_back() {
+                    Some(c) => {
+                        let s = model.len() - c.len();
+                        assert_eq!(&c[..], &model[s..]);
+                        model.truncate(s);
+                    }
+                    None => assert!(model.is_empty()),
+                },
+                Op::Advance(n) => {
+                    let k = n % (model.len() + 1);
+                    rope.advance(k).unwrap();
+                    model.drain(..k);
+                }
+                Op::Truncate(n) => {
+                    let k = n % (model.len() + 1);
+                    rope.truncate(k);
+                    model.truncate(k);
+                }
+                Op::SplitTo(n) => {
+                    let k = n % (model.len() + 1);
+                    let front = rope.split_to(k).unwrap();
+                    assert_eq!(front, &model[..k]);
+                    model.drain(..k);
+                }
+                Op::Append(d) => {
+                    let mut other: ByteVec = d.chunks(3).map(Bytes::copy_from_slice).collect();
+                    rope.append(&mut other);
+                    assert!(other.is_empty());
+                    model.extend_from_slice(d);
+                }
+                Op::Slice(a, b) => {
+                    let lo = a % (model.len() + 1);
+                    let hi = lo + b % (model.len() - lo + 1);
+                    assert_eq!(rope.slice(lo..hi), &model[lo..hi]);
+                }
+                Op::GetByte(i) => {
+                    let idx = i % (model.len() + 1);
+                    assert_eq!(rope.byte_at(idx), model.get(idx).copied());
+                }
+                Op::SetByte(i, v) => {
+                    if model.is_empty() {
+                        assert_eq!(rope.set_byte(0, *v), Err(ByteVecError::OutOfBounds(0)));
+                    } else {
+                        let idx = i % model.len();
+                        rope.set_byte(idx, *v).unwrap();
+                        model[idx] = *v;
+                    }
+                }
+                Op::Replace(a, b, d, kind) => {
+                    let lo = a % (model.len() + 1);
+                    let hi = lo + b % (model.len() - lo + 1);
+                    // Exercise every reader-backed value kind: borrowed slice, owned Bytes,
+                    // another ByteVec (zero-copy chunk splice), and an equal-length overwrite
+                    // (the in-place path) whose value is exactly `hi - lo` bytes.
+                    let repl: Vec<u8> = if kind % 4 == 3 {
+                        (lo..hi).map(|k| (k as u8) ^ 0x5a).collect()
+                    } else {
+                        d.clone()
+                    };
+                    match kind % 4 {
+                        0 => rope.replace(lo..hi, &repl[..]).unwrap(),
+                        1 => rope.replace(lo..hi, Bytes::from(repl.clone())).unwrap(),
+                        2 => {
+                            let vr: ByteVec = repl.chunks(3).map(Bytes::copy_from_slice).collect();
+                            rope.replace(lo..hi, vr).unwrap();
+                        }
+                        _ => rope.replace(lo..hi, &repl[..]).unwrap(),
+                    }
+                    model.splice(lo..hi, repl.iter().copied());
+                }
+            }
+            assert_eq!(rope.len(), model.len(), "len after {op:?}");
+            assert_eq!(rope, model, "bytes after {op:?}");
         }
     });
 }
 
-#[derive(Copy, Clone, Debug, TypeGenerator)]
-enum BuilderOperation {
-    Write { len: u16, is_bytes: bool },
-    SplitTo { at: u16 },
-    Append { len: u16 },
-    WriteLenPrefix { len: u16, is_bytes: bool },
-}
-
-#[derive(Clone, Default)]
-struct ByteSource {
-    counter: u32,
-    offset: u8,
-}
-
-impl Iterator for ByteSource {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let byte = self.counter.to_be_bytes()[self.offset as usize];
-        let next_offset = self.offset + 1;
-        if next_offset == 4 {
-            self.counter += 1;
-            self.offset = 0;
-        } else {
-            self.offset = next_offset;
-        }
-        Some(byte)
-    }
-}
-
+/// Differential oracle for the [`Builder`] construction surface (bytevec-compat), reusing the same
+/// `Vec<u8>`-model discipline as [`differential_against_model`]. Drives a `Builder` through a random
+/// op sequence (the `writer::Buffer` write path, `append`/`extend`/`split`/`split_to`/
+/// `with_inline_threshold`/`write_with_len_prefix`) and checks `len`/`is_empty` after every op and the
+/// final `finish()` bytes against the model. Extend `BuilderOp` here rather than adding a one-off
+/// harness when covering a new Builder method.
 #[test]
-fn byte_source_test() {
-    for count in 0..16 {
-        let actual: Vec<u8> = ByteSource::default().take(count).collect();
-        let expected: Vec<u8> = (0u32..).flat_map(|v| v.to_be_bytes()).take(count).collect();
-        assert_eq_dump!(actual, expected);
-    }
-}
+fn builder_differential_against_model() {
+    use bolero::check;
+    use bolero_generator::TypeGenerator;
+    use etude_buffer::writer::Buffer as _;
 
-#[derive(Default)]
-struct BuilderModel {
-    builder: Builder,
-    oracle: Vec<u8>,
-    byte_source: ByteSource,
-}
-
-impl BuilderModel {
-    fn apply(&mut self, op: BuilderOperation) {
-        let Self {
-            builder,
-            oracle,
-            byte_source,
-        } = self;
-
-        use BuilderOperation::*;
-
-        match op {
-            Write { len, is_bytes } => {
-                let len = len as usize;
-                let mut chunk = BytesMut::with_capacity(len);
-                chunk.extend(byte_source.take(len));
-                let chunk_bytes = chunk.freeze();
-
-                oracle.extend_from_slice(&chunk_bytes);
-
-                if is_bytes {
-                    builder.put_bytes(chunk_bytes);
-                } else {
-                    builder.put_slice(&chunk_bytes);
-                }
-            }
-            SplitTo { at } => {
-                let at = at as usize;
-                if at <= oracle.len() {
-                    let split = builder.split_to(at).unwrap();
-                    assert_eq_dump!(split.copy_to_bytes(), &oracle[..at]);
-                    oracle.drain(..at);
-                } else {
-                    assert!(matches!(
-                        builder.split_to(at),
-                        Err(ByteVecError::OutOfBounds(_))
-                    ));
-                }
-            }
-            Append { len } => {
-                let len = len as usize;
-                let mut chunk = BytesMut::with_capacity(len);
-                chunk.extend(byte_source.take(len));
-                let chunk_bytes = chunk.freeze();
-
-                let mut bytes = ByteVec::new();
-                bytes.push_back(chunk_bytes.clone());
-
-                oracle.extend_from_slice(&chunk_bytes);
-                builder.append(&mut bytes);
-            }
-            WriteLenPrefix { len, is_bytes } => {
-                let len = len as usize;
-                let mut chunk = BytesMut::with_capacity(len);
-                chunk.extend(byte_source.take(len));
-                let chunk_bytes = chunk.freeze();
-
-                // Add length prefix to oracle
-                oracle.extend_from_slice(&(chunk_bytes.len() as u64).to_be_bytes());
-                // Add actual bytes
-                oracle.extend_from_slice(&chunk_bytes);
-
-                // Write to builder with length prefix
-                builder.write_with_len_prefix(|b| {
-                    if is_bytes {
-                        b.put_bytes(chunk_bytes)
-                    } else {
-                        b.put_slice(&chunk_bytes)
-                    }
-                });
-            }
-        }
-
-        assert_eq!(builder.len(), oracle.len());
-        assert_eq!(builder.is_empty(), oracle.is_empty());
+    #[derive(Debug, Clone, TypeGenerator)]
+    enum BuilderOp {
+        PutSlice(Vec<u8>),
+        PutBytes(Vec<u8>),
+        PutBytesMut(Vec<u8>),
+        Append(Vec<u8>),
+        Extend(Vec<u8>),
+        SplitTo(usize),
+        Split,
+        WriteWithLenPrefix(Vec<u8>),
+        SetInlineThreshold(usize),
     }
 
-    fn finish(self) {
-        let final_bytes = self.builder.finish();
-        assert_eq_dump!(final_bytes, self.oracle);
-    }
-}
-
-#[test]
-fn builder_model_test() {
     check!()
-        .with_type::<Vec<BuilderOperation>>()
-        .for_each(|operations| {
-            let mut model = BuilderModel::default();
-
-            for operation in operations {
-                model.apply(*operation);
-            }
-
-            model.finish();
-        });
-}
-
-#[test]
-fn builder_capacity_test() {
-    // Test large capacity behavior
-    let mut large_builder = Builder::new(1 << 16);
-    large_builder.put_slice(b"hello");
-    large_builder.put_slice(b"world");
-    let large_vec = large_builder.finish();
-    assert_eq!(large_vec.len(), 10);
-    assert_eq!(large_vec.chunks().len(), 1);
-
-    // Test small capacity behavior
-    let mut small_builder = Builder::new(1);
-    small_builder.put_slice(b"hello");
-    small_builder.put_slice(b"world");
-    let small_vec = small_builder.finish();
-    assert_eq!(small_vec.len(), 10);
-    assert_eq!(small_vec.chunks().len(), 2);
-}
-
-/// Shows that if a written length spans an allocated chunk,
-/// it should be atomically written so it can be inserted in the
-/// correct location in the `ByteVec`.
-#[test]
-fn builder_write_len_prefix_torn_length() {
-    use BuilderOperation::*;
-
-    let ops = [
-        Write {
-            len: 65530,
-            is_bytes: false,
-        },
-        WriteLenPrefix {
-            len: 65535,
-            is_bytes: false,
-        },
-    ];
-
-    let mut model = BuilderModel::default();
-
-    for op in ops {
-        model.apply(op);
-    }
-
-    model.finish();
-}
-
-#[test]
-fn builder_write_with_len_prefix_test() {
-    // Test basic length-prefixed write
-    let mut builder = Builder::new(16);
-    builder.write_with_len_prefix(|b| b.put_slice(b"hello"));
-    let result = builder.finish();
-    let bytes = result.copy_to_bytes();
-    assert_eq!(bytes.len(), 13); // 8 bytes for length + 5 bytes for "hello"
-    let len = u64::from_be_bytes(bytes[..8].try_into().unwrap());
-    assert_eq!(len as usize, 5);
-    assert_eq!(&bytes[8..], b"hello");
-
-    // Test multiple length-prefixed writes
-    let mut builder = Builder::new(32);
-    builder.write_with_len_prefix(|b| b.put_slice(b"hello"));
-    builder.write_with_len_prefix(|b| b.put_slice(b"world"));
-    let result = builder.finish();
-    let bytes = result.copy_to_bytes();
-    assert_eq!(bytes.len(), 26); // (8 + 5) + (8 + 5) bytes
-
-    // First value
-    let len1 = u64::from_be_bytes(bytes[..8].try_into().unwrap());
-    assert_eq!(len1 as usize, 5);
-    assert_eq!(&bytes[8..13], b"hello");
-
-    // Second value
-    let len2 = u64::from_be_bytes(bytes[13..21].try_into().unwrap());
-    assert_eq!(len2 as usize, 5);
-    assert_eq!(&bytes[21..], b"world");
-
-    // Test empty value
-    let mut builder = Builder::new(8);
-    builder.write_with_len_prefix(|_| {});
-    let result = builder.finish();
-    let bytes = result.copy_to_bytes();
-    assert_eq!(bytes.len(), 8); // Just the length prefix
-    let len = u64::from_be_bytes(bytes[..8].try_into().unwrap());
-    assert_eq!(len, 0);
-}
-
-#[derive(Copy, Clone, Debug, TypeGenerator)]
-enum BuilderReaderOperation {
-    WriteSlice { len: u8 },
-    WriteBytes { len: u8 },
-    Append { len: u8 },
-    ReadPartialCopy { capacity: u8 },
-    ReadCopyInto { capacity: u8 },
-    ReadChunk { watermark: u8 },
-}
-
-#[test]
-fn builder_reader_model_test() {
-    check!()
-        .with_type::<(u8, Vec<BuilderReaderOperation>)>()
-        .for_each(|(builder_capacity, operations)| {
-            // use a small capacity to ensure chunks and head are exercised
-            let capacity = (*builder_capacity as usize % 64).max(1);
-            let mut builder = Builder::new(capacity);
-            let mut oracle: VecDeque<u8> = VecDeque::new();
-            let mut byte_source = ByteSource::default();
-
-            for operation in operations {
-                match *operation {
-                    BuilderReaderOperation::WriteSlice { len } => {
-                        let len = len as usize;
-                        let data: Vec<u8> = (&mut byte_source).take(len).collect();
-                        oracle.extend(data.iter());
-                        builder.put_slice(&data);
+        .with_type::<(usize, Vec<BuilderOp>)>()
+        .cloned()
+        .for_each(|(cap, ops)| {
+            // vary the head-buffer capacity so both the buffered and flush-to-chunk paths are hit
+            let capacity = 1 + cap % 64;
+            let mut builder = ByteVec::builder(capacity);
+            let mut model: Vec<u8> = Vec::new();
+            for op in &ops {
+                match op {
+                    BuilderOp::PutSlice(d) => {
+                        builder.put_slice(d);
+                        model.extend_from_slice(d);
                     }
-                    BuilderReaderOperation::WriteBytes { len } => {
-                        let len = len as usize;
-                        let data: Vec<u8> = (&mut byte_source).take(len).collect();
-                        oracle.extend(data.iter());
-                        builder.put_bytes(Bytes::from(data));
+                    BuilderOp::PutBytes(d) => {
+                        builder.put_bytes(Bytes::from(d.clone()));
+                        model.extend_from_slice(d);
                     }
-                    BuilderReaderOperation::Append { len } => {
-                        let len = len as usize;
-                        let data: Vec<u8> = (&mut byte_source).take(len).collect();
-                        oracle.extend(data.iter());
-                        let mut bv = ByteVec::new();
-                        bv.push_back(Bytes::from(data));
-                        builder.append(&mut bv);
+                    BuilderOp::PutBytesMut(d) => {
+                        builder.put_bytes_mut(BytesMut::from(&d[..]));
+                        model.extend_from_slice(d);
                     }
-                    BuilderReaderOperation::ReadPartialCopy { capacity: cap } => {
-                        let cap = cap as usize;
-
-                        // Read from builder using partial_copy_into with a limited dest
-                        let mut dest = BytesMut::with_capacity(cap);
-                        let mut limited = dest.with_write_limit(cap);
-                        let chunk = builder.partial_copy_into(&mut limited).unwrap();
-                        let _ = limited;
-
-                        // The dest should have been filled up to capacity (or all data)
-                        let expected_written = cap.min(oracle.len());
-                        let total_read = dest.len() + chunk.len();
-                        assert!(
-                            total_read <= expected_written,
-                            "read more than expected: {total_read} > {expected_written}"
-                        );
-
-                        // Verify dest bytes match oracle
-                        let oracle_slice = oracle.make_contiguous();
-                        assert_eq_dump!(&dest[..], &oracle_slice[..dest.len()]);
-
-                        // Verify trailing chunk matches oracle
-                        let chunk_offset = dest.len();
-                        assert_eq_dump!(
-                            &chunk[..],
-                            &oracle_slice[chunk_offset..chunk_offset + chunk.len()]
-                        );
-
-                        // Drain what we read from oracle
-                        oracle.drain(..total_read);
+                    BuilderOp::Append(d) => {
+                        let mut other: ByteVec = d.chunks(3).map(Bytes::copy_from_slice).collect();
+                        builder.append(&mut other);
+                        model.extend_from_slice(d);
                     }
-                    BuilderReaderOperation::ReadCopyInto { capacity: cap } => {
-                        let cap = cap as usize;
-
-                        // Read from builder using copy_into with a limited dest
-                        let mut dest = BytesMut::with_capacity(cap);
-                        {
-                            let mut limited = dest.with_write_limit(cap);
-                            builder.copy_into(&mut limited).unwrap();
-                        }
-
-                        let expected_written = cap.min(oracle.len());
-                        assert_eq!(
-                            dest.len(),
-                            expected_written,
-                            "copy_into should fill dest up to capacity"
-                        );
-
-                        let oracle_slice = oracle.make_contiguous();
-                        assert_eq_dump!(&dest[..], &oracle_slice[..dest.len()]);
-
-                        oracle.drain(..dest.len());
+                    BuilderOp::Extend(d) => {
+                        let other: ByteVec = d.chunks(3).map(Bytes::copy_from_slice).collect();
+                        builder.extend(&other);
+                        model.extend_from_slice(d);
                     }
-                    BuilderReaderOperation::ReadChunk { watermark } => {
-                        let watermark = watermark as usize;
-
-                        let chunk = builder.read_chunk(watermark).unwrap();
-                        let chunk_len = chunk.len();
-
-                        if !oracle.is_empty() && watermark > 0 {
-                            let oracle_slice = oracle.make_contiguous();
-                            assert_eq_dump!(&chunk[..], &oracle_slice[..chunk_len]);
-                        }
-
-                        oracle.drain(..chunk_len);
+                    BuilderOp::SplitTo(n) => {
+                        let k = n % (model.len() + 1);
+                        let front = builder.split_to(k).unwrap();
+                        assert_eq!(front, &model[..k], "split_to({k}) front");
+                        model.drain(..k);
+                    }
+                    BuilderOp::Split => {
+                        let taken = builder.split();
+                        assert_eq!(taken, &model[..], "split takes all");
+                        model.clear();
+                        assert!(builder.is_empty());
+                    }
+                    BuilderOp::WriteWithLenPrefix(d) => {
+                        builder.write_with_len_prefix(|w| w.put_slice(d));
+                        model.extend_from_slice(&(d.len() as u64).to_be_bytes());
+                        model.extend_from_slice(d);
+                    }
+                    BuilderOp::SetInlineThreshold(t) => {
+                        builder = builder.with_inline_threshold(t % 32);
                     }
                 }
-
+                assert_eq!(builder.len(), model.len(), "len after {op:?}");
                 assert_eq!(
-                    builder.buffered_len(),
-                    oracle.len(),
-                    "length mismatch after operation"
+                    builder.is_empty(),
+                    model.is_empty(),
+                    "is_empty after {op:?}"
                 );
             }
-
-            // Drain remaining and verify
-            let mut dest = ByteVec::new();
-            builder.copy_into(&mut dest).unwrap();
-            let oracle_bytes: Vec<u8> = oracle.into();
-            assert_eq_dump!(dest, &oracle_bytes[..]);
+            let built = builder.finish();
+            assert_eq!(built, model, "finish bytes");
         });
 }
 
 #[test]
-fn builder_storage_test() {
-    let mut builder = Builder::new(4);
+fn advance_across_deep_tree() {
+    let n = PROMOTE_AT * 3;
+    let mut rope = ByteVec::new();
+    let mut expected = Vec::new();
+    for i in 0..n {
+        let b = [(i % 251) as u8; 4];
+        rope.push_back(chunk(&b));
+        expected.extend_from_slice(&b);
+    }
+    // consume a prime-sized bite repeatedly and compare the tail each time
+    let mut consumed = 0;
+    while consumed < expected.len() {
+        let step = 37.min(expected.len() - consumed);
+        rope.advance(step).unwrap();
+        consumed += step;
+        assert_eq!(rope, &expected[consumed..]);
+    }
+    assert!(rope.is_empty());
+}
 
-    // Test put_slice with capacity boundaries
-    builder.put_slice(b"test");
-    builder.put_slice(b"more");
-    let result = builder.finish();
-    assert_eq!(result, b"testmore");
+/// Editing one byte of a *large shared* chunk must NOT copy the whole chunk: the chunk is split into a
+/// shared prefix + the one owned edited byte + a shared suffix. We prove the prefix/suffix are O(1)
+/// views of the original allocation via pointer identity, and that the shared original is untouched.
+#[test]
+fn set_byte_on_large_shared_chunk_splits_instead_of_copying() {
+    let big = Bytes::from(alloc::vec![7u8; COW_SPLIT_ABOVE * 4]);
+    let base = big.as_ptr();
+    let mut rope = ByteVec::new();
+    rope.push_back(big.clone()); // rc >= 2: `big` + the rope share the allocation
 
-    // Test put_bytes and put_bytes_mut
-    let mut builder = Builder::default();
-    builder.put_bytes(Bytes::from_static(b"hello"));
-    builder.put_bytes_mut({
-        let mut b = BytesMut::new();
-        b.extend_from_slice(b"world");
-        b
-    });
-    let result = builder.finish();
-    assert_eq!(result, b"helloworld");
+    let at = COW_SPLIT_ABOVE * 2 + 5;
+    rope.set_byte(at, 0xFF).unwrap();
 
-    // Test uninit_slice
-    let mut builder = Builder::new(4);
-    builder
-        .put_uninit_slice::<_, std::io::Error>(4, |slice| {
-            slice.copy_from_slice(b"test");
-            Ok(())
+    // Content correct; the shared original is untouched (copy-on-write).
+    assert_eq!(rope.byte_at(at), Some(0xFF));
+    assert_eq!(rope.byte_at(0), Some(7));
+    assert_eq!(big[at], 7);
+
+    // Proof of bounded copy: prefix and suffix are shared slices of `big` (same backing pointer); only
+    // the 1-byte middle is freshly owned.
+    let chunks: alloc::vec::Vec<&Bytes> = rope.chunks().collect();
+    assert_eq!(
+        chunks.len(),
+        3,
+        "chunk split into prefix / edited byte / suffix"
+    );
+    assert_eq!(chunks[0].as_ptr(), base);
+    assert_eq!(chunks[0].len(), at);
+    assert_eq!(chunks[1].len(), 1);
+    assert_eq!(chunks[2].as_ptr(), unsafe { base.add(at + 1) });
+
+    let mut expect = alloc::vec![7u8; COW_SPLIT_ABOVE * 4];
+    expect[at] = 0xFF;
+    assert_eq!(rope, expect);
+    rope.check_invariants();
+}
+
+/// A shared chunk at or below the threshold is copied whole (one chunk, no fragmentation); a unique
+/// chunk of any size is edited fully in place (no split, no copy).
+#[test]
+fn set_byte_small_shared_copies_whole_and_unique_edits_in_place() {
+    // Small shared chunk -> whole copy, stays one chunk.
+    let small = Bytes::from(alloc::vec![1u8; COW_SPLIT_ABOVE]);
+    let mut rope = ByteVec::new();
+    rope.push_back(small.clone());
+    rope.set_byte(10, 2).unwrap();
+    assert_eq!(
+        rope.chunks().count(),
+        1,
+        "small shared chunk stays one chunk"
+    );
+    assert_eq!(small[10], 1, "original untouched");
+
+    // Large UNIQUE chunk -> in place, still one chunk (try_into_mut succeeds).
+    let mut rope2 = ByteVec::new();
+    rope2.push_back(Bytes::from(alloc::vec![3u8; COW_SPLIT_ABOVE * 4]));
+    let ptr = rope2.get(0).unwrap().as_ptr();
+    rope2.set_byte(999, 4).unwrap();
+    assert_eq!(rope2.chunks().count(), 1, "unique chunk edited in place");
+    assert_eq!(
+        rope2.get(0).unwrap().as_ptr(),
+        ptr,
+        "same allocation, mutated in place"
+    );
+    assert_eq!(rope2.byte_at(999), Some(4));
+}
+
+/// `replace` (equal-length overwrite) of a small span inside a large shared chunk is likewise bounded:
+/// the untouched prefix/suffix are shared, only the overwritten span is materialized.
+#[test]
+fn replace_small_span_in_large_shared_chunk_is_bounded() {
+    let big = Bytes::from(alloc::vec![0u8; COW_SPLIT_ABOVE * 4]);
+    let base = big.as_ptr();
+    let mut rope = ByteVec::new();
+    rope.push_back(big.clone());
+
+    let at = COW_SPLIT_ABOVE * 2;
+    rope.replace(at..at + 4, &b"abcd"[..]).unwrap();
+
+    let chunks: alloc::vec::Vec<&Bytes> = rope.chunks().collect();
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(chunks[0].as_ptr(), base);
+    assert_eq!(chunks[0].len(), at);
+    assert_eq!(&chunks[1][..], b"abcd");
+    assert_eq!(chunks[2].as_ptr(), unsafe { base.add(at + 4) });
+    assert_eq!(big[at], 0, "shared original untouched");
+    rope.check_invariants();
+}
+
+/// Bounded copy-on-write in the DEEP tier: large (>4 KiB) shared chunks living inside the tree are
+/// split on edit, which grows leaf blocks and — on overflow — splits leaves and propagates the split
+/// up the spine. `check_invariants` validates the whole rebalance; the shared snapshot proves COW.
+#[test]
+fn set_byte_bounded_cow_in_tree_rebalances_and_preserves_sharing() {
+    let mut rope = ByteVec::new();
+    let mut flat: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    for i in 0..80u32 {
+        let (len, val) = if i % 7 == 0 {
+            (COW_SPLIT_ABOVE * 2 + 3, i as u8) // big: lands in the tree once flushed
+        } else {
+            (5usize, i as u8)
+        };
+        rope.push_back(Bytes::from(alloc::vec![val; len]));
+        flat.resize(flat.len() + len, val);
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+
+    let snapshot = rope.clone(); // shares every chunk -> every edit is copy-on-write
+    let orig_flat = flat.clone();
+
+    for &off in &[
+        3usize,
+        flat.len() / 3,
+        flat.len() / 2,
+        COW_SPLIT_ABOVE + 1,
+        flat.len() - 1,
+    ] {
+        rope.set_byte(off, 0xEE).unwrap();
+        flat[off] = 0xEE;
+        rope.check_invariants(); // catches any bad cache/height/fanout after leaf & branch splits
+    }
+    assert_eq!(rope, flat);
+    assert_eq!(snapshot, orig_flat, "COW: the shared snapshot is untouched");
+}
+
+/// Stress the leaf→branch→root split propagation: a multi-level tree of exclusively large shared
+/// chunks, where every edit splits a leaf. Enough edits overflow leaves into branch splits and grow
+/// the root's height. `check_invariants` validates fanout, cached sizes/totals/counts, and height at
+/// every step; the untouched snapshot confirms nothing aliased through the rebalances.
+#[test]
+fn set_byte_tree_split_propagation_stress() {
+    let clen = COW_SPLIT_ABOVE + 1; // just over threshold -> always splits when shared
+    let n = FANOUT * FANOUT + 40; // forces a height >= 2 tree with a wide root branch
+    let mut rope = ByteVec::new();
+    for i in 0..n {
+        rope.push_back(Bytes::from(alloc::vec![(i % 251) as u8; clen]));
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+
+    let snapshot = rope.clone(); // every chunk shared -> every edit is a bounded COW split
+    let base_len = rope.len();
+
+    // Edit a byte in ~60 chunks spread across the whole tree; each shared-chunk edit splits its leaf.
+    for k in 0..60usize {
+        let off = (k * clen * 17 + 3) % base_len; // scattered, deterministic
+        rope.set_byte(off, 0xC3).unwrap();
+        rope.check_invariants(); // fanout / cache / height must hold after each split cascade
+        assert_eq!(rope.byte_at(off), Some(0xC3), "edit {k} at {off}");
+    }
+    // Length is invariant under set_byte; the shared original never changed a byte (COW).
+    assert_eq!(rope.len(), base_len);
+    assert_eq!(snapshot.len(), base_len);
+    assert_eq!(snapshot.byte_at(3), Some(0));
+}
+
+/// RED reproducer (breaker-bytevec): an equal-length `replace` of a SMALL span inside a large
+/// SHARED chunk that lives in the TREE copies the WHOLE chunk — `Node::overwrite`'s leaf arm calls
+/// `overwrite_one`, whose shared path is `BytesMut::from(&shared[..])` (unbounded). The flat tier
+/// and the deep head/tail deques use the bounded `cow_edit` split instead (shared prefix/suffix,
+/// copy bounded by the edited span — pointer-identity-proven by
+/// `replace_small_span_in_large_shared_chunk_is_bounded`), and tree `set_byte` is ALREADY bounded.
+/// Observed: a 4-byte overwrite of a shared 16 KiB tree chunk leaves 0 chunks sharing the original
+/// allocation (whole chunk copied); a 1-byte overwrite of a shared 1 GiB tree chunk would copy
+/// 1 GiB. Expected (parity with every other tier): shared prefix/suffix views remain. Fix shape:
+/// switch `Node::overwrite`'s leaf arm to `cow_edit` + the existing `finish_leaf`/`InsertResult`
+/// split plumbing (byte totals conserved; only chunk counts change).
+#[test]
+fn tree_overwrite_small_span_in_large_shared_chunk_is_bounded() {
+    // A large shared chunk that lands INSIDE the tree (not the buffered ends).
+    let big = Bytes::from(alloc::vec![7u8; COW_SPLIT_ABOVE * 4]);
+    let base = big.as_ptr() as usize;
+    let mut rope = ByteVec::new();
+    for i in 0..(PROMOTE_AT + 1) {
+        if i == 5 {
+            rope.push_back(big.clone());
+        } else {
+            rope.push_back(Bytes::from(alloc::vec![i as u8; 4]));
+        }
+    }
+    assert!(matches!(rope.repr, Repr::Deep(_)));
+    let at = 5 * 4 + COW_SPLIT_ABOVE; // inside the big chunk
+    // Equal-length overwrite of 4 bytes (UC1-3 path -> Node::overwrite in the tree).
+    rope.replace(at..at + 4, &b"abcd"[..]).unwrap();
+    // Content must be right regardless (and is — this part passes today).
+    assert_eq!(rope.byte_at(at), Some(b'a'));
+    assert_eq!(rope.byte_at(at + 4), Some(7));
+    assert_eq!(big[at], 7, "shared original untouched");
+    // Bounded COW leaves shared prefix/suffix views into big's allocation, as the flat tier does.
+    let shared_views = rope
+        .chunks()
+        .filter(|c| {
+            let p = c.as_ptr() as usize;
+            p >= base && p < base + COW_SPLIT_ABOVE * 4
         })
-        .unwrap();
-    let result = builder.finish();
-    assert_eq!(result, b"test");
+        .count();
+    assert!(
+        shared_views > 0,
+        "tree-level equal-length overwrite copied the WHOLE shared chunk (unbounded COW)"
+    );
+}
+
+/// The public trait impls callers rely on: `From<String>`, `Extend<Vec<u8>>`, the
+/// `PartialEq<[Bytes]>` family, and `From<ByteVecError> for std::io::Error`.
+#[test]
+fn public_trait_impl_surface() {
+    // From<String>
+    let from_string = ByteVec::from(String::from("hello"));
+    assert_eq!(from_string, b"hello");
+
+    // Extend<Vec<u8>>
+    let mut r = ByteVec::from(b"a");
+    r.extend([alloc::vec![b'b', b'c'], alloc::vec![b'd']]);
+    assert_eq!(r, b"abcd");
+
+    // PartialEq<[Bytes]> / <&[Bytes]> / <[Bytes; N]> / <&[Bytes; N]> — chunking-independent.
+    let rope: ByteVec = [chunk(b"foo"), chunk(b"bar")].into_iter().collect();
+    let chunks_arr = [Bytes::from_static(b"foo"), Bytes::from_static(b"bar")];
+    assert_eq!(rope, chunks_arr); // [Bytes; N]
+    assert_eq!(rope, &chunks_arr); // &[Bytes; N]
+    assert_eq!(rope, chunks_arr[..]); // [Bytes]
+    assert_eq!(rope, &chunks_arr[..]); // &[Bytes]
+    // Different chunking, same bytes, still equal (content compare, not chunk-identity).
+    let one_chunk = [Bytes::from_static(b"foobar")];
+    assert_eq!(rope, one_chunk[..]);
+    // Inequality is detected.
+    let wrong = [Bytes::from_static(b"foo"), Bytes::from_static(b"baz")];
+    assert!(rope != wrong);
+
+    // From<ByteVecError> for std::io::Error maps OutOfBounds -> UnexpectedEof.
+    let io_err: std::io::Error = ByteVecError::OutOfBounds(7).into();
+    assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+mod tag_macro_expands {
+    // The `static_bytevec_tag!` macro must expand at an arbitrary module path.
+    crate::static_bytevec_tag!(crate::tagged);
+}
+
+/// The public type names all resolve: `ByteVec` / `ByteVecError` / `ChunkIter` / `DrainIter` /
+/// `static_bytevec_tag!` are all reachable from the crate root.
+#[test]
+fn public_names_resolve() {
+    // ByteVec == ByteVec
+    let v: crate::ByteVec = crate::ByteVec::from(b"hello");
+    assert_eq!(v, b"hello");
+
+    // ByteVecError == ByteVecError
+    let e: crate::ByteVecError = crate::ByteVecError::OutOfBounds(3);
+    assert_eq!(e, ByteVecError::OutOfBounds(3));
+
+    // ChunkIter<'_> == Chunks<'_>
+    let rope: ByteVec = [chunk(b"ab"), chunk(b"cd")].into_iter().collect();
+    let it: crate::ChunkIter<'_> = rope.chunks();
+    assert_eq!(it.count(), 2);
+
+    // DrainIter == IntoChunks
+    let di: crate::DrainIter = rope.into_iter();
+    assert_eq!(di.count(), 2);
+
+    // static_bytevec_tag! machinery tracks the byte budget.
+    let tagged: Tagged<tag_macro_expands::Tag> = ByteVec::from(b"hi!").tag(&tag_macro_expands::Tag);
+    assert_eq!(tag_macro_expands::Tag::current(), 3);
+    drop(tagged);
+    assert_eq!(tag_macro_expands::Tag::current(), 0);
 }
