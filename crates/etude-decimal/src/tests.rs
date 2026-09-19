@@ -697,6 +697,14 @@ fn check_parse(s: &str) -> Option<(Decimal, BigDecimal)> {
 }
 
 #[test]
+// The bolero property harness spins forever under miri (its slow interpreter times many generated
+// candidates); the parse / value-agreement / round-trip / cmp path is covered under miri by the
+// deterministic tests (`parses_exact_large_values`, `rejects_malformed`, `comparison_is_exact`,
+// `parse_over_non_contiguous_bytes`). Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; parse/cmp covered by deterministic tests"
+)]
 fn differential_parse_and_cmp() {
     bolero::check!()
         .with_type::<alloc::vec::Vec<alloc::vec::Vec<u8>>>()
@@ -722,6 +730,14 @@ fn differential_parse_and_cmp() {
 }
 
 #[test]
+// The bolero property harness spins forever under miri; the raw-byte no-panic / chunked-equality /
+// round-trip contract it pins is covered under miri by the deterministic tests (`rejects_malformed`,
+// `parse_over_non_contiguous_bytes`) and holds by construction (exponent digits capped, checked_sub).
+// Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; raw-byte parse covered by deterministic tests"
+)]
 fn parse_raw_arbitrary_bytes_never_panics() {
     // `parse`/`parse_prefix` consume a raw `Iterator<Item = u8>` (not `&str`), so a consumer — e.g. the
     // JSON tokenizer, which hands us the byte region it scanned as a number — can feed arbitrary bytes,
@@ -790,6 +806,13 @@ fn make_num(neg: bool, int: u64, frac: Option<u32>, exp: Option<i64>) -> String 
 }
 
 #[test]
+// The bolero property harness spins forever under miri; the structured-number parse / render / value
+// path is covered under miri by the deterministic tests (`parses_exact_large_values`,
+// `canonicalizes_trailing_zeros`, `scientific_render_round_trips_large_exponents`). Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; structured numbers covered by deterministic tests"
+)]
 fn differential_structured_numbers() {
     // Guaranteed-valid decimal literals built from typed fields, for dense cmp/round-trip coverage across
     // sign, integer, fractional, and exponent components.
@@ -855,6 +878,13 @@ fn apply_op(
 }
 
 #[test]
+// The bolero property harness spins forever under miri; the add / sub / mul paths it drives are covered
+// under miri by the deterministic tests (`exact_arithmetic`, `native_arith_tier_boundaries`).
+// Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; arithmetic covered by deterministic tests"
+)]
 fn differential_arithmetic() {
     // Seeds are valid decimal literals (exponent bounded to i8 so exponent-alignment scaling stays modest);
     // ops are (opcode, reg_a, reg_b) triples. add/sub/mul are all exact in bigdecimal too, so the
@@ -892,6 +922,12 @@ fn differential_arithmetic() {
 }
 
 #[test]
+// The bolero property harness spins forever under miri; the exact / rounded division paths it drives are
+// covered under miri by the deterministic tests (`rounded_division`, `exact_arithmetic`). Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; division covered by deterministic tests"
+)]
 fn differential_division() {
     // Exact `div` is self-checked (q * b == a exactly, via our own exact mul). `div_round` is checked
     // against bigdecimal: divide (bigdecimal `/` gives an exact-or-100-digit quotient) then round to the
