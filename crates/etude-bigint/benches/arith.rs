@@ -271,6 +271,267 @@ fn bench_from_i64(c: &mut Criterion) {
     g.finish();
 }
 
+/// Bench a unary op on both implementations across `tiers`, with same-width operands.
+fn unary(
+    c: &mut Criterion,
+    name: &str,
+    tiers: &[(&str, usize)],
+    ours: impl Fn(&Big) -> Big,
+    theirs: impl Fn(&BigInt) -> BigInt,
+) {
+    let mut g = group(c, name);
+    let mut rng = Rng(0x243f_6a88_85a3_08d3);
+    for &(label, nbytes) in tiers {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(ours(black_box(a))))
+        });
+        g.bench_with_input(BenchmarkId::new("num-bigint", label), &na, |bch, a| {
+            bch.iter(|| black_box(theirs(black_box(a))))
+        });
+    }
+    g.finish();
+}
+
+/// `neg` — sign flip with a magnitude clone. At 64b it is clone-bound (the one-limb `Vec` allocation),
+/// like `clone`/`from_i64`; the inline small-value repr would close it (etude-rational sees the same at
+/// its `neg` cell).
+fn bench_neg(c: &mut Criterion) {
+    unary(c, "neg", TIERS, |a| a.neg(), |a| -a);
+}
+
+/// `abs` — like `neg`, a magnitude clone with the sign forced non-negative; 64b is clone-bound.
+fn bench_abs(c: &mut Criterion) {
+    use num_traits::Signed;
+    unary(c, "abs", TIERS, |a| a.abs(), |a| a.abs());
+}
+
+/// `bit_len` — the value's bit width (position of the top set bit). O(1): the top limb plus a leading-
+/// zero count. num-bigint's counterpart is `BigInt::bits`.
+fn bench_bit_len(c: &mut Criterion) {
+    let mut g = group(c, "bit_len");
+    let mut rng = Rng(0xb7e1_5162_8aed_2a6a);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).bit_len()))
+        });
+        g.bench_with_input(BenchmarkId::new("num-bigint", label), &na, |bch, a| {
+            bch.iter(|| black_box(black_box(a).bits()))
+        });
+    }
+    g.finish();
+}
+
+/// `rem_u64` — remainder by a single native-limb divisor (the reciprocal single-limb scan, no `Big`
+/// remainder allocated). Differential against num-bigint's `%` with a one-limb `BigInt` divisor.
+fn bench_rem_u64(c: &mut Criterion) {
+    let mut g = group(c, "rem_u64");
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let d: u64 = 0x8000_0000_0000_002d; // odd, top bit set (exercises the reciprocal path, no normalize shift)
+    let nd = BigInt::from(d);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).rem_u64(black_box(d))))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &(na, nd.clone()),
+            |bch, (a, d)| bch.iter(|| black_box(black_box(a) % black_box(d))),
+        );
+    }
+    g.finish();
+}
+
+/// `to_i64_checked` — read a small value back into a native `i64` (or `None` on overflow). Differential
+/// against num-bigint's `ToPrimitive::to_i64`. Benched at a value that fits (the read path runs to
+/// completion) and at a value that overflows (early reject).
+fn bench_to_i64_checked(c: &mut Criterion) {
+    use num_traits::ToPrimitive;
+    let mut g = group(c, "to_i64_checked");
+    let fits = Big::from_i64(-1_234_567_890_123_456_789);
+    let nfits = to_num(&fits);
+    let mut rng = Rng(0xc0ff_ee00_1234_5678);
+    let wide = rng.big(32); // 256b — well past i64, so both reject early
+    let nwide = to_num(&wide);
+    g.bench_with_input(BenchmarkId::new("etude", "fits"), &fits, |bch, a| {
+        bch.iter(|| black_box(black_box(a).to_i64_checked()))
+    });
+    g.bench_with_input(BenchmarkId::new("num-bigint", "fits"), &nfits, |bch, a| {
+        bch.iter(|| black_box(black_box(a).to_i64()))
+    });
+    g.bench_with_input(BenchmarkId::new("etude", "overflow"), &wide, |bch, a| {
+        bch.iter(|| black_box(black_box(a).to_i64_checked()))
+    });
+    g.bench_with_input(
+        BenchmarkId::new("num-bigint", "overflow"),
+        &nwide,
+        |bch, a| bch.iter(|| black_box(black_box(a).to_i64())),
+    );
+    g.finish();
+}
+
+/// `is_even` — parity from the low bit of the low limb (O(1)). Differential against num-integer's
+/// `Integer::is_even`. etude-decimal's normalize leans on this to short-circuit ~half its `divmod(10)`s.
+fn bench_is_even(c: &mut Criterion) {
+    use num_integer::Integer;
+    let mut g = group(c, "is_even");
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).is_even()))
+        });
+        g.bench_with_input(BenchmarkId::new("num-bigint", label), &na, |bch, a| {
+            bch.iter(|| black_box(Integer::is_even(black_box(a))))
+        });
+    }
+    g.finish();
+}
+
+/// Two's-complement little-endian byte encode + decode round-trip (the serde/wire path). Differential
+/// against num-bigint's `to_signed_bytes_le` + `from_signed_bytes_le`.
+fn bench_twos_complement_roundtrip(c: &mut Criterion) {
+    let mut g = group(c, "twos_complement_roundtrip");
+    let mut rng = Rng(0x1319_8a2e_0370_7344);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| {
+                black_box(Big::from_le_twos_complement_bytes(
+                    &black_box(a).to_le_twos_complement_bytes(),
+                ))
+            })
+        });
+        g.bench_with_input(BenchmarkId::new("num-bigint", label), &na, |bch, a| {
+            bch.iter(|| {
+                black_box(BigInt::from_signed_bytes_le(
+                    &black_box(a).to_signed_bytes_le(),
+                ))
+            })
+        });
+    }
+    g.finish();
+}
+
+/// `write_decimal` into a reused, pre-grown sink — isolates the digit-emission cost from the fresh
+/// allocation `to_decimal_string` pays each call (the `Display`-into-existing-buffer path). etude-only:
+/// num-bigint has no sink-writing decimal emitter (its `Display` allocates, and is benched under
+/// `to_decimal_string`).
+fn bench_write_decimal(c: &mut Criterion) {
+    let mut g = group(c, "write_decimal");
+    let mut rng = Rng(0x8979_fb1b_d130_5ba3);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let mut sink = String::with_capacity(2 * nbytes + 8);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| {
+                sink.clear();
+                black_box(black_box(a).write_decimal(&mut sink)).unwrap();
+                black_box(sink.len())
+            })
+        });
+    }
+    g.finish();
+}
+
+/// The sign-magnitude byte codecs that have no num-bigint counterpart (etude's canonical map-key /
+/// small-scalar forms): the byte-slice comparator and the scalar `i64`/`i128` readers and encoder.
+/// Absolute timings (no differential column) — these are etude's own wire helpers.
+fn bench_sign_magnitude_codecs(c: &mut Criterion) {
+    let mut g = group(c, "sign_magnitude_codecs");
+    let mut rng = Rng(0x4528_21e6_38d0_1377);
+
+    // cmp_sign_magnitude_bytes across tiers: two values equal except in the low magnitude byte, so the
+    // comparator scans the full width (worst case).
+    for &(label, nbytes) in TIERS {
+        let mut sm = Vec::with_capacity(1 + nbytes);
+        sm.push(0);
+        sm.extend_from_slice(&rng.mag_bytes(nbytes));
+        let a = sm.clone();
+        sm[1] ^= 1;
+        let b = sm;
+        g.bench_with_input(
+            BenchmarkId::new("cmp_bytes", label),
+            &(a, b),
+            |bch, (a, b)| {
+                bch.iter(|| black_box(Big::cmp_sign_magnitude_bytes(black_box(a), black_box(b))))
+            },
+        );
+    }
+
+    // Scalar `i64`/`i128` readers + the `i128` encoder, on canonical sign-magnitude bytes.
+    let i64_bytes = Big::from_i64(-1_234_567_890_123_456_789).to_sign_magnitude_bytes();
+    g.bench_with_input(
+        BenchmarkId::new("i64_from_bytes", "scalar"),
+        &i64_bytes,
+        |bch, b| bch.iter(|| black_box(Big::i64_checked_from_sign_magnitude_bytes(black_box(b)))),
+    );
+    let i128_v: i128 = -123_456_789_012_345_678_901_234_567_890;
+    let mut i128_buf = [0u8; 17];
+    let n = Big::i128_to_sign_magnitude_bytes_into(i128_v, &mut i128_buf).unwrap();
+    let i128_bytes = i128_buf[..n].to_vec();
+    g.bench_with_input(
+        BenchmarkId::new("i128_from_bytes", "scalar"),
+        &i128_bytes,
+        |bch, b| bch.iter(|| black_box(Big::i128_from_sign_magnitude_bytes(black_box(b)))),
+    );
+    g.bench_function("i128_to_bytes/scalar", |bch| {
+        let mut buf = [0u8; 17];
+        bch.iter(|| {
+            black_box(Big::i128_to_sign_magnitude_bytes_into(
+                black_box(i128_v),
+                &mut buf,
+            ))
+        })
+    });
+    g.finish();
+}
+
+/// The alloc-free `to_sign_magnitude_bytes_into` encoder (writes into a caller buffer), across tiers.
+/// etude-only — the paired `from_sign_magnitude_bytes` decode is benched in `sign_magnitude_roundtrip`.
+fn bench_to_sign_magnitude_into(c: &mut Criterion) {
+    let mut g = group(c, "to_sign_magnitude_into");
+    let mut rng = Rng(0xbe54_66cf_34e9_0c6c);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let mut buf = vec![0u8; nbytes + 2];
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).to_sign_magnitude_bytes_into(&mut buf)))
+        });
+    }
+    g.finish();
+}
+
+/// The O(1) predicates and constructors that have no meaningful reference counterpart to race, benched
+/// at a single representative width to confirm they stay constant-time: `zero`, `is_zero`,
+/// `is_negative`, `is_odd`, `byte_len`. (`is_even` and `bit_len` get their own differential groups.)
+fn bench_o1_accessors(c: &mut Criterion) {
+    let mut g = group(c, "o1_accessors");
+    let mut rng = Rng(0xc97c_50dd_3f84_d5b5);
+    let a = rng.big(128); // 1024b: a wide value, so any O(n) mistake would show
+    g.bench_function("zero", |bch| bch.iter(|| black_box(Big::zero())));
+    g.bench_with_input(BenchmarkId::new("is_zero", "1024b"), &a, |bch, a| {
+        bch.iter(|| black_box(black_box(a).is_zero()))
+    });
+    g.bench_with_input(BenchmarkId::new("is_negative", "1024b"), &a, |bch, a| {
+        bch.iter(|| black_box(black_box(a).is_negative()))
+    });
+    g.bench_with_input(BenchmarkId::new("is_odd", "1024b"), &a, |bch, a| {
+        bch.iter(|| black_box(black_box(a).is_odd()))
+    });
+    g.bench_with_input(BenchmarkId::new("byte_len", "1024b"), &a, |bch, a| {
+        bch.iter(|| black_box(black_box(a).byte_len()))
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -284,6 +545,17 @@ criterion_group!(
     bench_to_decimal,
     bench_sign_magnitude_roundtrip,
     bench_clone,
-    bench_from_i64
+    bench_from_i64,
+    bench_neg,
+    bench_abs,
+    bench_bit_len,
+    bench_rem_u64,
+    bench_to_i64_checked,
+    bench_is_even,
+    bench_twos_complement_roundtrip,
+    bench_write_decimal,
+    bench_sign_magnitude_codecs,
+    bench_to_sign_magnitude_into,
+    bench_o1_accessors
 );
 criterion_main!(benches);
