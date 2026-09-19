@@ -555,6 +555,84 @@ impl ByteVec {
         }
     }
 
+    /// Returns `true` if the byte content begins with `prefix`.
+    ///
+    /// Chunk-aware and copy-free: walks the leading chunks comparing against `prefix` (like the
+    /// content `eq`), stopping as soon as `prefix` is consumed or a byte differs — the buffer is
+    /// never linearized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use etude_bytevec::ByteVec;
+    /// use bytes::Bytes;
+    ///
+    /// let v: ByteVec = [Bytes::from_static(b"tr"), Bytes::from_static(b"ue")].into_iter().collect();
+    /// assert!(v.starts_with(b"true"));
+    /// assert!(v.starts_with(b"tr"));
+    /// assert!(!v.starts_with(b"false"));
+    /// assert!(v.starts_with(b"")); // every buffer starts with the empty literal
+    /// ```
+    pub fn starts_with(&self, prefix: &[u8]) -> bool {
+        if prefix.len() > self.len {
+            return false;
+        }
+        let mut rest = prefix;
+        for chunk in self.chunks() {
+            if rest.is_empty() {
+                break;
+            }
+            let n = chunk.len().min(rest.len());
+            if chunk[..n] != rest[..n] {
+                return false;
+            }
+            rest = &rest[n..];
+        }
+        rest.is_empty()
+    }
+
+    /// Returns `true` if the byte content ends with `suffix`.
+    ///
+    /// Chunk-aware and copy-free: skips whole leading chunks by length, then compares the trailing
+    /// `suffix.len()` bytes chunk-by-chunk — the buffer is never linearized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use etude_bytevec::ByteVec;
+    /// use bytes::Bytes;
+    ///
+    /// let v: ByteVec = [Bytes::from_static(b"nu"), Bytes::from_static(b"ll")].into_iter().collect();
+    /// assert!(v.ends_with(b"null"));
+    /// assert!(v.ends_with(b"ll"));
+    /// assert!(!v.ends_with(b"true"));
+    /// assert!(v.ends_with(b"")); // every buffer ends with the empty literal
+    /// ```
+    pub fn ends_with(&self, suffix: &[u8]) -> bool {
+        // Bytes to skip before the compared tail; `None` ⇒ `suffix` is longer than the buffer.
+        let Some(mut skip) = self.len.checked_sub(suffix.len()) else {
+            return false;
+        };
+        let mut rest = suffix;
+        for chunk in self.chunks() {
+            let mut chunk: &[u8] = chunk;
+            if skip > 0 {
+                let s = skip.min(chunk.len());
+                chunk = &chunk[s..];
+                skip -= s;
+                if chunk.is_empty() {
+                    continue;
+                }
+            }
+            let n = chunk.len().min(rest.len());
+            if chunk[..n] != rest[..n] {
+                return false;
+            }
+            rest = &rest[n..];
+        }
+        rest.is_empty()
+    }
+
     /// Moves all chunks out of `other` into the back of `self`, leaving `other` empty.
     ///
     /// Fast paths: O(1) when `self` is empty (swap); a cheap flat move when the combined size stays

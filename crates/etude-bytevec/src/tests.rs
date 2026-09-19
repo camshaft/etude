@@ -142,6 +142,69 @@ fn byte_at_matches_flat_in_both_tiers() {
     }
 }
 
+/// `starts_with` / `ends_with` against a `Vec<u8>` oracle, in both tiers, with the literal spanning
+/// chunk boundaries. Covers empty literals, exact-length, and longer-than-buffer.
+#[test]
+fn starts_ends_with_match_flat_in_both_tiers() {
+    for n in [4usize, PROMOTE_AT * 3 + 7] {
+        let mut rope = ByteVec::new();
+        let mut model: Vec<u8> = Vec::new();
+        for i in 0..n {
+            let b = [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8];
+            rope.push_back(chunk(&b));
+            model.extend_from_slice(&b);
+        }
+        let total = model.len();
+
+        // Prefixes/suffixes of several lengths, incl. spanning chunk boundaries, plus edge cases.
+        let lens = [
+            0usize,
+            1,
+            2,
+            3,
+            5,
+            8,
+            total / 2,
+            total - 1,
+            total,
+            total + 1,
+        ];
+        for &k in &lens {
+            let want_prefix = k <= total;
+            let pref: Vec<u8> = model.iter().take(k).copied().collect();
+            // Only meaningful when k <= total; when k > total, `pref` is the whole buffer (< k), so
+            // starts_with must be false — build an over-long literal explicitly for that case.
+            if want_prefix {
+                assert!(rope.starts_with(&pref), "n={n} starts_with len={k}");
+                let suf: Vec<u8> = model.iter().rev().take(k).rev().copied().collect();
+                assert!(rope.ends_with(&suf), "n={n} ends_with len={k}");
+            } else {
+                // A literal longer than the whole buffer never matches.
+                let mut over = model.clone();
+                over.push(0xAB);
+                assert!(!rope.starts_with(&over), "n={n} over-long starts_with");
+                assert!(!rope.ends_with(&over), "n={n} over-long ends_with");
+            }
+        }
+
+        // Negatives: flip the last/first byte of an otherwise-matching literal.
+        if total >= 2 {
+            let mut bad_pref = model[..3.min(total)].to_vec();
+            *bad_pref.last_mut().unwrap() ^= 0xFF;
+            assert!(!rope.starts_with(&bad_pref), "n={n} mismatched prefix");
+            let mut bad_suf = model[total - 3.min(total)..].to_vec();
+            bad_suf[0] ^= 0xFF;
+            assert!(!rope.ends_with(&bad_suf), "n={n} mismatched suffix");
+        }
+
+        // Empty literal always matches; whole-buffer literal matches both ends.
+        assert!(rope.starts_with(b""));
+        assert!(rope.ends_with(b""));
+        assert!(rope.starts_with(&model));
+        assert!(rope.ends_with(&model));
+    }
+}
+
 #[test]
 fn set_byte_in_both_tiers_and_cow_preserves_shared() {
     for n in [3usize, PROMOTE_AT * 3 + 11] {
