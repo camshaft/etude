@@ -3,16 +3,16 @@
 
 //! Copy-avoiding JSON over the etude byte-rope.
 //!
-//! The point of this crate is to read JSON WITHOUT copying its bytes. [`Tokenizer`] walks a
-//! [`ByteVec`] and yields [`Token`]s that each reference a byte RANGE of that input rope (a
+//! The point of this crate is to read JSON without copying its bytes. [`Tokenizer`] walks a
+//! [`ByteVec`] and yields [`Token`]s that each reference a byte range of that input rope (a
 //! [`Span`]) rather than owning a copy of the bytes. A caller that wants the bytes takes an O(1)
 //! structural-sharing [`ByteVec::slice`] of the span; only a caller that needs a transformed value
 //! — an unescaped string, a parsed number — pays for materialization, and only then.
 //!
 //! # What the tokenizer does and does not do
-//! It is a LEXER, not a parser. It validates each token in isolation (a string's escapes, a number's
+//! It is a lexer, not a parser. It validates each token in isolation (a string's escapes, a number's
 //! grammar, a keyword's spelling) and reports the byte offset of the first malformed byte, but it
-//! does NOT enforce JSON's grammar between tokens: the sequence `] ,` tokenizes into two structural
+//! does not enforce JSON's grammar between tokens: the sequence `] ,` tokenizes into two structural
 //! tokens without complaint. Grammar and nesting are a parser's job (a later layer built on this
 //! iterator). Whitespace (space, tab, CR, LF) between tokens is skipped.
 //!
@@ -24,7 +24,7 @@
 //! - call [`Token::decode_string`] to materialize the unescaped `String` when escapes are present.
 //!
 //! # Spans reference the input
-//! Every [`Span`] is a half-open byte range `[start, end)` into the SAME rope the tokenizer was
+//! Every [`Span`] is a half-open byte range `[start, end)` into the same rope the tokenizer was
 //! created over. A span is meaningless against any other rope.
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -87,7 +87,7 @@ struct NumberInfo {
 
 /// A single JSON token: its class and the span of its bytes in the input rope.
 ///
-/// The fields are PRIVATE and not part of the stable API — construct tokens only by iterating a
+/// The fields are private and not part of the stable API — construct tokens only by iterating a
 /// [`Tokenizer`], and read them through the accessors so the representation stays free to change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
@@ -103,13 +103,13 @@ impl Token {
         self.kind
     }
 
-    /// The span of the token's full lexeme in the input rope. For a string this INCLUDES the
+    /// The span of the token's full lexeme in the input rope. For a string this includes the
     /// surrounding quotes; for every other token it is exactly the token's bytes.
     pub fn span(&self) -> Span {
         self.span
     }
 
-    /// For a [`TokenKind::String`] token, the span of its CONTENT between the quotes (no quotes);
+    /// For a [`TokenKind::String`] token, the span of its content between the quotes (no quotes);
     /// `None` for any other kind. When [`Token::string_has_escapes`] is `false`, a rope slice of this
     /// span is the string's exact bytes with no decoding needed.
     pub fn string_span(&self) -> Option<Span> {
@@ -129,7 +129,7 @@ impl Token {
     /// with surrogate-pair joining, …) into a fresh `String`. When the token has no escapes, prefer a
     /// zero-copy rope slice of [`Token::string_span`] instead of paying for this allocation.
     ///
-    /// `input` MUST be the rope this token was tokenized from; the content span is resolved against
+    /// `input` must be the rope this token was tokenized from; the content span is resolved against
     /// it. The token's content was validated during tokenization, so decoding does not fail.
     pub fn decode_string(&self, input: &ByteVec) -> Option<String> {
         let info = self.string?;
