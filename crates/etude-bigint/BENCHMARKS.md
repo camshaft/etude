@@ -72,14 +72,17 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | from_base_10_pow_k        | 1024b  | 240 ns    | 772 ns     | **0.31**  |
 | from_base_10_pow_k        | 4096b  | 2.32 µs   | 4.77 µs    | **0.49**  |
 
-We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), **cmp** (three of four
-tiers), and **to_decimal_string at 64b/1024b/4096b** (0.81× / 0.74× / 0.68×), and reach parity-or-better on
-**mul at 256b/1024b** and **sub at 256b**.
+We now beat num-bigint on **add**, **divmod**, **gcd**, **div_small**, and **from_base_10_pow_k** at
+every tier; on **cmp** at three of four tiers (parity at the fourth); on **to_decimal_string** at
+64b/1024b/4096b (0.81× / 0.74× / 0.68×); and on the **from_i128 / to_i128** pair. We reach
+parity-or-better on **mul at 256b/1024b** and **sub at 256b/1024b/4096b**. The remaining losses are the
+small-value construction paths (`clone` / `from_i64` and the 64b `sub`/`mul` tiers), `to_decimal_string`
+at 256b, and `mul`/`div_exact` at 4096b — see the gaps list.
 
-`clone` and `from_i64` are the small-value CONSTRUCTION paths: at 64b both trail num-bigint (2.20× /
+`clone` and `from_i64` are the small-value construction paths: at 64b both trail num-bigint (2.20× /
 1.77×) because a small `Big` heap-allocates its one-limb `Vec` where num-bigint has a small-value
 fast path; at ≥256b they are at parity (the allocation is amortized). Closing 64b needs an inline
-small-value magnitude repr — measured to fix clone/`from_i64` (2.20→~1.0×, 1.77→0.97×) but to REGRESS
+small-value magnitude repr — measured to fix clone/`from_i64` (2.20→~1.0×, 1.77→0.97×) but to _regress_
 add/mul (the `*_mag` kernels build a `Vec` that the inline form then has to copy), so it needs the
 kernels to emit inline results directly before it is a net win. Deferred behind that (see roadmap).
 
@@ -317,7 +320,7 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
    choice — num-bigint's small-value radix conversion is simply tighter here. Low headroom.
 2. **clone / from_i64 / neg / abs at 64b (2.20× / 1.77× / 2.19× / 1.80×).** All four are the same
    small-value path heap-allocating a one-limb `Vec`. An inline small-value magnitude repr fixes them
-   together (measured clone 2.20→~1.0×, from_i64 1.77→0.97×) but REGRESSES add/mul unless the arithmetic
+   together (measured clone 2.20→~1.0×, from_i64 1.77→0.97×) but _regresses_ add/mul unless the arithmetic
    kernels emit inline results directly — a larger change (below). The `neg`/`abs` backfill widens this
    item's payoff: etude-rational reports the same 64b loss at its `neg`/`abs` cells, so the one repr change
    closes those three rational cells as well.
@@ -341,7 +344,7 @@ num-bigint stays both the correctness oracle and the perf yardstick.
 
 ## Target notes: wasm / 32-bit
 
-The limb STORAGE is `u64` on every target — `wasm32` has native 64-bit integers, so add/sub/shift/cmp
+The limb storage is `u64` on every target — `wasm32` has native 64-bit integers, so add/sub/shift/cmp
 over u64 limbs are native there and the u64-limb win (half the limbs) holds. The one operation that
 would otherwise pay for emulation is the widening multiply: `u64 * u64 -> u128` lowers to a `__multi3`
 libcall on wasm. `wide_mul` avoids it — on 64-bit targets it is one native `u128` multiply, and on
