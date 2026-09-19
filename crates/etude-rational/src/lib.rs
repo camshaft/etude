@@ -222,14 +222,28 @@ impl Rational {
     }
 
     /// The decimal string `"num/den"` (e.g. `"-3/10"`), or just `"num"` when the value is an integer.
+    ///
+    /// Writes the components directly into ONE `String` via `Big::write_decimal` (a sink writer), so it
+    /// allocates only the result — no intermediate per-component `String`s. Equivalent to `self.to_string()`.
     pub fn to_decimal_string(&self) -> String {
-        if self.is_integer() {
-            return self.num.to_decimal_string();
-        }
-        let mut s = self.num.to_decimal_string();
-        s.push('/');
-        s.push_str(&self.den.to_decimal_string());
+        use core::fmt::Write;
+        let mut s = String::new();
+        // Writing into a String is infallible.
+        let _ = write!(s, "{self}");
         s
+    }
+}
+
+impl core::fmt::Display for Rational {
+    /// `num/den` (e.g. `-3/10`), or just `num` when the value is an integer. Writes the components
+    /// straight into the formatter via `Big::write_decimal` — no intermediate `String` allocation.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.num.write_decimal(f)?;
+        if !self.is_integer() {
+            f.write_str("/")?;
+            self.den.write_decimal(f)?;
+        }
+        Ok(())
     }
 }
 
