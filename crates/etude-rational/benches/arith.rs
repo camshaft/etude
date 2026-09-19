@@ -239,6 +239,40 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
+    // Mixed-magnitude operands: a small (i64-fitting) rational combined with a large one — e.g. nudging an
+    // accumulated big rational by a small correction. The small side can't use the native i128 path (the
+    // other operand exceeds i64), so this exercises the `Big` add/mul with one small and one wide operand.
+    {
+        for (name, big_nbytes) in [("add_mixed", 128usize), ("mul_mixed", 128usize)] {
+            let mut g = group(c, name);
+            let mut rng = Rng(0x51de_5def ^ (big_nbytes as u64));
+            let small =
+                Rational::from_ratio_i64(rng.i64_small(), rng.i64_small()).expect("nonzero den");
+            let large = rng.rat(big_nbytes);
+            let (rs, rl) = (to_ref(&small), to_ref(&large));
+            let is_add = name == "add_mixed";
+            g.bench_with_input(
+                BenchmarkId::new("etude", "48b×1024b"),
+                &(&small, &large),
+                |be, (s, l)| {
+                    be.iter(|| {
+                        black_box(if is_add {
+                            s.add(black_box(l))
+                        } else {
+                            s.mul(black_box(l))
+                        })
+                    })
+                },
+            );
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", "48b×1024b"),
+                &(&rs, &rl),
+                |be, (s, l)| be.iter(|| black_box(if is_add { *s + *l } else { *s * *l })),
+            );
+            g.finish();
+        }
+    }
+
     // Equal-denominator add/sub (a common real-workload pattern: accumulating fractions over a shared
     // denominator, or integer-valued rationals). Both implementations fast-path this, so it is a fair
     // fast-path-vs-fast-path measurement.

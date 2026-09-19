@@ -258,6 +258,11 @@ re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 28** — mixed-magnitude coverage: `add_mixed`/`mul_mixed` bench a small (i64-fitting) rational
+  against a 1024b one — a real workload (nudging an accumulated big rational by a small correction) that the
+  same-width tiers miss. Confirms no hidden loss when the native i128 path can't fire (the wide operand
+  forces the `Big` path): **add_mixed 0.41×, mul_mixed 0.63×** — the gcd-of-denominators add and
+  cross-reduce mul handle unbalanced operands well. Bench-only (coverage + regression guard); no code change.
 - **slice 27** — native `addsub_small` reduces over `gcd(b, d)` on the denominators (a `u64` hardware-divide
   gcd) instead of `gcd_u128` over the ~127-bit `(a*d ± c*b, b*d)` product: coprime denominators (common) ⇒
   already lowest-terms, skip the wide gcd (canonicalizing zero to 0/1); shared factor ⇒ the previous
