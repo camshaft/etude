@@ -581,45 +581,50 @@ impl core::iter::FusedIterator for Tokenizer<'_> {}
 /// escape is well-formed here; a `\u` value that is not a scalar (a lone surrogate) is replaced with
 /// U+FFFD rather than failing, since decoding is infallible by contract.
 fn decode_content(input: &ByteVec, content: Span) -> String {
-    let mut bytes: Vec<u8> = Vec::with_capacity(content.len());
-    let mut pos = content.start;
-    let end = content.end;
-    while pos < end {
-        let b = input.byte_at(pos).unwrap_or(0);
+    // Materialize the content span once into a contiguous buffer, then decode with plain indexing.
+    // `copy_to_bytes` is zero-copy when the content lies within a single rope leaf (its fast path);
+    // otherwise it is one O(len) copy. Either way decoding is O(len), versus O(len·log n) for a
+    // per-byte `byte_at` tree descent on a deep rope.
+    let buf = input.slice(content.range()).copy_to_bytes();
+    let src: &[u8] = &buf;
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
+    let mut pos = 0;
+    while pos < src.len() {
+        let b = src[pos];
         if b != b'\\' {
             // Copy the raw byte. Multi-byte UTF-8 sequences are copied byte-for-byte and reassembled
             // by the final `from_utf8` conversion.
-            bytes.push(b);
+            out.push(b);
             pos += 1;
             continue;
         }
         // Escape sequence.
-        let esc = input.byte_at(pos + 1).unwrap_or(0);
+        let esc = src.get(pos + 1).copied().unwrap_or(0);
         match esc {
-            b'"' => bytes.push(b'"'),
-            b'\\' => bytes.push(b'\\'),
-            b'/' => bytes.push(b'/'),
-            b'b' => bytes.push(0x08),
-            b'f' => bytes.push(0x0C),
-            b'n' => bytes.push(b'\n'),
-            b'r' => bytes.push(b'\r'),
-            b't' => bytes.push(b'\t'),
+            b'"' => out.push(b'"'),
+            b'\\' => out.push(b'\\'),
+            b'/' => out.push(b'/'),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0C),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
             b'u' => {
-                let hi = hex4(input, pos + 2);
+                let hi = hex4(src, pos + 2);
                 if (0xD800..=0xDBFF).contains(&hi)
-                    && input.byte_at(pos + 6) == Some(b'\\')
-                    && input.byte_at(pos + 7) == Some(b'u')
+                    && src.get(pos + 6) == Some(&b'\\')
+                    && src.get(pos + 7) == Some(&b'u')
                 {
                     // High surrogate followed by a `\u` escape — try to join a surrogate pair.
-                    let lo = hex4(input, pos + 8);
+                    let lo = hex4(src, pos + 8);
                     if (0xDC00..=0xDFFF).contains(&lo) {
                         let c = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
-                        push_scalar(&mut bytes, c);
+                        push_scalar(&mut out, c);
                         pos += 12;
                         continue;
                     }
                 }
-                push_scalar(&mut bytes, hi);
+                push_scalar(&mut out, hi);
                 pos += 6;
                 continue;
             }
@@ -629,7 +634,7 @@ fn decode_content(input: &ByteVec, content: Span) -> String {
     }
     // The content was validated (well-formed escapes) during tokenization; raw bytes on the paths that
     // matter are valid UTF-8. `from_utf8_lossy` keeps decoding infallible for any residual bad byte.
-    match String::from_utf8(bytes) {
+    match String::from_utf8(out) {
         Ok(s) => s,
         Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
     }
@@ -645,10 +650,10 @@ fn push_scalar(bytes: &mut Vec<u8>, c: u32) {
 
 /// Read four hex digits at `at` and return their value; invalid/missing digits contribute nothing
 /// (the tokenizer already validated them, so this only runs over well-formed input).
-fn hex4(input: &ByteVec, at: usize) -> u32 {
+fn hex4(src: &[u8], at: usize) -> u32 {
     let mut v = 0u32;
     for i in 0..4 {
-        let d = input.byte_at(at + i).unwrap_or(b'0');
+        let d = src.get(at + i).copied().unwrap_or(b'0');
         v = (v << 4) | (d as char).to_digit(16).unwrap_or(0);
     }
     v
