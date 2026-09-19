@@ -105,8 +105,20 @@ would otherwise pay for emulation is the widening multiply: `u64 * u64 -> u128` 
 libcall on wasm. `wide_mul` avoids it — on 64-bit targets it is one native `u128` multiply, and on
 wasm32 / 32-bit targets it is synthesized from four native `u32 * u32 -> u64` partials (no 128-bit
 intrinsic). Both paths are covered by the differential oracle (the `synth-mul` feature runs the
-synthesized path on a 64-bit host). The three-way wasm comparison the operator asked for —
-{native-u128 emulation} vs {u64 limbs + synthesized mul} vs {u32 limbs} — is pending a wasm benchmark
-runner (`wasmtime`); the numbers here are native `aarch64`, where `wide_mul` is the u128 path and mul is
-unchanged. The divmod inner loop still uses `u128`; de-emulating it (a 128÷64 step from 64-bit ops) is a
-follow-up.
+synthesized path on a 64-bit host).
+
+The three-way comparison, measured via `examples/wasm_mul_bench.rs` (which times all three inline, so
+one binary runs on any target — `cargo run --release --example wasm_mul_bench` natively, or on wasm
+`--target wasm32-wasip1` under `wasmtime`, wired in `.cargo/config.toml`). ns per schoolbook multiply:
+
+| strategy                       | aarch64 512b | aarch64 2048b | wasm32 512b | wasm32 2048b | wasm32 8192b |
+|--------------------------------|--------------|---------------|-------------|--------------|--------------|
+| u64 limbs, `u128` widening     | **126**      | **1476**      | 383         | 5473         | 85186        |
+| u64 limbs, synthesized widening| 196          | 2472          | **263**     | **3578**     | **56114**    |
+| u32 limbs, `u64` widening      | 304          | 5308          | 303         | 5323         | 97021        |
+
+The per-target winner is exactly what the crate ships: **`u128` on 64-bit native** (1.5× faster than
+the synthesized path there) and **the synthesized `u32`-half path on wasm** (~1.5× faster than the
+emulated `u128`, and faster than dropping to u32 limbs). u64 limbs stay the storage on both. This
+confirms the `wide_mul` cfg gate; no change was needed. The divmod inner loop still uses `u128`;
+de-emulating it (a 128÷64 step from 64-bit ops) is a follow-up.

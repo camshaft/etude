@@ -26,6 +26,11 @@ num-traits = "0.2"
 num-integer = "0.1"
 # Coverage-guided property + shrinking engine for the differential harness.
 bolero = "0.13"
+
+# criterion (rayon) and jemalloc do not build for wasm; they are only needed by the native
+# `arith` bench, so gate them off wasm. The wasm timing harness is `examples/wasm_mul_bench.rs`,
+# which uses only `std` and runs under wasmtime.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 # Benchmark scoreboard vs num-bigint across magnitude tiers.
 criterion = "0.5"
 # Match the host allocator so benchmarks reflect production allocation behavior.
