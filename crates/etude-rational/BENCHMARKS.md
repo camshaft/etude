@@ -158,22 +158,24 @@ etude-bigint for the still-gcd-bound `normalize`/`add_eqden`@≥1024b (raw unred
 
 | tier  | etude    | num-rational | ratio    |
 |-------|----------|--------------|----------|
-| 64b   | 104 ns   | 285 ns       | **0.37** |
-| 256b  | 491 ns   | 680 ns       | **0.72** |
-| 1024b | 5.90 µs  | 4.66 µs      | 1.27     |
-| 2048b | 13.3 µs  | 18.1 µs      | **0.74** |
-| 4096b | 33.3 µs  | 42.6 µs      | **0.78** |
+| 64b   | 94 ns    | 285 ns       | **0.33** |
+| 256b  | 531 ns   | 675 ns       | **0.79** |
+| 1024b | 2.72 µs  | 4.66 µs      | **0.58** |
+| 2048b | 7.61 µs  | 18.0 µs      | **0.42** |
+| 4096b | 24.2 µs  | 42.3 µs      | **0.57** |
 
-**64b/256b/2048b/4096b are WINS**; only 1024b remains a render loss (1.27×). Ingredients:
+**Render is now a clean sweep — all five tiers WIN.** Ingredients:
 (a) `to_decimal_string` pre-sizes the result `String` from the O(1) `byte_len` (decimal digits ≈
 `bytes × 2.41`) and writes each component straight into it via `Big::write_decimal`, bypassing the
 `write!`/`format_args` machinery and any mid-render reallocation — this alone nearly halved 64b (0.65× →
-**0.37×**) and moved every tier; (b) etude-bigint's reciprocal-`÷10^19` peel (#115), qhat-reciprocal Knuth
-divmod (#127), and — biggest at scale — skipping the wasted top squaring in the recursive `to_decimal`
-power stack (#169), which crossed 4096b 1.02× → **0.78×** and moved 2048b 0.90× → 0.74× / 1024b 1.43× →
-1.27×. The residual 1024b gap is now the recursive split's own overhead (the `divmod` calls + per-node
-hi/lo allocations), not the squarings; a scratch-reusing split node in etude-bigint is the next lever —
-re-bench on each render land.
+**0.33×**) and moved every tier; (b) etude-bigint's reciprocal-`÷10^19` peel (#115), qhat-reciprocal Knuth
+divmod (#127), skipping the wasted top squaring in the recursive `to_decimal` power stack (#169), and —
+closing the last render loss — raising `DECIMAL_RECURSIVE_THRESHOLD` 10 → 64 limbs (#197). The recursive
+split's per-node `divmod`+alloc overhead was actually *slower* than the linear reciprocal-peel through ~64
+limbs, so the stale threshold was routing 1024b/2048b renders onto the slower path; retuning it crossed
+**1024b 1.27× → 0.58×** (the last remaining render loss) and further improved **2048b 0.74× → 0.42×**,
+**4096b 0.78× → 0.57×**. The recursive path (with the skip-top-squaring win) is retained for >64 limbs, so
+very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
@@ -258,6 +260,13 @@ re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 30** — banked etude-bigint #197 (raised `to_decimal`'s `DECIMAL_RECURSIVE_THRESHOLD` 10 → 64
+  limbs): the recursive split's per-node `divmod`+alloc was slower than the linear reciprocal-`÷10^19` peel
+  through ~64 limbs, so the stale threshold routed 1024b/2048b renders onto the slower path. Retuning it
+  **closed the last render loss — `to_string` 1024b 1.27× → 0.58×** — and further improved **2048b 0.74× →
+  0.42×, 4096b 0.78× → 0.57×** (64b 0.37× → 0.33×, 256b 0.72× → 0.79×). Render is now a clean 5/5 sweep.
+  Scoreboard refresh only, no local change (render is bignum-`to_decimal`-bound). This retires the "render
+  scratch-node" lever I'd flagged — the root cause was thresholding, not per-node allocation.
 - **slice 29** — native `mul_small`/`div_small` add a coprime fast path: when both cross-gcds are 1 (the
   common case for random canonical operands), skip the four `x/1` cancellations — each a hardware `sdiv`
   (~12–20 cycles on aarch64) even when the divisor is 1 — and multiply the originals directly (the result
