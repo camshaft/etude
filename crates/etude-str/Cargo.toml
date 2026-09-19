@@ -1,0 +1,27 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-str"
+version = "0.1.0"
+description = "A cheaply-clonable, Bytes-backed UTF-8 string"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# OPTIONAL serde support: `Str` (de)serializes as a plain string. OFF by default so the default build
+# stays serde-free; only a crate that wants derive-based ser/de on `Str`-bearing structs opts in with
+# `features = ["serde"]`.
+serde = ["dep:serde"]
+
+[dependencies]
+# `Str` is a newtype over `bytes::Bytes` — a clone is an O(1) refcount bump, and text/bytes share ONE
+# representation so a value crosses the text/binary boundary without re-allocating.
+bytes = "1"
+# OPTIONAL — only pulled in by the `serde` feature (off by default). `Str` serializes as a string.
+serde = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+bolero = "0.13"
