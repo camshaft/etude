@@ -128,21 +128,18 @@ impl Big {
     }
 
     /// `a - b` over magnitudes, REQUIRING `a >= b` (caller ensures via `cmp_mag`). Returns normalized.
-    /// An `i128` difference holds a full `u64` limb minus another minus the borrow without overflow.
+    /// Branchless `u64` borrow chain — two `overflowing_sub`s per limb (subtract the limb, then the
+    /// incoming borrow), staying on native `u64` (no `i128` widen or per-limb branch). At most one of the
+    /// two subtractions can borrow, so the outgoing borrow is their OR.
     fn sub_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
         let mut out = Vec::with_capacity(a.len());
-        let mut borrow = 0i128;
+        let mut borrow = 0u64;
         for (i, &limb) in a.iter().enumerate() {
-            let av = limb as i128;
-            let bv = *b.get(i).unwrap_or(&0) as i128;
-            let mut d = av - bv - borrow;
-            if d < 0 {
-                d += 1i128 << 64;
-                borrow = 1;
-            } else {
-                borrow = 0;
-            }
-            out.push(d as u64);
+            let bv = *b.get(i).unwrap_or(&0);
+            let (d1, b1) = limb.overflowing_sub(bv);
+            let (d2, b2) = d1.overflowing_sub(borrow);
+            out.push(d2);
+            borrow = (b1 | b2) as u64;
         }
         strip(&mut out);
         out

@@ -24,10 +24,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | add                       | 256b   | 21.6 ns   | 72.3 ns    | **0.30**  |
 | add                       | 1024b  | 41.3 ns   | 87.8 ns    | **0.47**  |
 | add                       | 4096b  | 123 ns    | 172 ns     | **0.71**  |
-| sub                       | 64b    | 21.5 ns   | 17.2 ns    | 1.25      |
-| sub                       | 256b   | 22.7 ns   | 30.2 ns    | **0.75**  |
-| sub                       | 1024b  | 39.6 ns   | 43.4 ns    | **0.91**  |
-| sub                       | 4096b  | 114 ns    | 95.0 ns    | 1.20      |
+| sub                       | 64b    | 20.1 ns   | 16.4 ns    | 1.22      |
+| sub                       | 256b   | 21.8 ns   | 31.0 ns    | **0.70**  |
+| sub                       | 1024b  | 37.2 ns   | 43.6 ns    | **0.85**  |
+| sub                       | 4096b  | 96.8 ns   | 95.3 ns    | 1.02      |
 | mul                       | 64b    | 21.6 ns   | 19.2 ns    | 1.12      |
 | mul                       | 256b   | 42.3 ns   | 52.8 ns    | **0.80**  |
 | mul                       | 1024b  | 390 ns    | 389 ns     | 1.00      |
@@ -111,6 +111,10 @@ has no matching operation.)
 - **Direct signed subtract** — a shared `add_signed` core takes the second operand's sign as a
   parameter, so `sub` no longer allocates a negated copy of `other`: sub/256b 30.8 → 22.7 ns (**0.75×**),
   sub/1024b 50.3 → 39.6 ns (**0.91×**), sub/4096b 133 → 114 ns (1.20×, was 1.40×).
+- **Branchless `sub_mag`** — the borrow chain is two native-`u64` `overflowing_sub`s per limb (limb − b,
+  then − incoming borrow; the outgoing borrow is their OR), replacing the per-limb `i128` widen +
+  `if d < 0` branch. Improves every tier — sub/256b 22.7 → 21.8 ns (**0.70×**), sub/1024b 39.6 → 37.2 ns
+  (**0.85×**), sub/4096b 114 → 96.8 ns (1.20× → **1.02×**, closing the last losing sub tier).
 - **In-place divide-by-limb in `to_decimal_string`** — the ÷10¹⁹ chunk loop divides the magnitude in
   place (`div_rem_limb_inplace`), so no per-chunk quotient `Vec` is allocated: 1024b 4.84 → 4.37 µs.
 - **Recursive divide-and-conquer `to_decimal_string`** — above a 10-limb crossover, split the magnitude
@@ -147,9 +151,9 @@ has no matching operation.)
 2. **clone / from_i64 at 64b (2.20× / 1.77×).** The small-value construction/clone paths heap-allocate a
    one-limb `Vec`. An inline small-value magnitude repr fixes these (measured 2.20→~1.0× / 1.77→0.97×) but
    REGRESSES add/mul unless the arithmetic kernels emit inline results directly — a larger change (below).
-3. **to_decimal_string at 4096b (1.14×), sub/mul at 4096b (1.20× / 1.03×), gcd at 1024b (1.02×), the
-   64b add/sub/mul tiers (~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest tiers is a
-   subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd.
+3. **to_decimal_string at 4096b (1.14×), mul at 4096b (1.03×), sub at 4096b (1.02×), gcd at 1024b
+   (1.02×), the 64b add/sub/mul tiers (~1.1–1.25×).** Largely at parity; num-bigint's edge at the largest
+   tiers is a subquadratic (fast) divmod under the recursive base conversion, Toom-3 mul, and a Lehmer gcd.
 
 ## Roadmap
 
