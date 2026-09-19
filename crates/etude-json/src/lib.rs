@@ -518,7 +518,7 @@ impl core::iter::FusedIterator for Tokenizer<'_> {}
 
 /// Decode the (validated) content of a string token into an owned `String`, applying JSON escapes.
 ///
-/// `content` is the span BETWEEN the quotes. The bytes were validated during tokenization, so every
+/// `content` is the span between the quotes. The bytes were validated during tokenization, so every
 /// escape is well-formed here; a `\u` value that is not a scalar (a lone surrogate) is replaced with
 /// U+FFFD rather than failing, since decoding is infallible by contract.
 fn decode_content(input: &ByteVec, content: Span) -> String {
