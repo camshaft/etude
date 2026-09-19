@@ -708,58 +708,95 @@ impl Decimal {
     }
 
     /// Write the canonical decimal rendering directly into a [`core::fmt::Write`] sink — the
-    /// allocation-conscious rendering path that [`Display`](core::fmt::Display) uses (no intermediate `String` is built for
-    /// the framing). The output is always a valid decimal literal and re-parses via [`Decimal::parse`]
-    /// to the same value: a plain (point) form for modest exponents, and a bounded `<digits>e<exp>`
-    /// scientific form for large magnitudes so the output stays small.
+    /// allocation-conscious rendering path that [`Display`](core::fmt::Display) uses. The output is always
+    /// a valid decimal literal and re-parses via [`Decimal::parse`] to the same value: a plain (point)
+    /// form for modest exponents, and a bounded `<digits>e<exp>` scientific form for large magnitudes so
+    /// the output stays small.
     ///
-    /// One residual allocation remains: the coefficient's digits come from
-    /// [`etude_bigint::Big::to_decimal_string`], which allocates. A sink-writing digit emitter on `Big`
-    /// (requested from etude-bigint) would make this fully allocation-free; everything else here writes
-    /// straight to `w`.
+    /// The coefficient's digits stream straight into `w` via [`etude_bigint::Big::write_decimal`] — no
+    /// intermediate `String`. The common fractional case (a point shift that fits a `u64`) is split with a
+    /// single-limb divide so the integer and fractional parts each write directly; only a deep fraction
+    /// (point shift beyond 19 digits) falls back to rendering the digits once to slice them.
     pub fn write_to<W: core::fmt::Write>(&self, w: &mut W) -> core::fmt::Result {
         if self.is_zero() {
             return w.write_str("0");
         }
+        // Threshold that bounds the plain-form length; beyond it, fall back to scientific notation. All
+        // comparisons stay in i64 (narrowing to usize only once bounded) so a large exponent cannot
+        // truncate on a 32-bit-usize target like wasm32.
+        const PLAIN_PAD: i64 = 30;
+
+        if self.exp >= 0 {
+            // Integer, trailing-zeros, or (for a very large exponent) scientific — the digits are
+            // contiguous, so write_decimal streams the sign and digits with no String and no clone.
+            self.coeff.write_decimal(w)?;
+            return if self.exp <= PLAIN_PAD {
+                for _ in 0..self.exp {
+                    w.write_str("0")?;
+                }
+                Ok(())
+            } else {
+                write!(w, "e{}", self.exp)
+            };
+        }
+
+        let k = -self.exp; // fractional point shift, ≥ 1
+        // Split-and-stream path: when the point shift fits a u64 AND the coefficient is large, a
+        // single-limb divide splits the value into its integer part (a Big, written directly) and its low
+        // k fractional digits (a native u64) — writing each straight to the sink, no rendered String. The
+        // split pays a fixed divide plus two writes, which only beats rendering-once-and-slicing past a
+        // few hundred bits (the to_string benchmark's crossover sits between the 256- and 1024-bit tiers);
+        // below that the single render below is cheaper, so gate on the coefficient width.
+        const SPLIT_MIN_BITS: usize = 512;
+        if k <= 19 && self.coeff.bit_len() >= SPLIT_MIN_BITS {
+            // The quotient carries the sign, so `write_decimal` renders "-ddd" for the integer part. A
+            // coefficient this wide has far more than 19 digits, so with k ≤ 19 the point always sits
+            // inside it (integer part nonzero) and the form is never scientific.
+            let (int_part, frac) = self
+                .coeff
+                .divmod_u64(10u64.pow(k as u32))
+                .expect("10^k is nonzero");
+            int_part.write_decimal(w)?; // signed integer part
+            w.write_str(".")?;
+            return write_frac_u64(w, frac, k);
+        }
+
+        // Otherwise render the magnitude digits once and slice around the point. Handles small
+        // coefficients, the `|value| < 1` leading-zeros form, deep fractions (k > 19), and scientific.
         if self.coeff.is_negative() {
             w.write_str("-")?;
         }
-        let mag = self.coeff.abs().to_decimal_string(); // digits only, no sign, no leading zero
-        // Threshold that bounds the plain-form length; beyond it, fall back to scientific notation. All
-        // comparisons stay in i64 (narrowing to usize only once bounded ≤ PLAIN_PAD) so a large
-        // exponent cannot truncate on a 32-bit-usize target like wasm32.
-        const PLAIN_PAD: i64 = 30;
-        if self.exp == 0 {
-            w.write_str(&mag)
-        } else if self.exp > 0 && self.exp <= PLAIN_PAD {
-            w.write_str(&mag)?;
-            for _ in 0..self.exp {
+        let mag = self.coeff.abs().to_decimal_string();
+        let l = mag.len() as i64;
+        if k < l {
+            let cut = (l - k) as usize;
+            w.write_str(&mag[..cut])?;
+            w.write_str(".")?;
+            w.write_str(&mag[cut..])
+        } else if k <= l + PLAIN_PAD {
+            w.write_str("0.")?;
+            for _ in 0..(k - l) {
                 w.write_str("0")?;
             }
-            Ok(())
-        } else if self.exp < 0 {
-            let k = -self.exp; // positive point shift, in i64
-            let l = mag.len() as i64;
-            if k < l {
-                // Point sits inside the digit string: "ddd.ddd".
-                let cut = (l - k) as usize;
-                w.write_str(&mag[..cut])?;
-                w.write_str(".")?;
-                w.write_str(&mag[cut..])
-            } else if k <= l + PLAIN_PAD {
-                // "0.00…ddd" — leading zeros before the significant digits.
-                w.write_str("0.")?;
-                for _ in 0..(k - l) {
-                    w.write_str("0")?;
-                }
-                w.write_str(&mag)
-            } else {
-                write!(w, "{mag}e{}", self.exp)
-            }
+            w.write_str(&mag)
         } else {
             write!(w, "{mag}e{}", self.exp)
         }
     }
+}
+
+/// Write `frac` as exactly `width` decimal digits, left-padded with zeros, straight into `w` — the
+/// fractional digits of a decimal whose point shift `width` (`1..=19`) fits a `u64`. `frac < 10^width`.
+fn write_frac_u64<W: core::fmt::Write>(w: &mut W, frac: u64, width: i64) -> core::fmt::Result {
+    let digits = if frac == 0 {
+        1
+    } else {
+        frac.ilog10() as i64 + 1
+    };
+    for _ in 0..(width - digits) {
+        w.write_str("0")?;
+    }
+    write!(w, "{frac}")
 }
 
 /// `10^0 ..= 10^22` as `f64`, each exactly representable (`10^k = 2^k · 5^k`, and `5^22 < 2^52`, so the
