@@ -29,3 +29,11 @@ bolero = "0.13"
 bolero-generator = "0.13"
 # Build input ropes with explicit chunk layouts (to exercise tokens straddling rope-leaf boundaries).
 bytes = "1"
+# Benchmark scoreboard vs serde_json: time AND allocation counts (the copy-avoiding first-class axis).
+criterion = "0.5"
+# Match the host allocator so timing is production-representative (as in the bigint/bytevec benches).
+tikv-jemallocator = "0.6"
+
+[[bench]]
+name = "tokenize"
+harness = false
