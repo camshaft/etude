@@ -1285,6 +1285,51 @@ fn bytevec_name_aliases_resolve() {
     assert_eq!(bytevec_tag_alias::Tag::current(), 0);
 }
 
+/// A BULK-BUILT rope (`FromIterator` with a size hint above `PROMOTE_AT` takes the bottom-up
+/// `extend_blocks` + `from_tree` path, #31) must agree with the flat oracle on every axis the
+/// incremental `push_back` construction does: bytes, `get(index)` vs the chunk iterator (cached
+/// chunk counts), `byte_at`, `slice`, and `split_to` through the tree-body fast path (#30).
+#[test]
+fn bulk_built_rope_matches_oracle_on_every_axis() {
+    // exact size hint (Vec iterator) above PROMOTE_AT -> the bulk bottom-up build path
+    let chunks: Vec<Bytes> = (0..(PROMOTE_AT * 3 + 7))
+        .map(|i| Bytes::from(alloc::vec![(i % 251) as u8; 1 + i % 5]))
+        .collect();
+    let flat: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+    let rope: ByteRope = chunks.iter().cloned().collect();
+    assert!(matches!(rope.repr, Repr::Deep(_)), "bulk collect should land deep");
+    rope.check_invariants();
+    assert_eq!(rope, flat, "bulk-built bytes");
+
+    // get(index) vs the chunk iterator: pointer identity for every index
+    let n = rope.chunks().len();
+    assert_eq!(n, chunks.len(), "bulk build dropped or merged chunks");
+    for i in 0..n {
+        let via_iter = rope.chunks().nth(i).expect("iterator chunk");
+        let via_get = rope.get(i).expect("get chunk");
+        assert_eq!(via_get.as_ptr(), via_iter.as_ptr(), "bulk get({i}) wrong chunk");
+    }
+    assert!(rope.get(n).is_none());
+
+    // byte_at + slice spot grid
+    for &off in &[0, 1, flat.len() / 3, flat.len() / 2, flat.len() - 1] {
+        assert_eq!(rope.byte_at(off), Some(flat[off]), "bulk byte_at {off}");
+    }
+    for &(a, b) in &[(0, flat.len()), (3, flat.len() / 2), (flat.len() / 3, flat.len() - 2)] {
+        assert_eq!(rope.slice(a..b), &flat[a..b], "bulk slice {a}..{b}");
+    }
+
+    // split_to through the tree body (both halves oracle-exact, invariants hold)
+    for at in [1, flat.len() / 3, flat.len() / 2, flat.len() - 1] {
+        let mut r = rope.clone();
+        let front = r.split_to(at).unwrap();
+        front.check_invariants();
+        r.check_invariants();
+        assert_eq!(front, &flat[..at], "bulk split front at {at}");
+        assert_eq!(r, &flat[at..], "bulk split back at {at}");
+    }
+}
+
 /// Deep-tier `get(index)` descends the tree by the per-subtree CACHED chunk counts, so any stale
 /// count fix-up (leaf splits from bounded-COW `set_byte`, concat seam repacks, pop-block refills,
 /// structural `replace`) would silently send it to the WRONG chunk while the byte content stays
