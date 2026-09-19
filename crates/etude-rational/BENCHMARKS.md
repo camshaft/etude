@@ -41,34 +41,37 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | abs        | 64b    | 25.6 ns   | 16.1 ns      | 1.59      |
 | abs        | 256b   | 23.8 ns   | 34.8 ns      | **0.69**  |
 | abs        | 1024b  | 25.5 ns   | 37.3 ns      | **0.68**  |
-| normalize  | 64b    | 894 ns    | 1.22 µs      | **0.74**  |
-| normalize  | 256b   | 4.16 µs   | 4.97 µs      | **0.84**  |
-| normalize  | 1024b  | 24.8 µs   | 24.5 µs      | 1.01      |
+| normalize  | 64b    | 0.33 µs   | 1.21 µs      | **0.27**  |
+| normalize  | 256b   | 1.91 µs   | 5.02 µs      | **0.38**  |
+| normalize  | 1024b  | 15.4 µs   | 24.6 µs      | **0.63**  |
+| normalize  | 2048b  | 46.4 µs   | 65.2 µs      | **0.71**  |
+| normalize  | 4096b  | 163 µs    | 192 µs       | **0.85**  |
 | cmp        | 64b    | 9.7 ns    | 55.2 ns      | **0.18**  |
 | cmp        | 256b   | 62.4 ns   | 146 ns       | **0.43**  |
 | cmp        | 1024b  | 80.3 ns   | 180 ns       | **0.45**  |
 | cmp        | 2048b  | 812 ns    | 1.27 µs      | **0.64**  |
 | cmp        | 4096b  | 146 ns    | 561 ns       | **0.26**  |
-| add_eqden  | 64b    | 935 ns    | 1.36 µs      | **0.69**  |
-| add_eqden  | 256b   | 4.20 µs   | 4.99 µs      | **0.84**  |
-| add_eqden  | 1024b  | 25.2 µs   | 25.3 µs      | 1.00      |
+| add_eqden  | 64b    | 0.34 µs   | 1.31 µs      | **0.26**  |
+| add_eqden  | 256b   | 1.90 µs   | 4.87 µs      | **0.39**  |
+| add_eqden  | 1024b  | 15.5 µs   | 24.9 µs      | **0.62**  |
+| add_eqden  | 2048b  | 46.1 µs   | 64.6 µs      | **0.71**  |
+| add_eqden  | 4096b  | 161 µs    | 191 µs       | **0.85**  |
 | cmp_eqden  | 64b    | 6.25 ns   | 7.94 ns      | **0.79**  |
 | cmp_eqden  | 256b   | 6.72 ns   | 8.88 ns      | **0.76**  |
 | cmp_eqden  | 1024b  | 11.5 ns   | 14.2 ns      | **0.81**  |
 
-**We now beat num-rational on add, sub, mul, div, cmp (ALL tiers), recip (256b/1024b), normalize
-(64b/256b), and the equal-denominator add/cmp fast paths** — a decisive across-the-board lead. `cmp` is
-now a decisive win at every tier (the large tiers by 1.5–3.8×, via the continued-fraction `q ∈ {0,1}`
-fast path). The only non-wins left are at parity or minor:
+**We now beat num-rational on add, sub, mul, div, cmp, normalize, and add_eqden at EVERY tier, plus recip
+(256b/1024b) and the equal-denominator fast paths** — a decisive across-the-board lead. `cmp` wins every
+tier by 1.5–5× (continued-fraction `q ∈ {0,1}` fast path + the native `u128` `64b` tier). `normalize` and
+`add_eqden` — which bottom out on a single large gcd and used to sit at parity (1024b) / a slight loss
+(4096b) — now win every tier (64b 0.27×/0.26× up to 4096b 0.85×) after etude-bigint made the Stein gcd
+subtract in place (#207), turning raw gcd into a full sweep. The only non-wins left:
 
 1. **`recip`/`neg`/`abs` @64b — 1.5–2.0× (clone-bound).** All three are O(limbs) sign/swap ops that only
    clone the components; at 64b the small `Big` clone dominates, and etude-bigint's 1-limb `Big` clone is
    ~2× num-bigint's (its deferred inline-repr item). All three WIN at 256b and above (num-rational's clone
    grows with size while ours stays ~flat). A single etude-bigint small-`Big` inline representation would
    close `recip`/`neg`/`abs`@64b together — not locally addressable.
-2. **`normalize`/`add_eqden` @1024b — ~1.00 (parity), ~1.10× @4096b.** Both bottom out on a single large
-   gcd; parity with num-rational's Stein gcd at 1024b, a slight loss at 4096b. The double-word-Lehmer/HGCD
-   headroom in etude-bigint is deferred (a narrow, acceptable gap — see the coordination note in the log).
 
 The large-tier `cmp` lead comes from the continued-fraction comparison, sharpened two ways: a
 **borrow-first-iteration** (components passed by reference; the first Euclidean step allocates nothing and,
@@ -276,6 +279,14 @@ very wide renders are unaffected. Re-bench on each render land.
   Large-tier `cmp` improved sharply: **1024b 0.90× → 0.44×**, **4096b 0.73× → 0.26×**, 2048b 0.78× → 0.64×
   (operand-dependent CF depth). Small tiers (cross-multiply/native) unchanged. Guarded by the differential
   oracle + the 40-pair `cmp_large_continued_fraction` test.
+- **slice 33** — banked etude-bigint #207 (Stein gcd subtracts in place — `sub_mag_inplace` instead of
+  allocating a fresh magnitude each shift-and-subtract step), which turned raw gcd into a full sweep (4096b
+  1.10× → 0.85×, its last loss). This is the gcd behind `normalize`/`add_eqden`, so both now **win every
+  tier**: `normalize` 1024b 1.01× → **0.63×** (was parity), 4096b ~1.10× → **0.85×** (was a loss), and
+  down to 64b 0.74× → **0.27×**; `add_eqden` 1024b 1.00× → **0.62×**, 4096b **0.85×**, 64b 0.69× → **0.26×**
+  (added the 2048b/4096b rows). Closes the last gcd-bound parity/loss class — the only remaining non-wins
+  are `recip`/`neg`/`abs`@64b (etude-bigint small-`Big` inline-repr). Scoreboard refresh only, no local
+  change. etude-bigint has consequently deprioritized Lehmer/HGCD (no longer needed to close a gap).
 - **slice 32** — native `u128` `mul`/`div` for the `64b` band (`mul_small_u128`/`div_small_u128`),
   generalizing slice 31's `cmp` win to arithmetic: `~1-limb` components with the top magnitude bit set
   exceed `i64` (missing the `to_i64` paths) but their magnitudes fit `u64`, so after cross-reducing on the
