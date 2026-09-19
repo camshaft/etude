@@ -1,0 +1,10 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Run wasm32 test/example/bench artifacts under wasmtime, so `cargo run/test --target wasm32-wasip1`
+# works directly (used for the bigint wasm multiply measurement; also sets up rational and future
+# etude crates to run wasm benches). Requires `wasmtime` on PATH — install via
+# `curl https://wasmtime.dev/install.sh -sSf | bash`. Inert for native builds. wasm32-wasip1 (not
+# wasm32-unknown-unknown) is the runnable target: std timing/IO need the WASI clock + IO imports.
+[target.wasm32-wasip1]
+runner = "wasmtime run --"
