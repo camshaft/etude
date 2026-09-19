@@ -656,6 +656,56 @@ fn bench_copy_to_bytes_mut(c: &mut Criterion) {
     g.finish();
 }
 
+/// Socket-read hot path: `Builder::for_socket_read` routes through `put_uninit_slice`, which
+/// zero-inits (memsets) the `payload_len`-byte spare region before the read closure runs (the #173
+/// info-leak fix). This measures that memset's cost so the deferred follow-up that would reclaim it
+/// (report bytes-written and skip the zero-init) is only pursued if it is material:
+/// - `memset_only`: the closure reports 0 bytes read — a pure memset of `n` bytes plus routing, no
+///   copy, no growth (isolates the zero-init cost);
+/// - `memset_plus_recv`: the full path — zero-init then the closure copies `n` bytes (a recv);
+/// - `recv_copy_no_memset`: the same `n`-byte copy into a fresh `BytesMut` with no zero-init — what
+///   the reclaim follow-up would leave. The `memset_plus_recv` − `recv_copy_no_memset` delta is the
+///   memset's marginal cost on the hot path.
+fn bench_socket_read(c: &mut Criterion) {
+    let mut g = group(c, "socket_read");
+    for &n in &[1500usize, 65536] {
+        let label = format!("{n}");
+        let src = vec![0xABu8; n];
+
+        g.bench_function(BenchmarkId::new("memset_only", &label), |b| {
+            let mut bld = ByteVec::builder(n);
+            b.iter(|| {
+                bld.for_socket_read(n, |_slice| 0);
+                black_box(&bld);
+            })
+        });
+        g.bench_function(BenchmarkId::new("memset_plus_recv", &label), |b| {
+            b.iter_batched_ref(
+                || ByteVec::builder(n),
+                |bld| {
+                    bld.for_socket_read(n, |slice| {
+                        slice[0..n].copy_from_slice(&src);
+                        n
+                    });
+                    black_box(&*bld);
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function(BenchmarkId::new("recv_copy_no_memset", &label), |b| {
+            b.iter_batched(
+                || BytesMut::with_capacity(n),
+                |mut bm| {
+                    bytes::BufMut::put_slice(&mut bm, &src);
+                    black_box(bm)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_push_back,
@@ -672,6 +722,7 @@ criterion_group!(
     bench_from_iter,
     bench_starts_ends_with,
     bench_validate_utf8,
-    bench_copy_to_bytes_mut
+    bench_copy_to_bytes_mut,
+    bench_socket_read
 );
 criterion_main!(benches);
