@@ -109,7 +109,8 @@ impl Rational {
     /// Whether this is an integer, i.e. the denominator is `1`.
     pub fn is_integer(&self) -> bool {
         // Canonical form: den >= 1 and coprime to num, so den == 1 iff the value is an integer.
-        self.den == Big::from_i64(1)
+        // `bit_len() == 1` ⟺ the value is exactly 1 (den is positive) — an O(1) check with no allocation.
+        self.den.bit_len() == 1
     }
 
     /// The additive inverse `-self`. Already canonical (only the numerator's sign flips).
@@ -344,8 +345,9 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
     // Reduce by gcd(|num|, den). `Big::gcd` is sign-agnostic and non-negative; den is positive here, so
     // the gcd is a positive divisor of both magnitudes — each exact division has remainder zero.
     let g = num.gcd(&den);
-    if g == Big::from_i64(1) {
-        // Already coprime — skip the two divisions (the common case for freshly built pairs).
+    if g.bit_len() == 1 {
+        // g == 1 (an O(1), allocation-free check): already coprime — skip the two divisions (the common
+        // case for freshly built pairs).
         return Some(Rational { num, den });
     }
     let (num_reduced, _) = num.divmod(&g).expect("gcd is nonzero");
@@ -356,9 +358,10 @@ fn normalize(mut num: Big, mut den: Big) -> Option<Rational> {
     })
 }
 
-/// `|_ n = a/g` helper: divide exactly by `g` (a known divisor of `n`), skipping the divmod when `g == 1`.
-fn div_exact(n: &Big, g: &Big, one: &Big) -> Big {
-    if g == one {
+/// `n / g` where `g` is a known divisor of `n`; skips the divmod when `g == 1` (an O(1), allocation-free
+/// `bit_len() == 1` check — `g` is a non-negative gcd, so `bit_len() == 1` ⟺ `g == 1`).
+fn div_exact(n: &Big, g: &Big) -> Big {
+    if g.bit_len() == 1 {
         n.clone()
     } else {
         n.divmod(g).expect("g is a nonzero divisor of n").0
@@ -371,11 +374,10 @@ fn div_exact(n: &Big, g: &Big, one: &Big) -> Big {
 /// further gcd-normalize is needed. `gcd` is sign-agnostic, so the quotients keep their operands' signs;
 /// the caller owns any final sign placement.
 fn cross_reduce_mul(a: &Big, b: &Big, c: &Big, d: &Big) -> (Big, Big) {
-    let one = Big::from_i64(1);
     let g1 = a.gcd(d); // gcd(|a|, |d|)
     let g2 = c.gcd(b); // gcd(|c|, |b|)
-    let num = div_exact(a, &g1, &one).mul(&div_exact(c, &g2, &one));
-    let den = div_exact(b, &g2, &one).mul(&div_exact(d, &g1, &one));
+    let num = div_exact(a, &g1).mul(&div_exact(c, &g2));
+    let den = div_exact(b, &g2).mul(&div_exact(d, &g1));
     (num, den)
 }
 
