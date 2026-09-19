@@ -226,6 +226,15 @@ fn differential_arithmetic_vs_num_bigint() {
 /// bolero engine explores the operand space the fixed RNG corpus does not, and shrinks any failure to
 /// a minimal reproducer.
 #[test]
+// The bolero property harness spins forever under miri (its slow interpreter times out on the many
+// generated candidates); the same `check_pair` oracle path is covered under miri by the deterministic
+// fixed-RNG harness (`differential_arithmetic_vs_num_bigint`, 5000 pairs) plus the targeted unit tests
+// (`divmod_edge_cases_and_wide_operands`, `scalar_primitives_vs_num_bigint`, the byte round-trips).
+// Operator directive 2026-09-19 (same pattern as etude-bytevec #242 / decimal #244).
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; oracle path covered by deterministic tests"
+)]
 fn differential_bolero() {
     bolero::check!()
         .with_type::<(Vec<u8>, Vec<u8>)>()
