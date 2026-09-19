@@ -48,7 +48,7 @@ pub trait Buffer {
 
     /// Writes `bytes` into the destination.
     ///
-    /// `bytes.len()` MUST NOT exceed [`remaining_capacity`](Buffer::remaining_capacity).
+    /// `bytes.len()` must not exceed [`remaining_capacity`](Buffer::remaining_capacity).
     fn put_slice(&mut self, bytes: &[u8]);
 
     /// Writes `payload_len` bytes directly into the destination's uninitialized memory via `f`,
