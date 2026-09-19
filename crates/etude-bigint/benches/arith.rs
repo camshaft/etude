@@ -532,6 +532,40 @@ fn bench_o1_accessors(c: &mut Criterion) {
     g.finish();
 }
 
+/// Build a `Big` from base-`10^19` decimal chunks (etude-decimal's `from_str` path — it has already
+/// grouped the coefficient digits into 19-digit chunks) vs num-bigint parsing the equivalent decimal
+/// string. The etude side consumes the chunks directly, with no re-stringifying; num-bigint's side also
+/// scans the string characters, so part of any gap is that scan.
+fn bench_from_base_10_pow_k(c: &mut Criterion) {
+    use std::str::FromStr;
+    const K: u32 = 19;
+    let mut g = group(c, "from_base_10_pow_k");
+    let mut rng = Rng(0x2b7e_1516_28ae_d2a6);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let s = to_num(&a).to_string(); // non-negative operand → plain decimal, no sign
+        // Chunk the decimal string into base-`10^19` limbs, most-significant first (the leading chunk is
+        // shorter than 19 unless the length divides evenly).
+        let mut limbs: Vec<u64> = Vec::new();
+        let first = s.len() % 19;
+        if first != 0 {
+            limbs.push(s[..first].parse().unwrap());
+        }
+        let mut i = first;
+        while i < s.len() {
+            limbs.push(s[i..i + 19].parse().unwrap());
+            i += 19;
+        }
+        g.bench_with_input(BenchmarkId::new("etude", label), &limbs, |bch, limbs| {
+            bch.iter(|| black_box(Big::from_base_10_pow_k_limbs(K, black_box(limbs))))
+        });
+        g.bench_with_input(BenchmarkId::new("num-bigint", label), &s, |bch, s| {
+            bch.iter(|| black_box(BigInt::from_str(black_box(s))))
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -556,6 +590,7 @@ criterion_group!(
     bench_write_decimal,
     bench_sign_magnitude_codecs,
     bench_to_sign_magnitude_into,
-    bench_o1_accessors
+    bench_o1_accessors,
+    bench_from_base_10_pow_k
 );
 criterion_main!(benches);

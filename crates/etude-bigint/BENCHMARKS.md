@@ -64,6 +64,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | clone                     | 1024b  | 13.8 ns   | 14.0 ns    | **0.98**  |
 | clone                     | 4096b  | 23.1 ns   | 23.1 ns    | 1.00      |
 | from_i64                  | —      | 12.2 ns   | 6.86 ns    | 1.77      |
+| from_base_10_pow_k        | 64b    | 22.1 ns   | 91.8 ns    | **0.24**  |
+| from_base_10_pow_k        | 256b   | 38.4 ns   | 266 ns     | **0.14**  |
+| from_base_10_pow_k        | 1024b  | 240 ns    | 772 ns     | **0.31**  |
+| from_base_10_pow_k        | 4096b  | 2.32 µs   | 4.77 µs    | **0.49**  |
 
 We now **beat num-bigint** on **add** (every tier), **divmod** (every tier), **cmp** (three of four
 tiers), and **to_decimal_string at 64b** (0.86×), and reach parity-or-better on **mul at 256b/1024b**
@@ -75,6 +79,14 @@ fast path; at ≥256b they are at parity (the allocation is amortized). Closing 
 small-value magnitude repr — measured to fix clone/`from_i64` (2.20→~1.0×, 1.77→0.97×) but to REGRESS
 add/mul (the `*_mag` kernels build a `Vec` that the inline form then has to copy), so it needs the
 kernels to emit inline results directly before it is a net win. Deferred behind that (see roadmap).
+
+`from_base_10_pow_k` builds a `Big` from base-`10¹⁹` decimal chunks (etude-decimal's `from_str` path,
+which has already grouped the coefficient into 19-digit chunks); the num-bigint column parses the
+equivalent decimal string. It wins at every tier (**0.14–0.49×**) — the etude side skips re-stringifying
+and rides the wide multiply-add Horner step, where num-bigint also scans the string characters, so part
+of the gap is that scan. The win narrows at 4096b (0.49×) because the Horner is O(L²) in output limbs
+while num-bigint has a recursive combine; a subquadratic combine here is a future lever (low priority —
+already a win).
 
 (divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd is capped at 1024b because
 its Euclid cost is steep. sign_magnitude_roundtrip is the canonical map-key encode+decode; num-bigint

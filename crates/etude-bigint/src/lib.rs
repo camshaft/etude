@@ -423,6 +423,33 @@ impl Big {
         write_decimal_mag(&self.mag, w)
     }
 
+    /// Build a non-negative `Big` from base-`10ᵏ` limbs, most-significant first.
+    ///
+    /// The value is `Σ limbs[i] · (10ᵏ)^(len−1−i)` — `limbs[0]` is the most-significant chunk. `k` is
+    /// the decimal digits per limb (`1..=19`, since `10¹⁹ < 2⁶⁴`); every limb must be `< 10ᵏ`. Returns
+    /// `None` if `k` is out of range or any limb is `≥ 10ᵏ`.
+    ///
+    /// This is the inverse of the `10¹⁹`-chunked decimal render: a decimal parser that has already
+    /// grouped its digits into `k`-digit chunks (all but the leading chunk exactly `k` wide) feeds them
+    /// here and gets the `Big` without re-stringifying. It runs Horner's method — `acc = acc·10ᵏ + limb`
+    /// per chunk — over an in-place `u64` multiply-add, so no intermediate `Big` is allocated per chunk.
+    pub fn from_base_10_pow_k_limbs(k: u32, limbs: &[u64]) -> Option<Big> {
+        if !(1..=19).contains(&k) {
+            return None;
+        }
+        let base = 10u64.pow(k); // ≤ 10¹⁹ < 2⁶⁴
+        let mut mag: Vec<u64> = Vec::new();
+        for &limb in limbs {
+            if limb >= base {
+                return None; // a chunk carrying ≥ k digits is a caller error
+            }
+            mul_add_u64_inplace(&mut mag, base, limb);
+        }
+        strip(&mut mag); // leading-zero limbs (e.g. a `[0, 0, 5]` stream) leave no trailing zeros, but
+        // an all-zero stream must land on the canonical empty magnitude
+        Some(Big { neg: false, mag })
+    }
+
     /// Box a signed 64-bit int as a `Big`.
     pub fn from_i64(v: i64) -> Big {
         if v == 0 {
@@ -1001,6 +1028,24 @@ fn add_into_at(acc: &mut Vec<u64>, addend: &[u64], offset: usize) {
 fn strip(v: &mut Vec<u64>) {
     while v.last() == Some(&0) {
         v.pop();
+    }
+}
+
+/// In-place `mag = mag · mul + add` over a little-endian magnitude — one word of multiply-add per limb,
+/// with the high half of each `wide_mul` carried up. `add` seeds the carry (it is `< mul`, so it fits).
+/// The single-word Horner step behind [`Big::from_base_10_pow_k_limbs`]. Leaves no trailing zero limbs
+/// so long as the input had none (the top limb only grows), but callers `strip` for the all-zero case.
+fn mul_add_u64_inplace(mag: &mut Vec<u64>, mul: u64, add: u64) {
+    let mut carry = add;
+    for limb in mag.iter_mut() {
+        let (hi, lo) = wide_mul(*limb, mul);
+        let (s, c) = lo.overflowing_add(carry);
+        *limb = s;
+        // hi ≤ 2⁶⁴−2 (product of two `u64`s), so hi + carry-bit never overflows a `u64`.
+        carry = hi + c as u64;
+    }
+    if carry != 0 {
+        mag.push(carry);
     }
 }
 

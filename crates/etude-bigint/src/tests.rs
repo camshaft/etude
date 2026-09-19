@@ -791,3 +791,56 @@ fn mul_wide_operands_vs_num_bigint() {
         }
     }
 }
+
+/// `from_base_10_pow_k_limbs` must build exactly the value its base-`10ᵏ` limbs denote — checked against
+/// num-bigint parsing the equivalent decimal string (each chunk zero-padded to `k`). Sweeps `k` across
+/// its whole `1..=19` range and chunk counts from empty (zero) up through the recursive-render width,
+/// including leading-zero and all-zero streams; also pins the canonical form and the `None` rejects.
+#[test]
+fn from_base_10_pow_k_limbs_vs_num_bigint() {
+    use core::str::FromStr;
+    let mut rng = Rng(0x0bad_c0de_1155_aa77);
+    for k in 1u32..=19 {
+        let base = 10u64.pow(k);
+        for count in 0..=40usize {
+            // Random valid chunks (each < 10ᵏ), most-significant first.
+            let limbs: Vec<u64> = (0..count).map(|_| rng.next() % base).collect();
+            let got = Big::from_base_10_pow_k_limbs(k, &limbs).expect("valid chunks build a value");
+            // Reference: concatenate the chunks (each padded to k digits) and parse as one decimal.
+            let mut s = alloc::string::String::new();
+            for &limb in &limbs {
+                s.push_str(&alloc::format!("{limb:0width$}", width = k as usize));
+            }
+            if s.is_empty() {
+                s.push('0');
+            }
+            let expect = Ref::from_str(&s).expect("padded chunk string is valid decimal");
+            assert_eq!(to_ref(&got), expect, "k={k} count={count} limbs={limbs:?}");
+            // Result is non-negative and canonical (empty-magnitude zero, no trailing zero limbs).
+            assert!(!got.is_negative());
+            assert!(got.mag.last() != Some(&0));
+            if expect.is_zero() {
+                assert!(got.is_zero(), "all-zero stream must be canonical zero");
+            }
+        }
+        // A chunk carrying ≥ k digits (`== 10ᵏ`) is rejected.
+        assert!(Big::from_base_10_pow_k_limbs(k, &[base]).is_none());
+        assert!(Big::from_base_10_pow_k_limbs(k, &[0, base, 1]).is_none());
+    }
+    // `k` out of the `1..=19` range is rejected (0 has no digits; 20 would overflow `10ᵏ` past `u64`).
+    assert!(Big::from_base_10_pow_k_limbs(0, &[1]).is_none());
+    assert!(Big::from_base_10_pow_k_limbs(20, &[1]).is_none());
+    // A leading-zero stream and a single ragged leading chunk both land on the right value.
+    assert_eq!(
+        Big::from_base_10_pow_k_limbs(3, &[0, 0, 5])
+            .unwrap()
+            .to_decimal_string(),
+        "5"
+    );
+    assert_eq!(
+        Big::from_base_10_pow_k_limbs(3, &[1, 0, 7])
+            .unwrap()
+            .to_decimal_string(),
+        "1000007"
+    );
+}
