@@ -605,52 +605,129 @@ fn strip(v: &mut Vec<u64>) {
     }
 }
 
-/// Unsigned long division of magnitudes: `(quotient, remainder)` with `a = quotient * b + remainder`,
-/// `0 <= remainder < b`. `b` MUST be non-empty (nonzero — the caller checks). Bit-at-a-time long
-/// division (simple + obviously-correct). Both results normalized.
+/// Unsigned division of magnitudes: `(quotient, remainder)` with `a = quotient * b + remainder`,
+/// `0 <= remainder < b`. `b` MUST be non-empty (nonzero — the caller checks). Both results normalized.
+/// Dispatches by divisor width: `a < b` is trivial, a single-limb divisor uses a linear scan, and a
+/// multi-limb divisor uses Knuth's Algorithm D (word-at-a-time long division).
 fn divmod_mag(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
     // a < b → quotient 0, remainder a.
     if Big::cmp_mag(a, b) == Ordering::Less {
         return (Vec::new(), a.to_vec());
     }
-    let nbits = a.len() * 64;
+    if b.len() == 1 {
+        return divmod_by_limb(a, b[0]);
+    }
+    knuth_divmod(a, b)
+}
+
+/// Divide a magnitude by a single nonzero limb: `(quotient, remainder)`. One `u128` division per limb,
+/// most-significant first, carrying the running remainder (always `< d`, so it fits a single limb).
+fn divmod_by_limb(a: &[u64], d: u64) -> (Vec<u64>, Vec<u64>) {
     let mut q = alloc::vec![0u64; a.len()];
-    let mut r: Vec<u64> = Vec::new(); // running remainder, normalized (no trailing zeros)
-    // Process dividend bits from most-significant to least.
-    for i in (0..nbits).rev() {
-        // r <<= 1
-        shl1(&mut r);
-        // bring down bit i of a into r's bit 0
-        let bit = (a[i / 64] >> (i % 64)) & 1;
-        if bit != 0 {
-            if r.is_empty() {
-                r.push(1);
-            } else {
-                r[0] |= 1;
-            }
-        }
-        // if r >= b { r -= b; set quotient bit i }
-        if Big::cmp_mag(&r, b) != Ordering::Less {
-            r = Big::sub_mag(&r, b);
-            q[i / 64] |= 1u64 << (i % 64);
-        }
+    let mut rem = 0u128;
+    let d = d as u128;
+    for i in (0..a.len()).rev() {
+        let cur = (rem << 64) | a[i] as u128; // rem < d ≤ 2^64, so this fits u128
+        q[i] = (cur / d) as u64;
+        rem = cur % d;
     }
     strip(&mut q);
-    strip(&mut r);
+    let r = if rem == 0 {
+        Vec::new()
+    } else {
+        alloc::vec![rem as u64]
+    };
     (q, r)
 }
 
-/// `r <<= 1` over a little-endian limb magnitude (normalized in/out).
-fn shl1(r: &mut Vec<u64>) {
-    let mut carry = 0u64;
-    for limb in r.iter_mut() {
-        let hi = *limb >> 63;
-        *limb = (*limb << 1) | carry;
-        carry = hi;
+/// Knuth's Algorithm D (TAOCP Vol. 2, §4.3.1) over base-2⁶⁴ limbs, for a divisor of ≥2 limbs. Requires
+/// `a >= b` and `b`'s top limb nonzero (both hold via `divmod_mag`'s dispatch). The `u32` version in
+/// Hacker's Delight §9-2 (`divmnu`) is the model, widened to `u64` limbs with `u128`/`i128` intermediates.
+fn knuth_divmod(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
+    let n = b.len(); // ≥ 2
+    let m = a.len() - n; // a.len() ≥ n, so m ≥ 0
+    let base = 1u128 << 64;
+
+    // D1. Normalize so the divisor's top limb has its high bit set — this bounds the quotient-digit
+    // estimate to at most 2 over the true digit. Shift both operands left by `s` bits.
+    let s = b[n - 1].leading_zeros();
+    let shl = |src: &[u64], dst: &mut [u64]| {
+        if s == 0 {
+            dst[..src.len()].copy_from_slice(src);
+        } else {
+            for i in (1..src.len()).rev() {
+                dst[i] = (src[i] << s) | (src[i - 1] >> (64 - s));
+            }
+            dst[0] = src[0] << s;
+        }
+    };
+    let mut vn = alloc::vec![0u64; n];
+    shl(b, &mut vn);
+    // `un` carries an extra high limb for the shift overflow (length m+n+1).
+    let mut un = alloc::vec![0u64; m + n + 1];
+    shl(a, &mut un);
+    if s != 0 {
+        un[m + n] = a[a.len() - 1] >> (64 - s);
     }
-    if carry != 0 {
-        r.push(carry);
+
+    let mut q = alloc::vec![0u64; m + 1];
+    // D2–D7. One quotient digit per iteration, most-significant first.
+    for j in (0..=m).rev() {
+        // D3. Estimate qhat = ⌊(un[j+n]·B + un[j+n-1]) / vn[n-1]⌋, then correct it down. The `||`
+        // short-circuit keeps qhat < B before the multiply test, so no intermediate overflows u128.
+        let num = ((un[j + n] as u128) << 64) | (un[j + n - 1] as u128);
+        let mut qhat = num / vn[n - 1] as u128;
+        let mut rhat = num % vn[n - 1] as u128;
+        loop {
+            if qhat >= base || qhat * (vn[n - 2] as u128) > (rhat << 64) + (un[j + n - 2] as u128) {
+                qhat -= 1;
+                rhat += vn[n - 1] as u128;
+                if rhat < base {
+                    continue;
+                }
+            }
+            break;
+        }
+
+        // D4. Multiply and subtract: un[j..=j+n] -= qhat · vn. `k`/`t` are signed (i128) borrow chains.
+        let mut k: i128 = 0;
+        for i in 0..n {
+            let p = qhat * (vn[i] as u128);
+            let t = un[j + i] as i128 - k - (p & 0xffff_ffff_ffff_ffff) as i128;
+            un[j + i] = t as u64;
+            k = (p >> 64) as i128 - (t >> 64);
+        }
+        let t = un[j + n] as i128 - k;
+        un[j + n] = t as u64;
+
+        // D5/D6. If the subtraction went negative, qhat was one too big: add the divisor back.
+        if t < 0 {
+            q[j] = qhat as u64 - 1;
+            let mut carry: i128 = 0;
+            for i in 0..n {
+                let t = un[j + i] as i128 + vn[i] as i128 + carry;
+                un[j + i] = t as u64;
+                carry = t >> 64;
+            }
+            un[j + n] = (un[j + n] as i128 + carry) as u64; // final carry cancels the borrow
+        } else {
+            q[j] = qhat as u64;
+        }
     }
+    strip(&mut q);
+
+    // D8. Unnormalize the remainder (the low n limbs of un), shifting right by `s`.
+    let mut r = alloc::vec![0u64; n];
+    if s == 0 {
+        r.copy_from_slice(&un[..n]);
+    } else {
+        for i in 0..n - 1 {
+            r[i] = (un[i] >> s) | (un[i + 1] << (64 - s));
+        }
+        r[n - 1] = un[n - 1] >> s;
+    }
+    strip(&mut r);
+    (q, r)
 }
 
 #[cfg(test)]
