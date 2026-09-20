@@ -15,9 +15,12 @@
 //! Run with `cargo bench -p etude-buffer`.
 
 use bytes::Bytes;
+use bytes::buf::UninitSlice;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_buffer::reader::Buffer as _;
+use etude_buffer::writer::Buffer as _;
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -76,5 +79,50 @@ fn bench_copy_into(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_copy_into);
+/// `put_uninit_slice` writes directly into the destination's spare capacity via a closure, avoiding a
+/// staging copy — but it zero-initializes the exposed region first (a soundness floor against exposing
+/// stale/uninitialized heap if the closure under-fills). When the closure fills the whole region (the
+/// common case — a socket read that fills its buffer), that memset is immediately overwritten. This
+/// measures the redundant-memset cost by contrasting `put_uninit_slice` (memset + fill) against a plain
+/// `put_slice` of the same payload (a single copy), at three sizes. The delta is the zero-init pass.
+fn bench_put_uninit(c: &mut Criterion) {
+    for &n in &[64usize, 1400, 65536] {
+        let label = n.to_string();
+        let src = vec![0xABu8; n];
+
+        // put_uninit_slice: zero-inits `n` bytes, then the closure fills all `n` (double write).
+        let mut g = group(c, "put_uninit/uninit_fill");
+        g.bench_function(BenchmarkId::new("vec", &label), |b| {
+            b.iter_batched(
+                || Vec::<u8>::with_capacity(n),
+                |mut dst| {
+                    dst.put_uninit_slice::<_, Infallible>(n, |u: &mut UninitSlice| {
+                        u.copy_from_slice(&src);
+                        Ok(())
+                    })
+                    .unwrap();
+                    black_box(dst)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+
+        // put_slice baseline: a single copy of the same payload, no zero-init.
+        let mut g = group(c, "put_uninit/put_slice");
+        g.bench_function(BenchmarkId::new("vec", &label), |b| {
+            b.iter_batched(
+                || Vec::<u8>::with_capacity(n),
+                |mut dst| {
+                    dst.put_slice(&src);
+                    black_box(dst)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.finish();
+    }
+}
+
+criterion_group!(benches, bench_copy_into, bench_put_uninit);
 criterion_main!(benches);
