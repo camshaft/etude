@@ -340,6 +340,33 @@ fn bench_abs(c: &mut Criterion) {
     unary(c, "abs", TIERS, |a| a.abs(), |a| a.abs());
 }
 
+/// In-place sign flips (`negate` / `abs_assign`) vs their allocating by-value twins (`neg` / `abs`).
+/// The in-place forms only flip the sign bit — O(1), no reallocation — so they stay flat across tiers
+/// while the by-value forms clone the whole magnitude. A consumer that owns a `Big` (e.g. etude-rational's
+/// `into_neg` / `into_abs`) uses these to avoid the clone entirely. num-bigint has no matching in-place op.
+fn bench_sign_flip_inplace(c: &mut Criterion) {
+    let mut g = group(c, "sign_flip_inplace");
+    let mut rng = Rng(0x0b5d_2e1f_74c3_a9e6);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        g.bench_with_input(BenchmarkId::new("negate-inplace", label), &a, |bch, a| {
+            bch.iter_batched(|| a.clone(), |mut x| x.negate(), BatchSize::SmallInput)
+        });
+        g.bench_with_input(BenchmarkId::new("neg-byvalue", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).neg()))
+        });
+        g.bench_with_input(
+            BenchmarkId::new("abs_assign-inplace", label),
+            &a,
+            |bch, a| bch.iter_batched(|| a.clone(), |mut x| x.abs_assign(), BatchSize::SmallInput),
+        );
+        g.bench_with_input(BenchmarkId::new("abs-byvalue", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).abs()))
+        });
+    }
+    g.finish();
+}
+
 /// `bit_len` — the value's bit width (position of the top set bit). O(1): the top limb plus a leading-
 /// zero count. num-bigint's counterpart is `BigInt::bits`.
 fn bench_bit_len(c: &mut Criterion) {
@@ -849,6 +876,7 @@ criterion_group!(
     bench_from_i64,
     bench_neg,
     bench_abs,
+    bench_sign_flip_inplace,
     bench_bit_len,
     bench_rem_u64,
     bench_to_i64_checked,
