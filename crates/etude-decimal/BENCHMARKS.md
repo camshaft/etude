@@ -166,19 +166,25 @@ each write directly. This wins every tier from `1024b` up (the `1024b` tier cros
 ~512 bits the split's fixed cost does not pay, so small/mid values keep the single-render path and still
 trail on the base-2↔base-10 conversion itself (`etude-bigint`'s to sharpen at small limb counts).
 
+`etude-bigint` #271 (two decimal digits per `to_decimal` step) sharpened that base conversion at every
+size, and `write_decimal` rides it: every tier moved in step — the small/mid gap narrowed (`64b`
+`1.24 → 1.14`, `256b` `1.72 → 1.47`, the 15-digit single-render case to parity `1.13 → 1.01`) and the
+large wins deepened (`1024b` `0.73 → 0.62`, `4096b` `0.61 → 0.55`).
+
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 186 ns    | 150.11 ns | 1.24 |
-| 256b  | 486 ns    | 281.87 ns | 1.72 |
-| 1024b | 1.712 µs  | 2.332 µs  | **0.73** |
-| 2048b | 4.227 µs  | 8.914 µs  | **0.47** |
-| 4096b | 12.78 µs  | 21.01 µs  | **0.61** |
+| 64b   | 176.98 ns | 155.25 ns | 1.14 |
+| 256b  | 430.05 ns | 293.34 ns | 1.47 |
+| 1024b | 1.421 µs  | 2.307 µs  | **0.62** |
+| 2048b | 3.733 µs  | 8.972 µs  | **0.42** |
+| 4096b | 11.72 µs  | 21.12 µs  | **0.55** |
 
-Small value (`12345678.9012345`, 15 digits — single-render path):
+Small value (`12345678.9012345`, 15 digits — single-render path): now at parity, the base-conversion
+gap closed by #271.
 
 | case | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 15 digits | 160.5 ns | 142.0 ns | 1.13 |
+| 15 digits | 150.28 ns | 148.51 ns | 1.01 |
 
 ### `from_str` — parse a decimal literal — we win at scale
 
@@ -330,9 +336,12 @@ rejecting it, so there is no same-semantics comparison to run.
 - **`from_str` and `to_string` now win at scale.** `from_str` groups digits into base-`10¹⁹` limbs
   (`from_base_10_pow_k_limbs`); `to_string` streams digits via `Big::write_decimal` and splits a wide
   coefficient with a single-limb divide. `from_str` beats `bigdecimal` from 1024b up; `to_string` from
-  1024b up as well (its 1024b tier crossed to a win — `0.73` — after `etude-bigint` #197 raised the
-  `to_decimal` recursion threshold that `write_decimal` rides, and 2048b/4096b deepened to `0.47`/`0.61`).
-  Small/mid values sit ~1.1–1.7× behind on the base-conversion cost itself.
+  1024b up as well (its 1024b tier crossed to a win after `etude-bigint` #197 raised the `to_decimal`
+  recursion threshold that `write_decimal` rides). `etude-bigint` #271 (two decimal digits per `to_decimal`
+  step) then lifted `to_string` at every tier — the large wins deepened to `0.62`/`0.42`/`0.55` and the
+  small/mid gap narrowed to ~1.1–1.5× (`64b` `1.14`, `256b` `1.47`, the 15-digit case to parity `1.01`).
+  `from_str` does not ride `to_decimal`, so its small/mid tiers still sit ~1.0–1.3× behind on the
+  base-conversion cost itself.
 - **`to_f64` wins at every size except 256b** — from 1024b up the direct big-int-ratio method is
   3×–13× faster than `bigdecimal` (its conversion grows super-linearly); small decimal literals take a
   single-IEEE-op fast path ~23× faster (5.9 ns vs 138 ns); and a coefficient that fits `u128` (the `64b`
@@ -344,9 +353,10 @@ rejecting it, so there is no same-semantics comparison to run.
 
 ## Next optimizations (ranked by scoreboard leverage)
 
-1. **`to_string` / `from_str` small-mid tiers** — the residual ~1.1–1.8× is the base-10 ↔ binary
+1. **`to_string` / `from_str` small-mid tiers** — the residual ~1.0–1.5× is the base-10 ↔ binary
    conversion itself (`Big::write_decimal` / `from_base_10_pow_k_limbs`), which is `etude-bigint`'s to
-   sharpen at small limb counts.
+   sharpen further at small limb counts (its #271 two-digits-per-step already lifted every `to_string` tier
+   and closed the 15-digit case to parity).
 2. **`sub` / `mul` large tiers** — bottlenecked on the underlying `Big` subtract/multiply
    (`etude-bigint`'s to shave).
 3. **`to_f64` at 256b** — the coefficient just exceeds `u128`, so it misses the native fast path and pays
