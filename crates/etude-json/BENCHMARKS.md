@@ -76,6 +76,20 @@ digit runs straddling leaf boundaries). Measured before → after (aarch64, jema
 - `array_10k_ints` −9.8% and `array_10k_floats` −9.1% — the short-number common case improves too
   (fewer calls / bounds checks per number), so the win is not limited to long runs.
 
+## Whitespace scan optimization (applied) — bulk-skip whitespace runs
+
+`skip_whitespace`, run before every token, advanced one `peek`/`bump` per byte. It now bulk-skips the
+run with a per-leaf `position` scan (the same lever as the string and number scans), so the
+indentation between tokens in a pretty-printed document costs one scan per leaf rather than a call per
+space. Byte-behaviour is unchanged (whitespace is still exactly space / tab / LF / CR; the
+differential and chunk-invariant tests cover it). Measured before → after (aarch64, jemalloc,
+release):
+
+- **`pretty_objects_1k` 533 µs → 479 µs (−10.2%)** — the 1 000-object document re-serialized with
+  `serde_json` pretty-printing (indentation and a newline around every token), the common config-file
+  / human-readable-payload shape. A new corpus shape added with this change; the other documents are
+  compact, so they have no inter-token whitespace to skip.
+
 ## Span-resolution cost — the O(log n)-per-token re-access (`tokenize_and_read`)
 
 Tokenizing is cheap and 0-alloc, but a `Span` is `(offset, len)`: reading a token's bytes later means
