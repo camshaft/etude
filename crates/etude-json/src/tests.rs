@@ -576,3 +576,242 @@ fn differential_arbitrary_input() {
         .cloned()
         .for_each(|s| check_arbitrary(&s));
 }
+
+// ─── number_parts faithful-decomposition oracle ───────────────────────────────────────────────────
+//
+// `number_parts()`/[`NumberParts`] is the contract `etude_decimal::from_parts` consumes, and the
+// differential oracle above canonicalizes every number through `serde_json` (an `f64`), so it never
+// exercises a lexeme with more precision than `f64` carries. This harness assembles valid JSON number
+// lexemes from structured components — including digit runs far past `f64` precision — tokenizes them
+// across several rope chunk layouts (so a digit run straddling a rope-leaf boundary is exercised),
+// calls `number_parts()`, resolves each digit span back to bytes, and asserts the decomposition
+// faithfully matches the components the lexeme was built from: no digit is dropped or misassigned at
+// any precision. `serde_json` cannot be the oracle here; the generator's own components are the
+// ground truth, and canonical lexemes additionally self-reconstruct from the recorded parts.
+
+/// A structured JSON number: the exact digit groups a lexeme is assembled from, so the parts
+/// `number_parts()` returns can be checked against ground truth rather than against a re-parse.
+struct NumberSpec {
+    negative: bool,
+    /// JSON integer digits, no sign: `"0"` or `[1-9][0-9]*`.
+    integer: &'static str,
+    /// Fraction digits after `.` (no `.`), or `None`.
+    fraction: Option<&'static str>,
+    /// `(explicit '-', digits)` after the exponent marker, or `None`. A `+`/unsigned exponent is
+    /// `false`; [`NumberSpec::exp_plus`] controls whether a non-negative exponent is spelled with `+`.
+    exponent: Option<(bool, &'static str)>,
+    /// Spell the exponent marker `E` instead of `e` (parts records neither case).
+    exp_upper: bool,
+    /// Spell an explicit `+` on a non-negative exponent (parts records no `+`).
+    exp_plus: bool,
+}
+
+impl NumberSpec {
+    fn int(negative: bool, integer: &'static str) -> Self {
+        Self {
+            negative,
+            integer,
+            fraction: None,
+            exponent: None,
+            exp_upper: false,
+            exp_plus: false,
+        }
+    }
+
+    fn frac(negative: bool, integer: &'static str, fraction: &'static str) -> Self {
+        Self {
+            negative,
+            integer,
+            fraction: Some(fraction),
+            exponent: None,
+            exp_upper: false,
+            exp_plus: false,
+        }
+    }
+
+    fn exp(
+        negative: bool,
+        integer: &'static str,
+        fraction: Option<&'static str>,
+        exponent: (bool, &'static str),
+        exp_upper: bool,
+        exp_plus: bool,
+    ) -> Self {
+        Self {
+            negative,
+            integer,
+            fraction,
+            exponent: Some(exponent),
+            exp_upper,
+            exp_plus,
+        }
+    }
+
+    /// Assemble the JSON lexeme these components spell.
+    fn lexeme(&self) -> String {
+        let mut s = String::new();
+        if self.negative {
+            s.push('-');
+        }
+        s.push_str(self.integer);
+        if let Some(f) = self.fraction {
+            s.push('.');
+            s.push_str(f);
+        }
+        if let Some((neg, digits)) = self.exponent {
+            s.push(if self.exp_upper { 'E' } else { 'e' });
+            if neg {
+                s.push('-');
+            } else if self.exp_plus {
+                s.push('+');
+            }
+            s.push_str(digits);
+        }
+        s
+    }
+}
+
+/// Tokenize `spec`'s lexeme across several rope chunk layouts and assert `number_parts()` decomposes
+/// it faithfully — sign, integer, fraction, exponent digits and exponent sign all match the
+/// components, `number_is_integer()` agrees, and a canonical lexeme self-reconstructs from the parts.
+fn assert_number_parts(spec: &NumberSpec) {
+    let lexeme = spec.lexeme();
+    let bytes = lexeme.as_bytes();
+    for chunk in [1usize, 2, 3, 5, 8, bytes.len().max(1)] {
+        let r = rope(bytes, chunk);
+        let toks: Vec<Token> = Tokenizer::new(&r)
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| panic!("{lexeme:?} at chunk={chunk} failed to tokenize: {e:?}"));
+        assert_eq!(
+            toks.len(),
+            1,
+            "{lexeme:?} at chunk={chunk}: not a single token"
+        );
+        let t = &toks[0];
+        assert_eq!(t.kind(), TokenKind::Number, "{lexeme:?} at chunk={chunk}");
+
+        let parts = t.number_parts().expect("a Number token has parts");
+
+        assert_eq!(
+            parts.negative, spec.negative,
+            "sign for {lexeme:?} at chunk={chunk}"
+        );
+
+        assert_eq!(
+            span_bytes(&r, parts.integer),
+            spec.integer.as_bytes(),
+            "integer digits for {lexeme:?} at chunk={chunk}",
+        );
+
+        match (parts.fraction, spec.fraction) {
+            (Some(span), Some(expect)) => assert_eq!(
+                span_bytes(&r, span),
+                expect.as_bytes(),
+                "fraction digits for {lexeme:?} at chunk={chunk}",
+            ),
+            (None, None) => {}
+            (got, want) => panic!(
+                "fraction presence mismatch for {lexeme:?} at chunk={chunk}: got {got:?} want {want:?}"
+            ),
+        }
+
+        match (parts.exponent, spec.exponent) {
+            (Some(span), Some((neg, expect))) => {
+                assert_eq!(
+                    span_bytes(&r, span),
+                    expect.as_bytes(),
+                    "exponent digits for {lexeme:?} at chunk={chunk}",
+                );
+                assert_eq!(
+                    parts.exponent_negative, neg,
+                    "exponent sign for {lexeme:?} at chunk={chunk}",
+                );
+            }
+            (None, None) => assert!(
+                !parts.exponent_negative,
+                "exponent_negative set without an exponent for {lexeme:?} at chunk={chunk}",
+            ),
+            (got, want) => panic!(
+                "exponent presence mismatch for {lexeme:?} at chunk={chunk}: got {got:?} want {want:?}"
+            ),
+        }
+
+        // number_is_integer() is derived from the same recorded parts and must agree.
+        assert_eq!(
+            t.number_is_integer(),
+            Some(spec.fraction.is_none() && spec.exponent.is_none()),
+            "number_is_integer for {lexeme:?} at chunk={chunk}",
+        );
+
+        // Canonical self-reconstruction (the dep-free consumer oracle): a lexeme spelled canonically
+        // (lowercase `e`, no explicit `+`) re-assembles exactly from the recorded parts, so no digit
+        // is dropped or misassigned regardless of precision.
+        if !spec.exp_upper && !spec.exp_plus {
+            let mut rebuilt = String::new();
+            if parts.negative {
+                rebuilt.push('-');
+            }
+            rebuilt.push_str(core::str::from_utf8(&span_bytes(&r, parts.integer)).unwrap());
+            if let Some(span) = parts.fraction {
+                rebuilt.push('.');
+                rebuilt.push_str(core::str::from_utf8(&span_bytes(&r, span)).unwrap());
+            }
+            if let Some(span) = parts.exponent {
+                rebuilt.push('e');
+                if parts.exponent_negative {
+                    rebuilt.push('-');
+                }
+                rebuilt.push_str(core::str::from_utf8(&span_bytes(&r, span)).unwrap());
+            }
+            assert_eq!(rebuilt, lexeme, "self-reconstruction at chunk={chunk}");
+        }
+    }
+}
+
+#[test]
+fn number_parts_faithful_decomposition() {
+    // Digit runs past f64 precision: the etude_decimal domain the serde_json oracle cannot reach.
+    const INT_40: &str = "1234567890123456789012345678901234567890";
+    const INT_80: &str =
+        "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    const FRAC_40: &str = "0987654321098765432109876543210987654321";
+
+    let specs = [
+        // Integers, both signs, including -0 and long runs.
+        NumberSpec::int(false, "0"),
+        NumberSpec::int(true, "0"),
+        NumberSpec::int(false, "7"),
+        NumberSpec::int(true, "7"),
+        NumberSpec::int(false, "10"),
+        NumberSpec::int(false, "1000000000000000000000"),
+        NumberSpec::int(false, INT_40),
+        NumberSpec::int(true, INT_80),
+        // Fractions, including a leading-zero fraction and a 40-digit fraction.
+        NumberSpec::frac(false, "0", "5"),
+        NumberSpec::frac(true, "3", "14159"),
+        NumberSpec::frac(false, "0", "0000000001"),
+        NumberSpec::frac(true, INT_40, FRAC_40),
+        // Exponents: marker case and sign spelling vary; parts records only digits + the neg flag.
+        NumberSpec::exp(false, "1", None, (false, "5"), false, false), // 1e5
+        NumberSpec::exp(false, "1", None, (false, "5"), true, false),  // 1E5
+        NumberSpec::exp(false, "1", None, (false, "5"), false, true),  // 1e+5
+        NumberSpec::exp(false, "1", None, (true, "5"), false, false),  // 1e-5
+        NumberSpec::exp(false, "6", None, (false, "308"), false, false), // past f64 max
+        NumberSpec::exp(false, "1", None, (true, "400"), false, false), // past f64 min
+        // High-precision combined shapes: integer + fraction + exponent, the from_parts consumer case.
+        NumberSpec::exp(true, INT_40, Some(FRAC_40), (true, "30"), false, false),
+        NumberSpec::exp(false, INT_80, Some(FRAC_40), (false, "12"), true, true), // E and +
+        NumberSpec::exp(
+            true,
+            "9",
+            Some("000000000000000000001"),
+            (true, "123"),
+            false,
+            false,
+        ),
+    ];
+
+    for spec in &specs {
+        assert_number_parts(spec);
+    }
+}
