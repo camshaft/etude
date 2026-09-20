@@ -137,6 +137,35 @@ impl Rng {
         let b = Rational::new(nb, db).expect("nonzero denominator");
         (a, b)
     }
+    /// A pair of `nbytes`-wide rationals whose DENOMINATORS share a small factor `g`, so `add`/`sub` take
+    /// the SHARED-FACTOR `addsub_big` branch (`den = lcm`, then a reduce `gcd(num, g)`) — the common
+    /// real-world case (fractions with related denominators, e.g. `1/12 + 1/8`) that `rat_pair` (coprime,
+    /// no reduce) deliberately excludes. The denominators are `g * ca` and `g * cb` with `ca`/`cb` coprime,
+    /// so `gcd(den_a, den_b) == g` exactly; `g` is a small (single-limb) constant, so the branch's final
+    /// `gcd(wide num, small g)` exercises etude-bigint's single-limb gcd fast path (#295).
+    fn rat_pair_shared(&mut self, nbytes: usize) -> (Rational, Rational) {
+        let one = Big::from_i64(1);
+        let g = Big::from_i64(2 * 3 * 5 * 7); // 210 — a small, single-limb shared factor
+        let ca = self.big(nbytes);
+        let mut cb = self.big(nbytes);
+        while ca.gcd(&cb) != one {
+            cb = cb.add(&one);
+        }
+        let da = g.mul(&ca);
+        let db = g.mul(&cb);
+        let coprime_num = |rng: &mut Self, den: &Big| {
+            let mut n = rng.big(nbytes);
+            while n.gcd(den) != one {
+                n = n.add(&one);
+            }
+            n
+        };
+        let na = coprime_num(self, &da);
+        let nb = coprime_num(self, &db);
+        let a = Rational::new(na, da).expect("nonzero denominator");
+        let b = Rational::new(nb, db).expect("nonzero denominator");
+        (a, b)
+    }
 }
 
 /// The `num-bigint` value equal to `b` (via the public two's-complement encoding).
@@ -166,13 +195,15 @@ fn group<'a>(
 fn binop(
     c: &mut Criterion,
     name: &str,
+    mk_pair: impl Fn(&mut Rng, usize) -> (Rational, Rational),
     ours: impl Fn(&Rational, &Rational) -> Rational,
     theirs: impl Fn(&BigRational, &BigRational) -> BigRational,
 ) {
     let mut g = group(c, name);
     for &(label, nbytes) in TIERS {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (nbytes as u64));
-        let pairs: Vec<(Rational, Rational)> = (0..SAMPLES).map(|_| rng.rat_pair(nbytes)).collect();
+        let pairs: Vec<(Rational, Rational)> =
+            (0..SAMPLES).map(|_| mk_pair(&mut rng, nbytes)).collect();
         let refs: Vec<(BigRational, BigRational)> =
             pairs.iter().map(|(a, b)| (to_ref(a), to_ref(b))).collect();
         g.throughput(criterion::Throughput::Elements(SAMPLES as u64));
@@ -199,10 +230,26 @@ fn binop(
 }
 
 fn bench(c: &mut Criterion) {
-    binop(c, "add", |a, b| a.add(b), |a, b| a + b);
-    binop(c, "sub", |a, b| a.sub(b), |a, b| a - b);
-    binop(c, "mul", |a, b| a.mul(b), |a, b| a * b);
-    binop(c, "div", |a, b| a.div(b).expect("nonzero"), |a, b| a / b);
+    binop(c, "add", Rng::rat_pair, |a, b| a.add(b), |a, b| a + b);
+    binop(c, "sub", Rng::rat_pair, |a, b| a.sub(b), |a, b| a - b);
+    binop(c, "mul", Rng::rat_pair, |a, b| a.mul(b), |a, b| a * b);
+    binop(
+        c,
+        "div",
+        Rng::rat_pair,
+        |a, b| a.div(b).expect("nonzero"),
+        |a, b| a / b,
+    );
+    // Shared-factor denominators: exercises addsub_big's shared-factor branch (den = lcm, reduce
+    // gcd(num, small g)) — the common real-world case rat_pair (coprime) excludes, and where #295's
+    // single-limb gcd fast path applies. `sub_shared` uses the identical reduction path as `add_shared`.
+    binop(
+        c,
+        "add_shared",
+        Rng::rat_pair_shared,
+        |a, b| a.add(b),
+        |a, b| a + b,
+    );
 
     // Small (i64-fitting) operands: the common real-world case (e.g. `3/10`), and the one the byte-width
     // tiers UNDER-represent (their top bit is set, so a 64b coefficient exceeds i64). Exercises the native

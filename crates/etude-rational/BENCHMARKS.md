@@ -95,6 +95,30 @@ subtract in place (#207), turning raw gcd into a full sweep. The only non-wins l
    close the borrowing `recip`/`neg`/`abs`@64b together. For callers that own their operand, the consuming
    variants below already eliminate that clone locally.
 
+## Shared-factor add/sub (`add_shared`)
+
+The core `add`/`sub` board uses **coprime** denominators (the common `addsub_big` branch: `den = b*d`, no
+reduction). The other branch — **denominators sharing a factor** `g` — is the everyday case (`1/12 + 1/8`,
+`1/6 + 1/4`): there `addsub_big` works over the `lcm` and reduces the numerator against the small `g`
+(`gcd(num, g)`, using the identity `gcd(N, lcm) = gcd(N, g)`). The `add_shared` group measures it with
+denominators `g·ca` / `g·cb` (`ca ⊥ cb`, so `gcd = g`) and `g = 210` (a single-limb factor, so the reduce
+is `gcd(wide num, small g)` — exactly etude-bigint's single-limb gcd fast path, #295):
+
+| tier  | etude    | num-rational | ratio    |
+|-------|----------|--------------|----------|
+| 64b   | 0.79 µs  | 4.41 µs      | **0.18** |
+| 256b  | 2.73 µs  | 17.3 µs      | **0.16** |
+| 1024b | 18.0 µs  | 95.6 µs      | **0.19** |
+| 2048b | 54.6 µs  | 275 µs       | **0.20** |
+| 4096b | 189 µs   | 886 µs       | **0.21** |
+
+**The shared-factor branch WINS every tier (0.16–0.21×)**, essentially matching the coprime branch
+(0.11–0.21×) — a touch costlier at 64b (0.18× vs 0.11×) for the extra reduce `gcd(num, g)` + two
+`div_exact`, converging to the same 0.21× at 4096b (both branches are multiply-bound there). This closes the
+add/sub story: whether or not the denominators share a factor, etude-rational is ~5× num-rational. The
+single-limb `g` keeps the reduce `O(n)` via #295 — a wide `gcd(num, g)` would otherwise be `O(bit_len·n)`.
+Correctness is covered by the differential oracle (random operands routinely hit the shared-factor branch).
+
 ## Consuming sign transforms (`into_recip`/`into_neg`/`into_abs`)
 
 The borrowing `recip`/`neg`/`abs` must clone both components to return an owned value, and at 64b that
@@ -276,15 +300,23 @@ very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
-- **slice 43** — wired etude-bigint's in-place `Big::negate` / `Big::abs_assign` (landed as etude #275) into
-  the consuming sign transforms. `into_neg`/`into_abs` now flip the numerator's sign in place instead of
-  allocating a fresh magnitude via `Big::neg`/`Big::abs`, and `into_recip`'s negative-numerator branch
-  negates the swapped fields in place — all three are fully zero-allocation. **`into_neg`@64b 0.94× → 0.40×**,
-  **`into_abs`@64b 1.01× → 0.47×** (loss → win). Also surfaced an unrelated `into_recip`@64b regression
-  (7.3 → 14 ns on the unchanged swap branch; num-rational stable) flagged to etude-bigint as a 1-limb `Big`
-  move/`Drop` cost increase. (An interim `RationalSum` accumulator, proposed as etude #294, was **closed** by
-  operator design-taste ruling — no separate data structure for marginal gains — so this in-place-on-the-
-  existing-type work is the landed form of the scratch-reuse lever.)
+- **slice 44** (bench-only) — added the `add_shared` group: add/sub on denominators sharing a small factor
+  (`g = 210`), exercising `addsub_big`'s **shared-factor branch** (`den = lcm`, reduce `gcd(num, g)`) that
+  the coprime `rat_pair` board deliberately excludes. This is the everyday case (`1/12 + 1/8`) and the one
+  where etude-bigint's single-limb gcd fast path (#295) applies (the reduce is `gcd(wide num, small g)`).
+  It **wins every tier (0.16–0.21×)**, essentially matching the coprime branch — closing the add/sub story
+  (both branches ~5× num-rational). Confirmed on fresh main that #295 does **not** move the coprime board
+  (normalize/add_eqden unchanged at 0.84×): those compute `gcd(wide, wide)`, so the single-limb fast path
+  only reaches the shared-factor reduce. `binop` now takes the operand-pair generator as a parameter.
+- **slice 43** (etude #299) — wired etude-bigint's in-place `Big::negate` / `Big::abs_assign` (landed as etude
+  #275) into the consuming sign transforms. `into_neg`/`into_abs` now flip the numerator's sign in place
+  instead of allocating a fresh magnitude via `Big::neg`/`Big::abs`, and `into_recip`'s negative-numerator
+  branch negates the swapped fields in place — all three are fully zero-allocation. **`into_neg`@64b 0.94× →
+  0.40×**, **`into_abs`@64b 1.01× → 0.47×** (loss → win). Also surfaced an unrelated `into_recip`@64b
+  regression (7.3 → 14 ns on the unchanged swap branch; num-rational stable) flagged to etude-bigint as a
+  1-limb `Big` move/`Drop` cost increase. (An interim `RationalSum` accumulator, proposed as etude #294, was
+  **closed** by operator design-taste ruling — no separate data structure for marginal gains — so this
+  in-place-on-the-existing-type work is the landed form of the scratch-reuse lever.)
 - **slice 42** (bench-only) — hardened the core binop board against operand luck. Each `add`/`sub`/`mul`/`div`
   cell is now timed per-op, averaged over 8 operand pairs per tier (criterion `Throughput`), with coprime
   denominators so add/sub measure the common `addsub_big` branch. A single random draw could land on an
