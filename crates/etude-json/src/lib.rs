@@ -324,10 +324,25 @@ impl<'a> Tokenizer<'a> {
 
     /// Advance past JSON insignificant whitespace (space, tab, LF, CR).
     fn skip_whitespace(&mut self) {
-        while let Some(b) = self.cursor.peek() {
-            match b {
-                b' ' | b'\t' | b'\n' | b'\r' => self.cursor.bump(),
-                _ => break,
+        // Bulk-skip a run of insignificant whitespace with one per-leaf `position` scan (as the string
+        // and number scans do), instead of a `peek`/`bump` per byte — so the indentation between tokens
+        // in a pretty-printed document costs one scan per leaf rather than a call per space.
+        loop {
+            let tail = self.cursor.chunk_tail();
+            match tail
+                .iter()
+                .position(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+            {
+                Some(k) => {
+                    self.cursor.skip_in_chunk(k);
+                    return;
+                }
+                None => {
+                    if tail.is_empty() {
+                        return;
+                    }
+                    self.cursor.skip_in_chunk(tail.len());
+                }
             }
         }
     }
