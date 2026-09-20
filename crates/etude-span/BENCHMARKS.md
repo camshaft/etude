@@ -58,17 +58,20 @@ a real tokenizer would.
 
 | tokenizer | 4 B tokens | 16 B tokens | 100 B tokens |
 |-----------|------------|-------------|--------------|
-| `tokenize/bulk` | 98.3 µs | 50.9 µs | 36.2 µs |
-| `tokenize/peek_bump` | 178 µs | 172 µs | 171 µs |
+| `tokenize/bulk` | 75.0 µs | 45.8 µs | 35.8 µs |
+| `tokenize/peek_bump` | 77.6 µs | 53.3 µs | 47.1 µs |
 
-Routing each token's run through `chunk_tail`/`skip_in_chunk` beats the naive per-byte tokenizer by
-**~1.8× at 4 B tokens, ~3.4× at 16 B, and ~4.7× at 100 B** — the win grows with token length because a
-longer run is one slice-scan skip instead of many `bump`s. The naive path is nearly flat (~171–178 µs)
-regardless of token length: it peeks every byte, so its cost is the per-byte `peek`/`bump` overhead the
-scan section describes, not the tokenization structure. The bulk path's floor at short tokens (98 µs)
-is the delimiter density — one `chunk_tail`/`position`/`skip_in_chunk` cycle plus a delimiter `bump`
-per token, ~13k tokens over the input. The takeaway for tokenizer authors: scan token runs with the
-bulk path; reserve `peek`/`bump` for single-byte decisions (delimiters, one-byte lookahead).
+These are measured with the cursor hot methods `#[inline]` (as they are on `main`). Routing each token's
+run through `chunk_tail`/`skip_in_chunk` still wins, but only **~1.03× at 4 B tokens, ~1.16× at 16 B, and
+~1.31× at 100 B** — the advantage grows with token length (a longer run is one slice-scan skip instead of
+many `bump`s), but for short tokens the two are effectively tied. That is a big change from the numbers
+this harness first recorded, when `peek_bump` was 171–178 µs and bulk was 1.8–4.7× faster: back then most
+of `peek_bump`'s cost was the cross-crate `peek`/`bump` call overhead, and inlining (the `#[inline]` win)
+cut it ~2.3–3.6× here (178 → 77.6, 172 → 53.3, 171 → 47.1 µs). With that overhead gone, the residual bulk
+advantage is just slice-scan-vs-per-byte-`Option`/branch, which only matters once tokens are long. The
+takeaway for tokenizer authors: bulk `chunk_tail`/`skip_in_chunk` is still the right default for scanning
+a run and pulls clearly ahead on longer tokens, but the per-byte `peek`/`bump` path is no longer a cliff —
+it is fine for short-token or decision-heavy scanning now that it inlines.
 
 ## `refill` — the leaf-boundary cost in isolation (runnable: `cargo bench -p etude-span -- refill`)
 
@@ -79,16 +82,18 @@ bytes — over a fixed 64 KiB input at four leaf sizes:
 
 | refill/skip_leaves | 4 KiB × 16 | 1 KiB × 64 | 256 B × 256 | 64 B × 1024 |
 |--------------------|------------|------------|-------------|-------------|
-| total | 98 ns | 332 ns | 1.46 µs | 5.76 µs |
-| per refill | 6.1 ns | 5.2 ns | 5.7 ns | 5.6 ns |
+| total | 84 ns | 271 ns | 1.19 µs | 4.64 µs |
+| per refill | 5.2 ns | 4.2 ns | 4.7 ns | 4.5 ns |
 
-The per-refill cost is **flat at ~5–6 ns regardless of leaf size** — it is fixed per-leaf work, not a
-function of leaf content, so streaming a rope of `K` leaves costs ~5–6 ns × `K` before any byte is
-touched. This composes the `cursor/bulk` scan numbers: at 64 B leaves refill is ~5.8 µs of bulk's
-~16 µs (~36 % — a fragmented rope spends over a third of a bulk scan just crossing boundaries), while at
-4 KiB leaves it is 98 ns of ~5.8 µs (~2 %) and the per-leaf byte work dominates. The practical read: the
-cursor is cheap to advance, but very small leaves make refill a real fraction of a scan — another reason
-a rope's leaves want to be chunk-sized, not byte-sized.
+The per-refill cost is **flat at ~4–5 ns regardless of leaf size** — it is fixed per-leaf work, not a
+function of leaf content, so streaming a rope of `K` leaves costs ~4–5 ns × `K` before any byte is
+touched. (These are measured with the cursor `#[inline]`'d, as on `main`; inlining `skip_in_chunk` shaved
+the per-refill cost from the ~5–6 ns this harness first recorded.) This composes the `cursor/bulk` scan
+numbers: at 64 B leaves refill is ~4.6 µs of bulk's ~16 µs (~29 % — a fragmented rope spends nearly a
+third of a bulk scan just crossing boundaries), while at 4 KiB leaves it is 84 ns of ~5.5 µs (~1.5 %) and
+the per-leaf byte work dominates. The practical read: the cursor is cheap to advance, but very small
+leaves make refill a real fraction of a scan — another reason a rope's leaves want to be chunk-sized, not
+byte-sized.
 
 ## Next targets
 
