@@ -178,6 +178,12 @@ Etude-only measurements (no num-bigint counterpart), for regression guarding:
 | cmp_sign_magnitude_bytes              | 5.55 ns | 16.3 ns | 53.8 ns | 215 ns  |
 | to_sign_magnitude_bytes_into          | 6.35 ns | 8.03 ns | 9.31 ns | 15.5 ns |
 
+`negate` / `abs_assign` are O(1) in-place sign flips (they touch only the sign bit — no reallocation, no
+limb copy), the twins of the allocating `neg` / `abs`. A consumer that owns a `Big` (e.g. etude-rational's
+`into_neg` / `into_abs`) uses them to avoid the magnitude clone entirely: at the small tiers where the
+clone is the whole cost, in-place beats by-value — 64b 8.4 vs 13.0 ns (**−35%**), 256b 9.2 vs 12.8 ns
+(**−28%**), 1024b 12.5 vs 14.2 ns (−12%). num-bigint has no matching in-place op.
+
 `write_decimal` into a pre-grown sink is a touch faster than `to_decimal_string`'s fresh-allocation
 wrapper at 64b (49.9 vs 61.9 ns), confirming the sink path saves the per-call `String` allocation.
 Scalar codecs are flat: `i64_checked_from_sign_magnitude_bytes` 5.43 ns, `i128_from_sign_magnitude_bytes`

@@ -87,6 +87,14 @@ fn check_pair(a: &Big, b: &Big) {
         assert_eq!(acc, a.sub(b), "sub_assign == sub {a:?} {b:?}");
         assert_eq!(to_ref(&acc), &ra - &rb, "sub_assign value {a:?} {b:?}");
     }
+    // In-place sign flips must match their by-value twins exactly (canonical repr, so `==` is strict):
+    // this pins the signed-zero invariant (negating zero is a no-op) and abs clearing the sign.
+    let mut neg_ip = a.clone();
+    neg_ip.negate();
+    assert_eq!(neg_ip, a.neg(), "negate {a:?}");
+    let mut abs_ip = a.clone();
+    abs_ip.abs_assign();
+    assert_eq!(abs_ip, a.abs(), "abs_assign {a:?}");
     assert_eq!(
         a.to_decimal_string(),
         ra.to_string(),

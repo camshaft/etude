@@ -395,6 +395,22 @@ impl Big {
         }
     }
 
+    /// Negate in place — `O(1)`, just flips the sign bit (no reallocation, no limb copy). Zero stays
+    /// non-negative (the canonical signed-zero invariant), so negating zero is a no-op. The in-place
+    /// twin of [`Big::neg`], for a consumer that owns a `Big` and wants to reuse its allocation.
+    pub fn negate(&mut self) {
+        if !self.mag.is_empty() {
+            self.neg = !self.neg;
+        }
+    }
+
+    /// Set this to its absolute value in place — `O(1)`, just clears the sign bit (no reallocation, no
+    /// limb copy). Always canonical (zero and positive values are already non-negative). The in-place
+    /// twin of [`Big::abs`], for a consumer that owns a `Big` and wants to reuse its allocation.
+    pub fn abs_assign(&mut self) {
+        self.neg = false;
+    }
+
     /// `self - other`. Computes `self + (-other)` by flipping `other`'s sign as a parameter — no negated
     /// copy of `other`'s magnitude is allocated. (`other`'s sign is irrelevant when it is zero: an empty
     /// magnitude normalizes to canonical zero regardless.)
