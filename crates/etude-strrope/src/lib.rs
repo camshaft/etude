@@ -377,6 +377,24 @@ impl Iterator for Chars<'_> {
             self.set_cur(bytes);
         }
     }
+
+    /// Counting chars needs no decoding: the number of `char`s is the number of UTF-8 leading bytes
+    /// (every byte that is not a `0b10xx_xxxx` continuation byte). Scan the remaining bytes and count
+    /// those, across chunks — the same specialization `str::Chars::count` uses — instead of decoding
+    /// each codepoint via the default `Iterator::count`. Accounts for mid-iteration state: any chars
+    /// left in the current chunk's decoder, plus the single codepoint whose leading bytes are already
+    /// held in `carry` (its continuation bytes sit at the front of the upcoming chunks and are skipped
+    /// by the continuation-byte test, so it is counted exactly once).
+    fn count(self) -> usize {
+        let mut n = self.cur.count();
+        if self.carry_len > 0 {
+            n += 1;
+        }
+        for chunk in self.chunks {
+            n += chunk.iter().filter(|&&b| (b as i8) >= -0x40).count();
+        }
+        n
+    }
 }
 
 /// Iterator over `(byte_offset, char)` pairs of a [`StrRope`] (see [`StrRope::char_indices`]).
@@ -1129,6 +1147,14 @@ mod tests {
                 text.char_indices().collect::<Vec<_>>(),
                 "char_indices() mismatch at chunk size {size}"
             );
+            // The specialized `Chars::count()` (byte scan, no decode) must equal the decoded count,
+            // fresh and after partially advancing (so `cur`/`carry` mid-iteration state is exercised).
+            assert_eq!(s.chars().count(), text.chars().count(), "count at size {size}");
+            let mut it = s.chars();
+            for _ in 0..3 {
+                it.next();
+            }
+            assert_eq!(it.count(), text.chars().count() - 3, "mid-iter count at size {size}");
         }
     }
 
