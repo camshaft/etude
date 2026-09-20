@@ -692,6 +692,15 @@ impl Decimal {
             let p = POW10_F64[self.exp.unsigned_abs() as usize]; // exact: 10^0..=10^22
             return if self.exp >= 0 { cf * p } else { cf / p };
         }
+        // Native u128 fast path: a coefficient magnitude that fits u128 (covers the whole 64-bit tier and
+        // beyond) converts through fixed-width arithmetic — the same correctly-rounded algorithm as the
+        // exact Big path below, without its per-operation Big allocations. Falls through on any u128
+        // overflow or a subnormal result.
+        if let Some(v) = self.coeff.to_i128_checked()
+            && let Some(f) = to_f64_u128_fast(v.unsigned_abs(), self.exp, v.is_negative())
+        {
+            return f;
+        }
         let neg = self.coeff.is_negative();
         let sign = if neg { 1u64 << 63 } else { 0 };
         let inf = if neg {
@@ -1014,6 +1023,98 @@ fn pow10_i64(k: u32) -> Option<i64> {
 /// wider native arithmetic fast path to scale a coefficient by a power of ten.
 fn pow10_i128(k: u32) -> Option<i128> {
     10i128.checked_pow(k)
+}
+
+/// `10^k` as a `u128`, or `None` when it overflows (`k > 38`). Used by the native `u128` `to_f64` fast
+/// path to build the ratio numerator/denominator.
+fn pow10_u128(k: u32) -> Option<u128> {
+    10u128.checked_pow(k)
+}
+
+/// `x << k` as a `u128`, or `None` if any set bit would be shifted out — so the caller falls back to the
+/// exact `Big` path rather than silently wrapping.
+fn checked_shl_u128(x: u128, k: u32) -> Option<u128> {
+    if x == 0 {
+        return Some(0);
+    }
+    if k >= 128 || x.leading_zeros() < k {
+        return None;
+    }
+    Some(x << k)
+}
+
+/// Native `u128` correctly-rounded conversion of `|coeff| * 10^exp` to `f64`, taken when the coefficient
+/// magnitude fits `u128`. A faithful port of [`Decimal::to_f64`]'s exact `Big` ratio algorithm — the same
+/// `e = ⌊log2(N/D)⌋`, mantissa shift, `divmod`, round-half-to-even, and renormalize — carried out in
+/// fixed-width `u128` so the mid-size tiers skip the `Big` allocations that dominate them. Returns `None`
+/// (fall back to the exact `Big` path) on any `u128` overflow or a subnormal result, so wherever it
+/// returns `Some` the bit pattern is identical to the `Big` path. `mag` must be nonzero.
+fn to_f64_u128_fast(mag: u128, exp: i64, neg: bool) -> Option<f64> {
+    let sign = if neg { 1u64 << 63 } else { 0 };
+    // Exact value |coeff| * 10^exp = n / d.
+    let (n, d): (u128, u128) = if exp >= 0 {
+        (mag.checked_mul(pow10_u128(u32::try_from(exp).ok()?)?)?, 1)
+    } else {
+        (mag, pow10_u128(u32::try_from(-exp).ok()?)?)
+    };
+    // Is n / d >= 2^k? When the shifted side overflows `u128` it exceeds the other, deciding the compare.
+    let ge_pow2 = |k: i64| -> bool {
+        if k >= 0 {
+            match checked_shl_u128(d, k as u32) {
+                Some(dk) => n >= dk,
+                None => false, // d * 2^k > u128::MAX >= n
+            }
+        } else {
+            match checked_shl_u128(n, (-k) as u32) {
+                Some(nk) => nk >= d,
+                None => true, // n * 2^-k > u128::MAX >= d
+            }
+        }
+    };
+    let bn = 128 - n.leading_zeros() as i64;
+    let bd = 128 - d.leading_zeros() as i64;
+    let mut e = bn - bd - 1;
+    while ge_pow2(e + 1) {
+        e += 1;
+    }
+    while !ge_pow2(e) {
+        e -= 1;
+    }
+    // Only normals are handled in `u128` (a subnormal's shift = 1074 never fits); bail to `Big` otherwise.
+    if e < -1022 {
+        return None;
+    }
+    let shift: i64 = 52 - e;
+    let (num, den): (u128, u128) = if shift >= 0 {
+        (checked_shl_u128(n, shift as u32)?, d)
+    } else {
+        (n, checked_shl_u128(d, (-shift) as u32)?)
+    };
+    let q = num / den;
+    let r = num % den;
+    // Round half to even, comparing r to den - r (avoids overflowing `2 * r`).
+    let rest = den - r;
+    let round_up = match r.cmp(&rest) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => (q & 1) == 1,
+    };
+    let mut mant = (if round_up { q + 1 } else { q }) as u64; // a normal mantissa ≤ 2^53 fits `u64`
+    if mant == 1u64 << 53 {
+        // Rounded up across a power of two: renormalize (2^53 → 2^52, exponent +1).
+        mant = 1u64 << 52;
+        e += 1;
+    }
+    if e > 1023 {
+        return Some(if neg {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        });
+    }
+    let biased = (e + 1023) as u64; // e ∈ [-1022, 1023] ⇒ biased ∈ [1, 2046]
+    let frac = mant - (1u64 << 52);
+    Some(f64::from_bits(sign | (biased << 52) | frac))
 }
 
 /// Build a signed [`Big`] from a `u128` magnitude and a sign — for a product that fits `u128` but whose
