@@ -686,13 +686,33 @@ fn addsub_big(a: &Big, b: &Big, c: &Big, d: &Big, subtract: bool) -> Rational {
         return Rational::zero();
     }
     let lcm = b.mul(&d_over_g); // b*(d/g) = lcm(b, d) > 0
-    let h = num.gcd(&g); // gcd(num, lcm) == gcd(num, g) — reduce against the small g
+    let h = gcd_num_denominator_factor(&num, &g); // gcd(num, lcm) == gcd(num, g)
     if h.bit_len() == 1 {
         return Rational { num, den: lcm };
     }
     let num = num.div_exact(&h).expect("h divides num");
     let den = lcm.div_exact(&h).expect("h divides lcm");
     Rational { num, den }
+}
+
+/// `gcd(|num|, g)` where `g = gcd(b, d)` is the factor shared by two denominators and `num` is the full
+/// `~2n`-bit add/sub numerator. Shared denominator factors are almost always small (a common `2`, `3`, …),
+/// yet `num` is huge — and Stein's binary gcd does not fast-path a tiny operand: `num.gcd(&g)` would grind
+/// `num` down in `O(bit_len(num))` shift/subtract steps (the source of the non-monotonic large-tier `add`
+/// spike when the operands happen to share a factor). Collapse the large operand with a single Euclid step
+/// instead — `gcd(num, g) == gcd(g, num mod g)` — so the recursion runs on operands `< g`. When `g` fits a
+/// `u64` (the common case) `num mod g` is an `O(n)` single-limb `rem_u64` and the tail is a native `u64` gcd.
+fn gcd_num_denominator_factor(num: &Big, g: &Big) -> Big {
+    // This is only reached with `g > 1` (the caller took the shared-factor branch), so `g` is nonzero.
+    if let Some(gv) = g.to_i64_checked() {
+        let gu = gv as u64; // g > 0
+        let r = num.rem_u64(gu).expect("g > 0"); // |num| mod g, in [0, g) so it fits u64
+        // gcd(g, r): both `< 2^63`, so the native u64 gcd is exact and the result fits i64.
+        return Big::from_i64(gcd_u64(gu, r) as i64);
+    }
+    // Large shared factor (rare): one big Euclid step, then Stein on the reduced pair `(g, num mod g)`.
+    let (_, r) = num.divmod(g).expect("g > 0");
+    if r.is_zero() { g.clone() } else { g.gcd(&r) }
 }
 
 /// Normalize a raw `num/den` pair into canonical form: strictly-positive denominator (sign moved to the

@@ -23,12 +23,12 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | add        | 64b    | 0.40 µs   | 3.70 µs      | **0.11**  |
 | add        | 256b   | 5.23 µs   | 16.7 µs      | **0.31**  |
 | add        | 1024b  | 15.8 µs   | 93.7 µs      | **0.17**  |
-| add        | 2048b  | 162 µs    | 270 µs       | **0.60**  |
+| add        | 2048b  | 52.3 µs   | 268 µs       | **0.20**  |
 | add        | 4096b  | 176 µs    | 873 µs       | **0.20**  |
 | sub        | 64b    | 0.40 µs   | 3.85 µs      | **0.10**  |
 | sub        | 256b   | 5.35 µs   | 16.6 µs      | **0.32**  |
 | sub        | 1024b  | 15.7 µs   | 93.7 µs      | **0.17**  |
-| sub        | 2048b  | 163 µs    | 269 µs       | **0.61**  |
+| sub        | 2048b  | 52.5 µs   | 267 µs       | **0.20**  |
 | sub        | 4096b  | 176 µs    | 875 µs       | **0.20**  |
 | mul        | 64b    | 0.27 µs   | 4.99 µs      | **0.054** |
 | mul        | 256b   | 3.98 µs   | 20.2 µs      | **0.20**  |
@@ -80,6 +80,16 @@ subtract in place (#207), turning raw gcd into a full sweep. The only non-wins l
    ~2× num-bigint's (its deferred inline-repr item). All three WIN at 256b and above (num-rational's clone
    grows with size while ours stays ~flat). A single etude-bigint small-`Big` inline representation would
    close `recip`/`neg`/`abs`@64b together — not locally addressable.
+
+`add`/`sub` at large tiers take a shared-factor path when the two denominators share a common factor `g`
+(`(a·(d/g) ± c·(b/g)) / lcm`, then reduce by `gcd(num, g)`). That final reduction previously called the
+general `Big::gcd(num, g)`, but Stein's binary gcd does not fast-path a tiny operand: with a small shared
+`g` (a common `2`/`3`/…) it grinds the full `~2n`-bit `num` down in `O(bit_len(num))` steps. It is now one
+Euclid step — `gcd(num, g) = gcd(g, num mod g)`, with `num mod g` an `O(n)` single-limb `rem_u64` when `g`
+fits a `u64` — which collapses the large operand immediately. On a `2048b` operand pair that shares a small
+denominator factor this took **`add`/`sub` 162 µs → 52 µs (0.60× → 0.20×)** and removed a non-monotonic
+spike (the old `2048b` cell was slower than `4096b`); the coprime-denominator path (the common case, and the
+other tiers) is unchanged.
 
 The large-tier `cmp` lead comes from the continued-fraction comparison, sharpened two ways: a
 **borrow-first-iteration** (components passed by reference; the first Euclidean step allocates nothing and,
@@ -211,6 +221,14 @@ very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
+- **slice 40** — fixed the shared-factor `add`/`sub` reduction. When the two denominators share a factor
+  `g`, `addsub_big` reduces the result by `gcd(num, g)`; that call was the general `Big::gcd(num, g)`, which
+  (Stein binary gcd, no tiny-operand fast path) grinds the full `~2n`-bit `num` down in `O(bit_len(num))`
+  steps for a small `g`. Replaced with one Euclid step `gcd(g, num mod g)` (`num mod g` = `O(n)` `rem_u64`
+  when `g` fits `u64`). On a `2048b` pair sharing a small denominator factor: **`add`/`sub` 162 µs → 52 µs
+  (0.60× → 0.20×)**, removing a reproducible non-monotonic large-tier spike (2048b had been slower than
+  4096b). Coprime-denominator path (the common case) unchanged; covered by
+  `add_sub_large_shared_denominator_factor`. (Numbering stacks after the open review PRs #268/#274.)
 - **slice 1** — faithful port + num-rational differential oracle (the safety net) wired first.
 - **slice 2** — criterion scoreboard + this file.
 - **slice 3** — gcd-free `recip` (canonical ⇒ already coprime ⇒ O(limbs) swap+sign): 60–1651× → parity.
