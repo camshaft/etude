@@ -92,7 +92,40 @@ subtract in place (#207), turning raw gcd into a full sweep. The only non-wins l
    clone the components; at 64b the small `Big` clone dominates, and etude-bigint's 1-limb `Big` clone is
    ~2× num-bigint's (its deferred inline-repr item). All three WIN at 256b and above (num-rational's clone
    grows with size while ours stays ~flat). A single etude-bigint small-`Big` inline representation would
-   close `recip`/`neg`/`abs`@64b together — not locally addressable.
+   close the borrowing `recip`/`neg`/`abs`@64b together. For callers that own their operand, the consuming
+   variants below already eliminate that clone locally.
+
+## Consuming sign transforms (`into_recip`/`into_neg`/`into_abs`)
+
+The borrowing `recip`/`neg`/`abs` must clone both components to return an owned value, and at 64b that
+1-limb `Big` clone is the whole cost. When the caller owns the operand and does not need it afterwards
+(`x = x.into_recip()`), the consuming variants reuse those allocations instead: `into_recip` of a positive
+value just swaps the two owned fields (**zero allocation**), and `into_neg`/`into_abs` move the unchanged
+denominator rather than cloning it (one fewer allocation). Measured with `iter_batched` (the operand is
+cloned in the untimed setup, so only the transform is timed); num-rational has no consuming form, so its
+`recip`/`-`/`abs` is the reference — note our side additionally carries the `iter_batched` harness overhead,
+so these ratios are conservative.
+
+| op         | tier   | etude     | num-rational | ratio     |
+|------------|--------|-----------|--------------|-----------|
+| into_recip | 64b    | 7.3 ns    | 12.8 ns      | **0.57**  |
+| into_recip | 256b   | 7.3 ns    | 28.9 ns      | **0.25**  |
+| into_recip | 1024b  | 7.3 ns    | 31.9 ns      | **0.23**  |
+| into_neg   | 64b    | 16.9 ns   | 17.9 ns      | **0.94**  |
+| into_neg   | 256b   | 17.3 ns   | 28.4 ns      | **0.61**  |
+| into_neg   | 1024b  | 18.9 ns   | 32.1 ns      | **0.59**  |
+| into_abs   | 64b    | 16.6 ns   | 16.5 ns      | 1.01      |
+| into_abs   | 256b   | 17.2 ns   | 34.2 ns      | **0.50**  |
+| into_abs   | 1024b  | 18.8 ns   | 36.9 ns      | **0.55**  |
+
+`into_recip` is flat at ~7.3 ns across every tier — the positive-numerator case is a pure field swap, so
+its cost is independent of operand size and it now **beats num-rational at 64b (0.57×)**, the one cell the
+borrowing `recip` loses (2.34×). `into_neg` flips 64b to a win (**0.94×** vs the borrowing `neg`'s 1.51×) and
+`into_abs` reaches parity (1.01× vs 1.59×) by moving the denominator instead of cloning it; both win
+decisively from 256b up. The residual 64b gap on `into_neg`/`into_abs` is the single remaining `Big` clone
+(`num.neg()`/`num.abs()`, which allocate); an etude-bigint in-place sign flip would take them to zero
+allocation and a clean win. Covered by `consuming_sign_transforms_match_borrowing` and the differential
+oracle (both assert the consuming and borrowing results are value- and canonical-form-identical).
 
 The large-tier `cmp` lead comes from the continued-fraction comparison, sharpened two ways: a
 **borrow-first-iteration** (components passed by reference; the first Euclidean step allocates nothing and,
@@ -249,7 +282,15 @@ very wide renders are unaffected. Re-bench on each render land.
   its `2048b` draw does, which is why that one cell read 812 ns (slower than 1024b/4096b) rather than
   scaling monotonically. `cmp_close` bounds the worst case honestly: wins every tier, monotonic (64b 0.085×
   via the native `u128` path → 4096b 0.90×). No code change; makes the scoreboard representative rather than
-  draw-dependent. (Self-merged bench change; numbering is ahead of the open review PRs #268/#274/#277.)
+  draw-dependent. (Self-merged bench change.)
+- **slice 39** — consuming sign transforms `into_recip`/`into_neg`/`into_abs`, reusing the owned
+  components instead of cloning. `into_recip` of a positive value swaps the two fields (zero allocation),
+  flat ~7.3 ns at every tier and **0.57× at 64b** — the one cell the borrowing `recip` loses (2.34×).
+  `into_neg` moves the unchanged denominator (one fewer alloc): 64b 1.51× → **0.94×**; `into_abs` 1.59× →
+  1.01×. Directly closes the operator-named "recip@64b clone elision" lever for owning callers, no
+  etude-bigint change needed; an in-place `Big` sign flip would take `into_neg`/`into_abs`@64b to zero
+  allocation too (raised to etude-bigint). Value/canonical-form identity vs the borrowing forms is asserted
+  by a dedicated test and the differential oracle.
 - **slice 1** — faithful port + num-rational differential oracle (the safety net) wired first.
 - **slice 2** — criterion scoreboard + this file.
 - **slice 3** — gcd-free `recip` (canonical ⇒ already coprime ⇒ O(limbs) swap+sign): 60–1651× → parity.
