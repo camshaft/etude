@@ -61,3 +61,21 @@ Measured hot paths worth a code-opt pass (own PRs, operator review):
 
 Note: `slice` / `split_off` / `insert` at depth are dominated by the underlying `etude-bytevec` rope
 ops, not the `StrRope` wrapper; any structural-op speedup belongs there (coordinate cross-crate).
+
+## Investigated: forward decode (`chars_collect`)
+
+The `chars_collect` group materializes every char (`chars().collect::<String>()`), so — unlike
+`count` / `last` — neither side has a specialization, isolating raw per-codepoint decode:
+
+| op | shape | StrRope | std |
+|----|-------|---------|-----|
+| `chars().collect::<String>()` | deep | 266 µs | 112 µs |
+| `chars().collect::<String>()` | shallow | 1.29 µs | 632 ns |
+
+At ~2.4x off std the decode is already close, and dominated by std's own `str::Chars` decoder plus
+the output `String` pushes — not a hot path worth contorting.
+
+Dead end (measured, not pursued): replacing the per-chunk `core::str::from_utf8` re-validation in the
+`Chars` decoder with an invariant-justified `from_utf8_unchecked` moved `chars_collect/1000` 266 µs →
+277 µs — no win (within noise). On valid UTF-8 the validation is a cheap SIMD scan; the decode
+dominates. Not worth introducing `unsafe` in the iterator for it, so the checked path stays.
