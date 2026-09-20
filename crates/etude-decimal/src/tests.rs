@@ -1083,9 +1083,28 @@ fn differential_division() {
                         assert!(a.div_round(b, P, RoundingMode::HalfEven).is_none());
                         continue;
                     }
-                    // Exact division: when it succeeds, multiplying back must reproduce the dividend.
+                    // Exact division: when it succeeds, multiplying back must reproduce the dividend —
+                    // once through our own `mul` (self-check) and once independently through `bigdecimal`
+                    // (differential): parse our quotient as a fresh `BigDecimal` and confirm `q * b`
+                    // reconstructs `a` by value, so a wrong quotient is caught even if our own `mul` had a
+                    // compensating bug. When it returns `None`, guard the exact-vs-`None` boundary against
+                    // a false reject: `div` yields `None` only for a genuinely non-terminating quotient (a
+                    // zero divisor is handled above), and the reference quotient of a terminating value
+                    // reproduces `a` exactly (our operands stay well under bigdecimal's default precision),
+                    // whereas a non-terminating one is rounded and its product diverges. Compare by value
+                    // (`ref_parts` normalizes; bigdecimal's `==` is scale-sensitive).
                     if let Some(q) = a.div(b) {
                         assert_eq!(q.mul(b), *a, "exact div self-check failed: {a} / {b} = {q}");
+                        let q_bd = BigDecimal::from_str(&q.to_string())
+                            .expect("bigdecimal must parse our quotient");
+                        assert_same(a, &(q_bd * b_bd.clone()));
+                    } else {
+                        let q_ref = a_bd / b_bd;
+                        assert_ne!(
+                            ref_parts(&(q_ref * b_bd.clone())),
+                            ref_parts(a_bd),
+                            "div returned None but {a} / {b} terminates in bigdecimal (false reject)"
+                        );
                     }
                     // Rounded division against the reference, every mode.
                     for &(mode, bd_mode) in &modes {
