@@ -40,11 +40,33 @@ pays an `Option` and a boundary branch on every byte. `peek_bump` is nearly flat
 per-byte cost dominates; refills are minor), whereas `bulk`'s cost tracks leaf count (refill
 frequency).
 
+## `tokenize` — the realistic tokenizer shape (runnable: `cargo bench -p etude-span -- tokenize`)
+
+The scan benches above walk the whole input one way. A real tokenizer instead alternates: skip a
+delimiter, then scan a token's run, and stamp a [`Span`] per token. This benches a delimited 64 KiB
+stream (single-byte delimiters, tokens straddling 64 B leaves) tokenized two ways at three token
+lengths — the bulk path (find the next delimiter in `chunk_tail` with a slice scan, `skip_in_chunk` to
+it, continuing across leaf boundaries) vs naive per-byte `peek`/`bump`. Each token stamps a `Span`, as
+a real tokenizer would.
+
+| tokenizer | 4 B tokens | 16 B tokens | 100 B tokens |
+|-----------|------------|-------------|--------------|
+| `tokenize/bulk` | 98.3 µs | 50.9 µs | 36.2 µs |
+| `tokenize/peek_bump` | 178 µs | 172 µs | 171 µs |
+
+Routing each token's run through `chunk_tail`/`skip_in_chunk` beats the naive per-byte tokenizer by
+**~1.8× at 4 B tokens, ~3.4× at 16 B, and ~4.7× at 100 B** — the win grows with token length because a
+longer run is one slice-scan skip instead of many `bump`s. The naive path is nearly flat (~171–178 µs)
+regardless of token length: it peeks every byte, so its cost is the per-byte `peek`/`bump` overhead the
+scan section describes, not the tokenization structure. The bulk path's floor at short tokens (98 µs)
+is the delimiter density — one `chunk_tail`/`position`/`skip_in_chunk` cycle plus a delimiter `bump`
+per token, ~13k tokens over the input. The takeaway for tokenizer authors: scan token runs with the
+bulk path; reserve `peek`/`bump` for single-byte decisions (delimiters, one-byte lookahead).
+
 ## Next targets
 
 The `peek_bump` path is the tokenizer's actual inner loop, and it is ~10–30× slower than a bulk
 `chunk_tail` scan — a real optimization target worth investigating (can the per-byte `peek`/`bump`
 overhead be tightened, or can more tokenizer scanning route through the bulk path?). That is a
-library-code question for a follow-up. Subsequent bench passes: mixed run-length scans (short tokens
-straddling leaf boundaries, the realistic tokenizer shape) and the `skip_in_chunk` boundary-refill
+library-code question for a follow-up. A subsequent bench pass: the `skip_in_chunk` boundary-refill
 cost in isolation.
