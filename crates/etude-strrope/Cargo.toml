@@ -24,6 +24,8 @@ bolero = "0.13"
 bolero-generator = "0.13"
 # `ops` bench: rope-shaped complexity at shallow (4-chunk) vs deep (1000-chunk) shapes.
 criterion = "0.5"
+# Matches the host allocator so benchmarks reflect production allocation behavior.
+tikv-jemallocator = "0.6"
 
 [[bench]]
 name = "ops"

@@ -20,9 +20,26 @@ use etude_bytevec::ByteVec;
 use etude_strrope::StrRope;
 use std::hash::{Hash, Hasher};
 use std::hint::black_box;
+use std::time::Duration;
+
+// Match the host allocator (jemalloc) so allocation-sensitive numbers reflect production behavior.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 const SHALLOW: usize = 4;
 const DEEP: usize = 1000;
+
+/// A benchmark group with a bounded warm-up/measurement window, so a full `cargo bench` run stays
+/// quick across the many per-op groups below.
+fn group<'a>(
+    c: &'a mut Criterion,
+    name: &str,
+) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
+    let mut g = c.benchmark_group(name);
+    g.warm_up_time(Duration::from_millis(500));
+    g.measurement_time(Duration::from_secs(2));
+    g
+}
 
 /// One valid-UTF-8 leaf of varied content (so eq/ord/hash do real work).
 fn payload(i: usize) -> String {
@@ -55,7 +72,7 @@ fn bench(c: &mut Criterion) {
         let ins = "inserted-text";
 
         // ---- construction ----
-        let mut g = c.benchmark_group("from_str");
+        let mut g = group(c, "from_str");
         g.bench_with_input(BenchmarkId::new("strrope", n), &string, |b, s| {
             b.iter(|| black_box(StrRope::from(s.as_str())));
         });
@@ -68,7 +85,7 @@ fn bench(c: &mut Criterion) {
         // where `from(&str)` above must copy. The clone lives in the untimed setup, so this measures the
         // move alone; the reference is a bare identity move of the owned String — the floor for consuming
         // one — so `strrope` should sit close to it and neither should scale with length.
-        let mut g = c.benchmark_group("from_string_owned");
+        let mut g = group(c, "from_string_owned");
         g.bench_with_input(BenchmarkId::new("strrope", n), &string, |b, s| {
             b.iter_batched(
                 || s.clone(),
@@ -81,7 +98,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("from_utf8");
+        let mut g = group(c, "from_utf8");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
                 || r.clone().into_bytes(),
@@ -102,7 +119,7 @@ fn bench(c: &mut Criterion) {
         // so per the operator ruling (bench real-work fns + ctors, skip simple getters) they carry no
         // bench. `is_char_boundary` stays below because it does real work — an O(log n) `byte_at` lookup
         // into the rope to find the byte at `at`, not a field read.
-        let mut g = c.benchmark_group("is_char_boundary");
+        let mut g = group(c, "is_char_boundary");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.is_char_boundary(at)));
         });
@@ -112,7 +129,7 @@ fn bench(c: &mut Criterion) {
         g.finish();
 
         // ---- mutation ----
-        let mut g = c.benchmark_group("push_str");
+        let mut g = group(c, "push_str");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
                 || r.clone(),
@@ -135,7 +152,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("push");
+        let mut g = group(c, "push");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
                 || r.clone(),
@@ -158,7 +175,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("insert_str");
+        let mut g = group(c, "insert_str");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
                 || r.clone(),
@@ -181,7 +198,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("insert");
+        let mut g = group(c, "insert");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
                 || r.clone(),
@@ -205,7 +222,7 @@ fn bench(c: &mut Criterion) {
         g.finish();
 
         // ---- structural (where the rope is expected to win at depth) ----
-        let mut g = c.benchmark_group("split_off");
+        let mut g = group(c, "split_off");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
                 || r.clone(),
@@ -222,7 +239,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("slice");
+        let mut g = group(c, "slice");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.slice(at..)));
         });
@@ -233,7 +250,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("clone");
+        let mut g = group(c, "clone");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.clone()));
         });
@@ -242,7 +259,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("into_bytes");
+        let mut g = group(c, "into_bytes");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter_batched(
                 || r.clone(),
@@ -260,7 +277,7 @@ fn bench(c: &mut Criterion) {
         g.finish();
 
         // ---- iteration (content ops; scale with length) ----
-        let mut g = c.benchmark_group("chars_count");
+        let mut g = group(c, "chars_count");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.chars().count()));
         });
@@ -269,7 +286,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("char_indices_last");
+        let mut g = group(c, "char_indices_last");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.char_indices().last()));
         });
@@ -278,7 +295,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("bytes_sum");
+        let mut g = group(c, "bytes_sum");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.bytes().fold(0u64, |a, x| a + u64::from(x))));
         });
@@ -288,14 +305,14 @@ fn bench(c: &mut Criterion) {
         g.finish();
 
         // chunks() has no contiguous-String analogue; measure the rope alone.
-        let mut g = c.benchmark_group("chunks_count");
+        let mut g = group(c, "chunks_count");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.chunks().count()));
         });
         g.finish();
 
         // ---- trait ops ----
-        let mut g = c.benchmark_group("eq");
+        let mut g = group(c, "eq");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             let other = r.clone();
             b.iter(|| black_box(*r == other));
@@ -306,7 +323,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("eq_str");
+        let mut g = group(c, "eq_str");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             let s = string.clone();
             b.iter(|| black_box(*r == *s.as_str()));
@@ -317,7 +334,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("cmp");
+        let mut g = group(c, "cmp");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             let other = r.clone();
             b.iter(|| black_box(r.cmp(&other)));
@@ -328,7 +345,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("hash");
+        let mut g = group(c, "hash");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(hash64(r)));
         });
@@ -337,7 +354,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("display");
+        let mut g = group(c, "display");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.to_string()));
         });
@@ -346,7 +363,7 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
-        let mut g = c.benchmark_group("debug");
+        let mut g = group(c, "debug");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(format!("{r:?}")));
         });
