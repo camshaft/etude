@@ -209,7 +209,41 @@ fn bench_div_small(c: &mut Criterion) {
 
 fn bench_gcd(c: &mut Criterion) {
     use num_integer::Integer;
-    binop(c, "gcd", TIERS, |a, b| a.gcd(b), |a, b| a.gcd(b));
+    const PAIRS: usize = 8;
+    let mut g = group(c, "gcd");
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    for &(label, nbytes) in TIERS {
+        // Unlike the width-deterministic ops (add/sub/mul), gcd's runtime depends on the operand
+        // VALUES, not just their width: two coprime operands run the full binary-GCD descent, while a
+        // large shared factor short-circuits it. A single random pair per tier therefore gives a jumpy,
+        // non-monotonic cell (a false-regression trap a consumer hit twice). Averaging over a fixed
+        // batch of pairs stabilizes it; etude and num-bigint time the identical batch, so the ratio —
+        // the metric the scoreboard reads — stays fair. (Absolute time here is the per-batch cost.)
+        let pairs: Vec<(Big, Big)> = (0..PAIRS)
+            .map(|_| (rng.big(nbytes), rng.big(nbytes)))
+            .collect();
+        let npairs: Vec<(BigInt, BigInt)> =
+            pairs.iter().map(|(a, b)| (to_num(a), to_num(b))).collect();
+        g.bench_with_input(BenchmarkId::new("etude", label), &pairs, |bch, pairs| {
+            bch.iter(|| {
+                for (a, b) in black_box(pairs) {
+                    black_box(a.gcd(b));
+                }
+            })
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &npairs,
+            |bch, pairs| {
+                bch.iter(|| {
+                    for (a, b) in black_box(pairs) {
+                        black_box(a.gcd(b));
+                    }
+                })
+            },
+        );
+    }
+    g.finish();
 }
 
 /// `gcd(wide, small)` — a wide operand against a single-limb one (e.g. a small-factor reduction). This
