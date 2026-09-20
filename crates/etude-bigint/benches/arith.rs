@@ -704,6 +704,46 @@ fn bench_sum_accumulate(c: &mut Criterion) {
     g.finish();
 }
 
+/// Multiply a batch of N same-width operand pairs, each product into ONE reused scratch `Big`
+/// (`mul_into`) vs num-bigint's by-value `*` (a fresh allocation per product). This is fraction
+/// reduction's shape — the cross terms `a·d`, `c·b`, `b·d` land in reused scratch every step — so the
+/// win `mul_into` exists for is the amortized-away allocation: after the scratch reaches steady size the
+/// etude loop allocates nothing, where num-bigint allocates a product `Vec` each time. (etude's own
+/// by-value `mul` would allocate per call exactly as num-bigint does; the reuse is the delta.) At the
+/// 4096b tier both operands are past the Karatsuba threshold, so `mul_into` replaces the buffer rather
+/// than reusing it — expect parity there, matching `mul`.
+fn bench_mul_into_reuse(c: &mut Criterion) {
+    const N: usize = 32;
+    let mut g = group(c, "mul_into_reuse");
+    let mut rng = Rng(0x0d15_ea5e_0d15_ea5e);
+    for &(label, nbytes) in TIERS {
+        let pairs: Vec<(Big, Big)> = (0..N).map(|_| (rng.big(nbytes), rng.big(nbytes))).collect();
+        let npairs: Vec<(BigInt, BigInt)> =
+            pairs.iter().map(|(a, b)| (to_num(a), to_num(b))).collect();
+        g.bench_with_input(BenchmarkId::new("etude", label), &pairs, |bch, pairs| {
+            bch.iter(|| {
+                let mut out = Big::zero();
+                for (a, b) in black_box(pairs) {
+                    a.mul_into(b, &mut out);
+                    black_box(&out);
+                }
+            })
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &npairs,
+            |bch, pairs| {
+                bch.iter(|| {
+                    for (a, b) in black_box(pairs) {
+                        black_box(a * b);
+                    }
+                })
+            },
+        );
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -735,6 +775,7 @@ criterion_group!(
     bench_decimal_digit_count,
     bench_i128,
     bench_last_decimal_digit,
-    bench_sum_accumulate
+    bench_sum_accumulate,
+    bench_mul_into_reuse
 );
 criterion_main!(benches);

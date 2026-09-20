@@ -249,6 +249,25 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
 - **Karatsuba multiply** above a 40-limb crossover (three half-size products via
   `z1 = (a0+a1)(b0+b1) − z0 − z2`; recurses through the schoolbook base case): mul/4096b 6.19 µs → 5.14 µs
   (1.24× → 1.03× num-bigint). Smaller tiers stay schoolbook (unchanged).
+- **`mul_into` (buffer-reusing multiply)** — the accumulator surface's multiply writes `self · other`
+  into a caller-owned scratch `Big`, reusing its buffer instead of allocating a fresh product. The
+  schoolbook path (below the Karatsuba threshold) accumulates straight into the scratch's existing
+  allocation, so a caller multiplying repeatedly into one scratch (fraction reduction's `a·d`, `c·b`,
+  `b·d` cross terms) allocates nothing once the buffer reaches steady size. The `mul_into_reuse` bench
+  (32 same-width products into one reused scratch) vs num-bigint's by-value `*` (a fresh product `Vec`
+  each time):
+
+  | tier   | etude (`mul_into` reuse) | num-bigint (`*`) | vs num-bigint |
+  |--------|--------------------------|------------------|---------------|
+  | 64b    | 282 ns                   | 816 ns           | **0.35×**     |
+  | 256b   | 1.06 µs                  | 1.74 µs          | **0.61×**     |
+  | 1024b  | 12.1 µs                  | 12.5 µs          | **0.97×**     |
+  | 4096b  | 164 µs                   | 161 µs           | 1.02          |
+
+  The win is the amortized-away allocation, concentrated at the small tiers where fractions live; at
+  1024b+ both operands cross the Karatsuba threshold, so `mul_into` replaces the buffer rather than
+  reusing it (the multiply is arithmetic-bound there — parity, matching `mul`, as the in-place-sub
+  dead-end already showed).
 - **Direct signed subtract** — a shared `add_signed` core takes the second operand's sign as a
   parameter, so `sub` no longer allocates a negated copy of `other`: sub/256b 30.8 → 22.7 ns (**0.75×**),
   sub/1024b 50.3 → 39.6 ns (**0.91×**), sub/4096b 133 → 114 ns (1.20×, was 1.40×).

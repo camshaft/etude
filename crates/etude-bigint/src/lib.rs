@@ -282,6 +282,25 @@ impl Big {
         }
     }
 
+    /// `out = a * b` over magnitudes, reusing `out`'s buffer. The in-place counterpart of [`Big::mul_mag`]
+    /// for the [`Big::mul_into`] accumulator primitive. The schoolbook path (below [`KARATSUBA_THRESHOLD`])
+    /// accumulates directly into `out`'s existing allocation ([`mul_schoolbook_into`]), so a caller
+    /// multiplying repeatedly into one scratch `Big` (fraction reduction's cross terms) allocates nothing
+    /// after the buffer reaches its steady size. The Karatsuba path is arithmetic-bound (O(n^1.585)) and
+    /// its allocations are amortized over that work — an in-place variant was measured to give no win at
+    /// those sizes — so it just replaces `out`'s magnitude with a freshly built one.
+    fn mul_mag_into(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
+        if a.is_empty() || b.is_empty() {
+            out.clear();
+            return;
+        }
+        if a.len().min(b.len()) < KARATSUBA_THRESHOLD {
+            mul_schoolbook_into(a, b, out);
+        } else {
+            *out = mul_karatsuba(a, b);
+        }
+    }
+
     // ─── signed arithmetic ────────────────────────────────────────────────────────────────────
 
     /// Signed comparison. Consistent with the value order (`-1 < 0 < 1`).
@@ -460,6 +479,19 @@ impl Big {
         };
         r.normalize();
         r
+    }
+
+    /// `out = self * other`, writing the product into a caller-owned `out` (the `&mut`-accumulator
+    /// surface's multiply). Same value as `out = self.mul(other)` but reuses `out`'s magnitude buffer
+    /// instead of allocating a fresh result, so a caller that multiplies repeatedly into one scratch `Big`
+    /// (fraction reduction building `a·d`, `c·b`, `b·d` into reused scratch each step) allocates nothing in
+    /// steady state. `out` may be any `Big`; its previous value is overwritten. The result is canonical:
+    /// the in-place magnitude multiply strips trailing zeros and `normalize` fixes a zero product's sign,
+    /// so it is byte-identical to the by-value [`mul`](Big::mul).
+    pub fn mul_into(&self, other: &Big, out: &mut Big) {
+        Big::mul_mag_into(&self.mag, &other.mag, &mut out.mag);
+        out.neg = self.neg != other.neg;
+        out.normalize();
     }
 
     /// Truncating division + remainder: returns `(quotient, remainder)` where
@@ -1214,6 +1246,34 @@ fn mul_schoolbook(a: &[u64], b: &[u64]) -> Vec<u64> {
     }
     strip(&mut out);
     out
+}
+
+/// Schoolbook `a * b` accumulated into `out`'s existing buffer (the in-place counterpart of
+/// [`mul_schoolbook`]). Clears `out` and resizes it to `a.len() + b.len()` zeroed limbs — reusing the
+/// allocation when its capacity already suffices, so a caller reusing one scratch `Big` across many
+/// products allocates only until the buffer reaches steady size. Identical accumulation to
+/// [`mul_schoolbook`]; `a`, `b` are non-empty.
+fn mul_schoolbook_into(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
+    out.clear();
+    out.resize(a.len() + b.len(), 0);
+    for (i, &av) in a.iter().enumerate() {
+        let mut carry = 0u64;
+        for (j, &bv) in b.iter().enumerate() {
+            let (hi, lo) = wide_mul(av, bv);
+            let (s1, c1) = out[i + j].overflowing_add(lo);
+            let (s2, c2) = s1.overflowing_add(carry);
+            out[i + j] = s2;
+            carry = hi + c1 as u64 + c2 as u64;
+        }
+        let mut k = i + b.len();
+        while carry != 0 {
+            let (s, c) = out[k].overflowing_add(carry);
+            out[k] = s;
+            carry = c as u64;
+            k += 1;
+        }
+    }
+    strip(out);
 }
 
 /// Karatsuba `a * b` over magnitudes. Split each operand at `k` limbs (`a = a1·Bᵏ + a0`), then

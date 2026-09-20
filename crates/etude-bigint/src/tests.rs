@@ -62,6 +62,16 @@ fn check_pair(a: &Big, b: &Big) {
     assert_eq!(to_ref(&a.add(b)), &ra + &rb, "add {a:?} {b:?}");
     assert_eq!(to_ref(&a.sub(b)), &ra - &rb, "sub {a:?} {b:?}");
     assert_eq!(to_ref(&a.mul(b)), &ra * &rb, "mul {a:?} {b:?}");
+    // mul_into writes the product into caller-owned scratch: BYTE-IDENTICAL to by-value mul (canonical),
+    // and pre-loading the scratch with unrelated data must not leak into the result.
+    {
+        let mut out = Big::zero();
+        a.mul_into(b, &mut out);
+        assert_eq!(out, a.mul(b), "mul_into (fresh out) == mul {a:?} {b:?}");
+        let mut dirty = from_i128(0x1234_5678_9abc_def0);
+        a.mul_into(b, &mut dirty);
+        assert_eq!(dirty, a.mul(b), "mul_into (reused out) == mul {a:?} {b:?}");
+    }
     assert_eq!(to_ref(&a.neg()), -&ra, "neg {a:?}");
     assert_eq!(to_ref(&a.abs()), ra.abs(), "abs {a:?}");
 
