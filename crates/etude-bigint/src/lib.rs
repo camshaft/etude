@@ -535,6 +535,29 @@ impl Big {
         Some(q)
     }
 
+    /// `self /= divisor` in place (truncating toward zero, the same quotient as [`Big::div_exact`]),
+    /// returning `false` (and leaving `self` unchanged) when `divisor` is zero. The `&mut`-accumulator
+    /// surface's exact-divide: fraction reduction divides `num` and `den` by their gcd, discarding the
+    /// (zero) remainder. A single-limb divisor — the common case, since a reducing gcd is often one limb —
+    /// divides `self`'s magnitude in place (`div_rem_limb_inplace`, no allocation); a multi-limb divisor
+    /// takes the shared Knuth core, which allocates its quotient internally. Canonical result: the sign is
+    /// `self.neg != divisor.neg` and `normalize` strips trailing zeros / fixes a zero quotient's sign.
+    pub fn div_exact_assign(&mut self, divisor: &Big) -> bool {
+        if divisor.is_zero() {
+            return false;
+        }
+        let result_neg = self.neg != divisor.neg;
+        if divisor.mag.len() == 1 {
+            div_rem_limb_inplace(&mut self.mag, divisor.mag[0]);
+        } else {
+            let (qmag, _rmag) = divmod_mag_impl(&self.mag, &divisor.mag, false);
+            self.mag = qmag;
+        }
+        self.neg = result_neg;
+        self.normalize();
+        true
+    }
+
     /// The remainder `|self| mod d` for a single-limb divisor `d`, or `None` when `d` is zero. Returns
     /// the magnitude remainder (`< d`, so it fits a `u64`) — sign-agnostic, since the common uses are
     /// divisibility tests and small-factor stripping. Allocation-free: scans the limbs with the
@@ -602,6 +625,45 @@ impl Big {
         let mut g = Big { neg: false, mag: a };
         g.normalize();
         g
+    }
+
+    /// `out = gcd(|self|, |other|)`, writing the result into a caller-owned `out` (the `&mut`-accumulator
+    /// surface's gcd). Same value as `out = self.gcd(other)` but reuses `out`'s buffer as the algorithm's
+    /// `a` scratch instead of cloning `self`'s magnitude into a fresh one — one fewer allocation per call,
+    /// so fraction reduction (which takes a gcd of `num`/`den` every step) reuses one gcd scratch across
+    /// the loop. The binary-GCD steps are identical to [`Big::gcd`]; `out` is always non-negative and
+    /// canonical.
+    pub fn gcd_into(&self, other: &Big, out: &mut Big) {
+        // Reuse out's allocation as the `a` scratch (= |self|); `b` (= |other|) is the one unavoidable
+        // clone (the algorithm consumes it).
+        out.neg = false;
+        let mut a = core::mem::take(&mut out.mag);
+        a.clear();
+        a.extend_from_slice(&self.mag);
+        let mut b = other.mag.clone();
+        // gcd(x, 0) = |x| (covers gcd(0, 0) = 0).
+        if a.is_empty() || b.is_empty() {
+            out.mag = if a.is_empty() { b } else { a };
+            out.normalize();
+            return;
+        }
+        let tz_a = trailing_zeros_mag(&a);
+        let shift = tz_a.min(trailing_zeros_mag(&b));
+        shr_bits(&mut a, tz_a);
+        loop {
+            let tz_b = trailing_zeros_mag(&b);
+            shr_bits(&mut b, tz_b); // b is now odd
+            if Big::cmp_mag(&a, &b) == Ordering::Greater {
+                core::mem::swap(&mut a, &mut b);
+            }
+            Big::sub_mag_inplace(&mut b, &a); // odd − odd = even, ≥ 0; reuses b's buffer
+            if b.is_empty() {
+                break; // gcd of the odd parts is `a`
+            }
+        }
+        shl_bits(&mut a, shift); // restore the common power of two
+        out.mag = a;
+        out.normalize();
     }
 
     // ─── conversions ──────────────────────────────────────────────────────────────────────────

@@ -268,6 +268,24 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   1024b+ both operands cross the Karatsuba threshold, so `mul_into` replaces the buffer rather than
   reusing it (the multiply is arithmetic-bound there — parity, matching `mul`, as the in-place-sub
   dead-end already showed).
+- **`gcd_into` + `div_exact_assign` (accumulator reduce pair)** — the last two accumulator-surface
+  primitives, the fraction-reduction step. `gcd_into` reuses the caller's `out` buffer as the binary-GCD
+  `a` scratch (one fewer clone per call than the by-value `gcd`); `div_exact_assign` divides in place
+  (single-limb divisor — the common reducing-gcd case — via `div_rem_limb_inplace`, no quotient `Vec`).
+  Two benches — `gcd_into_reuse` (N gcds into one reused `out` vs num-bigint `Integer::gcd`) and
+  `reduce_fraction` (the real `g = gcd(n,d); n /= g; d /= g` step over N pairs, reusing one `g` scratch,
+  vs num-bigint's gcd + two `/`):
+
+  | tier   | gcd_into_reuse vs num | reduce_fraction vs num |
+  |--------|-----------------------|------------------------|
+  | 64b    | **0.32×**             | **0.32×**              |
+  | 256b   | **0.47×**             | **0.49×**              |
+  | 1024b  | **0.68×**             | **0.69×**              |
+  | 4096b  | **0.87×**             | **0.87×**              |
+
+  Faster at every tier — the reduce loop tracks the (already-winning) gcd scoreboard, with `gcd_into`'s
+  saved clone and `div_exact_assign`'s in-place quotient on top. This completes the 5-primitive
+  `&mut`-accumulator surface (`add_assign`/`sub_assign`/`mul_into`/`gcd_into`/`div_exact_assign`).
 - **Direct signed subtract** — a shared `add_signed` core takes the second operand's sign as a
   parameter, so `sub` no longer allocates a negated copy of `other`: sub/256b 30.8 → 22.7 ns (**0.75×**),
   sub/1024b 50.3 → 39.6 ns (**0.91×**), sub/4096b 133 → 114 ns (1.20×, was 1.40×).
