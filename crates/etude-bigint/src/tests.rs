@@ -62,6 +62,16 @@ fn check_pair(a: &Big, b: &Big) {
     assert_eq!(to_ref(&a.add(b)), &ra + &rb, "add {a:?} {b:?}");
     assert_eq!(to_ref(&a.sub(b)), &ra - &rb, "sub {a:?} {b:?}");
     assert_eq!(to_ref(&a.mul(b)), &ra * &rb, "mul {a:?} {b:?}");
+    // mul_into writes the product into caller-owned scratch: BYTE-IDENTICAL to by-value mul (canonical),
+    // and pre-loading the scratch with unrelated data must not leak into the result.
+    {
+        let mut out = Big::zero();
+        a.mul_into(b, &mut out);
+        assert_eq!(out, a.mul(b), "mul_into (fresh out) == mul {a:?} {b:?}");
+        let mut dirty = from_i128(0x1234_5678_9abc_def0);
+        a.mul_into(b, &mut dirty);
+        assert_eq!(dirty, a.mul(b), "mul_into (reused out) == mul {a:?} {b:?}");
+    }
     assert_eq!(to_ref(&a.neg()), -&ra, "neg {a:?}");
     assert_eq!(to_ref(&a.abs()), ra.abs(), "abs {a:?}");
 
@@ -159,6 +169,10 @@ fn check_pair(a: &Big, b: &Big) {
             Some(q.clone()),
             "div_exact == divmod.0 {a:?} {b:?}"
         );
+        // In-place exact divide: byte-identical to div_exact, returns true, works from a dirty buffer.
+        let mut q_ip = a.clone();
+        assert!(q_ip.div_exact_assign(b), "div_exact_assign nonzero → true");
+        assert_eq!(q_ip, q, "div_exact_assign == divmod.0 {a:?} {b:?}");
         // The defining identity: a == q*b + r.
         assert_eq!(*a, q.mul(b).add(&r), "divmod identity {a:?} {b:?}");
         // |remainder| < |divisor|.
@@ -177,12 +191,31 @@ fn check_pair(a: &Big, b: &Big) {
     } else {
         assert!(a.divmod(b).is_none(), "div by zero → None");
         assert!(a.div_exact(b).is_none(), "div_exact by zero → None");
+        // In-place exact divide by zero: returns false and leaves self unchanged.
+        let mut unchanged = a.clone();
+        assert!(
+            !unchanged.div_exact_assign(b),
+            "div_exact_assign zero → false"
+        );
+        assert_eq!(
+            unchanged, *a,
+            "div_exact_assign zero leaves self unchanged {a:?}"
+        );
     }
 
     // gcd: sign-agnostic, non-negative; gcd(0,0)=0; divides both operands exactly.
     let g = a.gcd(b);
     assert!(!g.neg, "gcd is non-negative {a:?} {b:?}");
     assert_eq!(to_ref(&g), ref_gcd(ra.abs(), rb.abs()), "gcd {a:?} {b:?}");
+    // gcd_into: byte-identical to the by-value gcd, from both a fresh and a dirty (pre-loaded) out.
+    {
+        let mut out = Big::zero();
+        a.gcd_into(b, &mut out);
+        assert_eq!(out, g, "gcd_into (fresh out) == gcd {a:?} {b:?}");
+        let mut dirty = from_i128(-0x0fed_cba9_8765_4321);
+        a.gcd_into(b, &mut dirty);
+        assert_eq!(dirty, g, "gcd_into (reused out) == gcd {a:?} {b:?}");
+    }
     if !g.is_zero() {
         assert!(a.divmod(&g).unwrap().1.is_zero(), "gcd divides a exactly");
         assert!(b.divmod(&g).unwrap().1.is_zero(), "gcd divides b exactly");
