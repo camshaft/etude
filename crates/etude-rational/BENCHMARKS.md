@@ -67,6 +67,11 @@ optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (
 | cmp_eqden  | 64b    | 6.25 ns   | 7.94 ns      | **0.79**  |
 | cmp_eqden  | 256b   | 6.72 ns   | 8.88 ns      | **0.76**  |
 | cmp_eqden  | 1024b  | 11.5 ns   | 14.2 ns      | **0.81**  |
+| cmp_close  | 64b    | 10.1 ns   | 118 ns       | **0.085** |
+| cmp_close  | 256b   | 319 ns    | 474 ns       | **0.67**  |
+| cmp_close  | 1024b  | 470 ns    | 593 ns       | **0.79**  |
+| cmp_close  | 2048b  | 674 ns    | 808 ns       | **0.83**  |
+| cmp_close  | 4096b  | 1.07 µs   | 1.19 µs      | **0.90**  |
 
 **We now beat num-rational on add, sub, mul, div, cmp, normalize, and add_eqden at EVERY tier, plus recip
 (256b/1024b) and the equal-denominator fast paths** — a decisive across-the-board lead. `cmp` wins every
@@ -88,6 +93,14 @@ path** (`divmod_small_q`) that replaces the per-step `divmod` with a `Big` compa
 since similar-magnitude operands have quotient 0 or 1. The latter took 1024b 0.90× → **0.44×** and 4096b
 0.73× → **0.26×**. Only a same-integer-part tie with fractional remainders on both sides clones the two denominators
 and recurses. `abs` is now taken only when both operands are negative (denominators are already positive).
+
+cmp's cost is therefore operand-dependent: it decides on the first Euclidean step when the integer parts
+differ (the common case — the `cmp` row above), and recurses when they tie. The single random operand pair
+the `cmp` row draws per tier hits that recursive tie only by luck — its `2048b` pair happens to (both
+operands land in `(0,1)`), which is why that one cell (812 ns) reads slower than `1024b`/`4096b` rather than
+scaling monotonically. The `cmp_close` row is the deterministic worst case (both operands proper fractions
+in `(0,1)` with different denominators, so the integer parts always tie): it wins every tier and scales
+monotonically (0.085× at 64b via the native `u128` path, up to 0.90× at 4096b as recursion depth grows).
 
 The `64b` tier's win comes from a **native `u128` cross-multiply** (`cmp_small_u128`): its ~1-limb
 components have their top magnitude bit set, so they exceed `i64` and miss `cmp_small`, but their
@@ -211,6 +224,13 @@ very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
+- **slice 41** (bench-only) — added the `cmp_close` group: a deterministic continued-fraction worst case
+  (both operands proper fractions in `(0,1)` with different denominators, so their integer parts always
+  tie and the comparison recurses). The existing random `cmp` row hits that recursive case only by luck —
+  its `2048b` draw does, which is why that one cell read 812 ns (slower than 1024b/4096b) rather than
+  scaling monotonically. `cmp_close` bounds the worst case honestly: wins every tier, monotonic (64b 0.085×
+  via the native `u128` path → 4096b 0.90×). No code change; makes the scoreboard representative rather than
+  draw-dependent. (Self-merged bench change; numbering is ahead of the open review PRs #268/#274/#277.)
 - **slice 1** — faithful port + num-rational differential oracle (the safety net) wired first.
 - **slice 2** — criterion scoreboard + this file.
 - **slice 3** — gcd-free `recip` (canonical ⇒ already coprime ⇒ O(limbs) swap+sign): 60–1651× → parity.
