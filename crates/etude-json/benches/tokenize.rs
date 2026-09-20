@@ -158,6 +158,15 @@ fn corpus() -> Vec<(&'static str, String)> {
     }
     big_numbers.push(']');
 
+    // Pretty-printed variant of the objects document: indentation and newlines between every token,
+    // the common shape for config files and human-readable API payloads. Exercises whitespace-skipping
+    // (a whitespace run before each token) rather than the compact documents above.
+    let pretty_objects = {
+        let value: serde_json::Value =
+            serde_json::from_str(&objects).expect("objects is valid json");
+        serde_json::to_string_pretty(&value).expect("re-serializes")
+    };
+
     vec![
         ("array_10k_ints", array_ints),
         ("array_10k_floats", array_floats),
@@ -166,6 +175,7 @@ fn corpus() -> Vec<(&'static str, String)> {
         ("nested_100", nested),
         ("objects_1k", objects),
         ("big_numbers_2k", big_numbers),
+        ("pretty_objects_1k", pretty_objects),
     ]
 }
 

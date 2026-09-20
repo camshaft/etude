@@ -76,6 +76,34 @@ digit runs straddling leaf boundaries). Measured before → after (aarch64, jema
 - `array_10k_ints` −9.8% and `array_10k_floats` −9.1% — the short-number common case improves too
   (fewer calls / bounds checks per number), so the win is not limited to long runs.
 
+## Whitespace scan optimization (applied) — bulk-skip whitespace runs
+
+`skip_whitespace`, run before every token, advanced one `peek`/`bump` per byte. It now bulk-skips the
+run with a per-leaf `position` scan (the same lever as the string and number scans), so the
+indentation between tokens in a pretty-printed document costs one scan per leaf rather than a call per
+space. Byte-behaviour is unchanged (whitespace is still exactly space / tab / LF / CR; the
+differential and chunk-invariant tests cover it). Measured before → after (aarch64, jemalloc,
+release):
+
+- **`pretty_objects_1k` 533 µs → 479 µs (−10.2%)** — the 1 000-object document re-serialized with
+  `serde_json` pretty-printing (indentation and a newline around every token), the common config-file
+  / human-readable-payload shape. A new corpus shape added with this change; the other documents are
+  compact, so they have no inter-token whitespace to skip.
+
+## Perf-pass status — clean-win well harvested
+
+All three of the tokenizer's byte-at-a-time inner scans now bulk-skip a run with one per-leaf
+`position` pass instead of a call per byte: the string content scan, the number digit scan, and the
+whitespace scan. With those applied, `etude_json` tokenize beats `serde_json` on every realistic shape
+(arrays, objects, pretty-printed, big numbers), at zero allocations.
+
+The one remaining tokenizer lever is a SIMD / `memchr`-style leaf scan for the closing quote / escape,
+which would help only `big_string_100k` (a single ~100 KB string — not a real consumer payload, where
+`serde_json` is still ~3.3× faster). It is an **optional** follow-up: it adds a dependency to an
+otherwise dependency-light lexer, so it is deliberately not taken here, against the crate's lean ethos.
+Absent that dependency there is no further clean tokenizer win — the crate is in light-monitor mode,
+to be revived on a measured regression or a new document shape.
+
 ## Span-resolution cost — the O(log n)-per-token re-access (`tokenize_and_read`)
 
 Tokenizing is cheap and 0-alloc, but a `Span` is `(offset, len)`: reading a token's bytes later means
