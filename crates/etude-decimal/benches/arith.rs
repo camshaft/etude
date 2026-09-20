@@ -171,6 +171,7 @@ fn unop<O, T>(
 }
 
 fn bench(c: &mut Criterion) {
+    use std::cell::Cell;
     binop(c, "add", |a, b| a.add(b), |a, b| a + b);
     binop(c, "sub", |a, b| a.sub(b), |a, b| a - b);
     binop(c, "mul", |a, b| a.mul(b), |a, b| a * b);
@@ -237,25 +238,38 @@ fn bench(c: &mut Criterion) {
         let prec = NonZeroU64::new(DIV_PRECISION as u64).expect("nonzero precision");
         let mut g = group(c, "div_round");
         for &(label, nbytes) in TIERS {
+            // Rotate over a BATCH of operand pairs per tier: a lone random dividend/divisor can land in an
+            // unrepresentative quotient/rounding regime and misreport the cell (a tiered-bench trap — see
+            // the fleet bench-hygiene note), so average the mix as the arithmetic groups do.
             let mut rng = Rng(0xd117_1de0 ^ (nbytes as u64));
-            let a = rng.dec(nbytes);
-            let b = rng.dec(nbytes);
-            let (ra, rb) = (to_ref(&a), to_ref(&b));
-            g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
+            let ours_pairs: Vec<(Decimal, Decimal)> = (0..BATCH)
+                .map(|_| (rng.dec(nbytes), rng.dec(nbytes)))
+                .collect();
+            let ref_pairs: Vec<(BigDecimal, BigDecimal)> = ours_pairs
+                .iter()
+                .map(|(a, b)| (to_ref(a), to_ref(b)))
+                .collect();
+            let oi = Cell::new(0usize);
+            g.bench_function(BenchmarkId::new("etude", label), |be| {
                 be.iter(|| {
+                    let k = oi.get();
+                    oi.set((k + 1) % BATCH);
+                    let (a, b) = &ours_pairs[k];
                     black_box(
                         a.div_round(black_box(b), DIV_PRECISION, RoundingMode::HalfEven)
                             .expect("nonzero divisor"),
                     )
                 })
             });
-            g.bench_with_input(
-                BenchmarkId::new("bigdecimal", label),
-                &(&ra, &rb),
-                |be, (a, b)| {
-                    be.iter(|| black_box((*a / *b).with_precision_round(prec, RefRound::HalfEven)))
-                },
-            );
+            let ri = Cell::new(0usize);
+            g.bench_function(BenchmarkId::new("bigdecimal", label), |be| {
+                be.iter(|| {
+                    let k = ri.get();
+                    ri.set((k + 1) % BATCH);
+                    let (a, b) = &ref_pairs[k];
+                    black_box((a / b).with_precision_round(prec, RefRound::HalfEven))
+                })
+            });
         }
         g.finish();
     }
@@ -415,10 +429,18 @@ fn bench(c: &mut Criterion) {
         let mut g = group(c, "div_exact");
         let divisor = Decimal::from_i64(1024); // 2^10
         for &(label, nbytes) in TIERS {
+            // Rotate over a BATCH of dividends: the 2/5-strip + gcd reduction depends on the dividend's
+            // factor content, so a lone sample can misreport the cell (fleet bench-hygiene note); average
+            // the mix.
             let mut rng = Rng(0x0d17_ec00 ^ (nbytes as u64));
-            let a = rng.dec(nbytes);
-            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
-                be.iter(|| black_box(a.div(black_box(&divisor)).expect("terminates")))
+            let ops: Vec<Decimal> = (0..BATCH).map(|_| rng.dec(nbytes)).collect();
+            let di = Cell::new(0usize);
+            g.bench_function(BenchmarkId::new("etude", label), |be| {
+                be.iter(|| {
+                    let k = di.get();
+                    di.set((k + 1) % BATCH);
+                    black_box(ops[k].div(black_box(&divisor)).expect("terminates"))
+                })
             });
         }
         g.finish();

@@ -18,7 +18,7 @@ cargo bench -p etude-decimal --bench arith
   `etude_bigint::Big`'s sign-magnitude byte parser (top bit forced set for an exact width), placed at a
   fixed scale (`exp = -12`) so every value carries a fractional part. The value-equal `bigdecimal`
   operand is built from the identical coefficient and exponent, so both crates measure the same inputs.
-- **Arithmetic cells rotate over a batch of 16 operand pairs.** Canonicalization cost is parity-sensitive
+- **Arithmetic and division cells rotate over a batch of 16 operand pairs.** Canonicalization cost is parity-sensitive
   (a result not ending in zero normalizes in `O(1)`; one ending in zero divides), so a single pair would
   over- or under-state the true cost depending on that pair's luck. Rotating over a batch whose results
   span the parity mix makes the median representative; the rotation is a `Cell` index bump, identical on
@@ -106,13 +106,19 @@ overflow `i128`, so they stay on the `Big` path.)
 
 ### `div_round` — rounded quotient, 34 sig-digits, HalfEven — we win every tier
 
+Now measured over a rotating batch of operand pairs per tier (as the arithmetic groups are), so a cell
+reflects the algorithm regime rather than one operand's luck. That correction raised `64b` (a lucky lone
+sample had read `701 ns`; the representative cost is `936 ns`) and lowered the large tiers sharply (a lone
+sample there had hit a worst-case quotient — `1024b` `9.1 → 4.6 µs`, `2048b` `19.2 → 10.8 µs`), so the win
+at scale is larger than the old single-operand board showed.
+
 | tier | etude | bigdecimal | ratio |
 |------|------:|-----------:|------:|
-| 64b   | 701.25 ns | 8.095 µs  | **0.09** |
-| 256b  | 1.443 µs  | 12.069 µs | **0.12** |
-| 1024b | 9.138 µs  | 17.138 µs | **0.53** |
-| 2048b | 19.23 µs  | 25.11 µs  | **0.77** |
-| 4096b | 47.43 µs  | 59.78 µs  | **0.79** |
+| 64b   | 935.83 ns | 8.174 µs  | **0.11** |
+| 256b  | 1.589 µs  | 13.348 µs | **0.12** |
+| 1024b | 4.644 µs  | 18.571 µs | **0.25** |
+| 2048b | 10.759 µs | 25.751 µs | **0.42** |
+| 4096b | 31.099 µs | 42.759 µs | **0.73** |
 
 ### `cmp` — three-way ordering, equal exponents (`Big::cmp`, no `abs` clone)
 
@@ -243,15 +249,17 @@ mantissa), so it has its own cell — `12345678.9012345` (15 significant digits)
 `bigdecimal` has no exact-terminating division — its `/` is precision-bounded (that comparison is the
 `div_round` group above). This tracks our exact `div`'s cost across tiers (divisor `2^10`). A dividend that
 fits `i128` reduces and factor-strips (gcd, 2s, 5s) entirely in native `u128` — no chain of `Big` divmods —
-so the `64b` tier drops sharply; wider dividends keep the exact `Big` path.
+so the `64b` tier drops sharply; wider dividends keep the exact `Big` path. Also measured over a rotating
+batch of dividends per tier now (the `now` column) — the numbers barely move, confirming the fixed-`2^10`
+strip is operand-insensitive at these sizes (unlike `div_round`, which the rotation corrected materially).
 
 | tier | etude (before) | etude (now) |
 |------|---------------:|------------:|
-| 64b   | 876 ns   | 208 ns |
-| 256b  | 1.863 µs | 1.851 µs |
-| 1024b | 10.11 µs | 10.11 µs |
-| 2048b | 30.33 µs | 30.33 µs |
-| 4096b | 108.0 µs | 108.0 µs |
+| 64b   | 876 ns   | 207 ns |
+| 256b  | 1.863 µs | 1.830 µs |
+| 1024b | 10.11 µs | 9.626 µs |
+| 2048b | 30.33 µs | 30.83 µs |
+| 4096b | 108.0 µs | 110.3 µs |
 
 ### `new` — construction + canonicalization (etude only)
 
