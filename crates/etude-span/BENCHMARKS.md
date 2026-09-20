@@ -26,19 +26,26 @@ release):
 
 | scan | 64 B leaves (1024) | 4 KiB leaves (16) | single leaf |
 |------|--------------------|-------------------|-------------|
-| `cursor/bulk` | 16.5 µs | 6.0 µs | 5.6 µs |
-| `cursor/peek_bump` | 168 µs | 156 µs | 156 µs |
-| `byte_at/scan` | 2.33 ms | 757 µs | 149 µs |
+| `cursor/bulk` | 15.9 µs | 5.8 µs | 5.5 µs |
+| `cursor/peek_bump` | 55.5 µs | 49.5 µs | 49.0 µs |
+| `byte_at/scan` | 2.37 ms | 668 µs | 152 µs |
 
-Two things the numbers pin down. First, **`byte_at` scanning collapses as the rope fragments**: 149 µs
-for a single leaf (a direct index), 757 µs at 16 leaves, and 2.33 ms at 1024 leaves — the descent
-deepens and every byte pays it. On a fragmented rope the bulk cursor is ~140× faster and even the
-byte-at-a-time cursor is ~14× faster; this is the cursor's reason to exist. Second, the cursor's own
-two modes differ sharply: `cursor/bulk` (5.6–16.5 µs) is **~10–30× faster** than `cursor/peek_bump`
-(156–168 µs), because the per-leaf inner loop is a tight contiguous slice scan while `peek`/`bump`
-pays an `Option` and a boundary branch on every byte. `peek_bump` is nearly flat across layouts (the
-per-byte cost dominates; refills are minor), whereas `bulk`'s cost tracks leaf count (refill
-frequency).
+Two things the numbers pin down. First, **`byte_at` scanning collapses as the rope fragments**: 152 µs
+for a single leaf (a direct index), 668 µs at 16 leaves, and 2.37 ms at 1024 leaves — the descent
+deepens and every byte pays it. On a fragmented rope the bulk cursor is ~150× faster and even the
+byte-at-a-time cursor is ~40× faster; this is the cursor's reason to exist. Second, `cursor/bulk`
+(5.5–15.9 µs) is still **~3–9× faster** than `cursor/peek_bump` (49–55 µs): the per-leaf inner loop
+is a tight contiguous slice scan, while `peek`/`bump` still pays an `Option` and a boundary branch on
+every byte. `peek_bump` is nearly flat across layouts (the per-byte cost dominates; refills are minor),
+whereas `bulk`'s cost tracks leaf count (refill frequency), so prefer `chunk_tail`/`skip_in_chunk` for
+scanning a known run.
+
+The `peek_bump` numbers above are **after** marking the cursor hot methods `#[inline]`. When the harness
+first measured them (see history) they were 156–168 µs — nearly flat because each per-byte `peek` and
+`bump` was a cross-crate function call that the downstream crate could not inline. Adding `#[inline]`
+(and `#[cold]` on the leaf-boundary `refill` so the inlined body stays just the increment and the branch)
+cut the inner loop by ~3× (−67 to −69%). The residual `bulk`-vs-`peek_bump` gap is the intrinsic
+per-byte `Option`/branch, not call overhead.
 
 ## `tokenize` — the realistic tokenizer shape (runnable: `cargo bench -p etude-span -- tokenize`)
 
@@ -85,7 +92,6 @@ a rope's leaves want to be chunk-sized, not byte-sized.
 
 ## Next targets
 
-The `peek_bump` path is the tokenizer's actual inner loop, and it is ~10–30× slower than a bulk
-`chunk_tail` scan — a real optimization target worth investigating (can the per-byte `peek`/`bump`
-overhead be tightened, or can more tokenizer scanning route through the bulk path?). That is a
-library-code question for a follow-up.
+The core scan, tokenize, and refill hot paths are now benched. Further passes as new hot paths
+appear — e.g. scanning over a deep, multi-level rope (`Repr::Deep`), where the `chunks()` iterator
+itself walks tree internals, versus the flat layouts benched here.
