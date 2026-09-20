@@ -60,6 +60,22 @@ three byte classes, including a `< 0x20` range). Next lever, if this workload ma
 `memchr`-style leaf scan (e.g. `memchr2` for `"`/`\` plus a vectorized control-byte check). The
 allocation column stays zero regardless.
 
+## Number scan optimization (applied) — bulk-skip digit runs
+
+`scan_number` advanced through each digit run one `peek`/`bump` per byte, while the string scan
+already bulk-skips runs with a per-leaf `position` pass. Applying the same lever — a `skip_digits`
+helper that finds the first non-digit in the current leaf in one contiguous-slice scan and advances
+in bulk, refilling only at leaf boundaries — makes each of a number's integer / fraction / exponent
+components one scan per leaf instead of a call per digit. Byte-behaviour is unchanged (same grammar,
+same recorded spans; the differential-vs-`serde_json` and chunk-invariant tests cover it, including
+digit runs straddling leaf boundaries). Measured before → after (aarch64, jemalloc, release):
+
+- **`big_numbers_2k` 572 µs → 214 µs (−62.6%)** — 2 000 values, each a ~60-digit integer + ~40-digit
+  fraction + exponent (the arbitrary-precision numbers an `etude-decimal` consumer parses). A new
+  corpus shape added with this change, since the pre-existing arrays only held 1–5 digit numbers.
+- `array_10k_ints` −9.8% and `array_10k_floats` −9.1% — the short-number common case improves too
+  (fewer calls / bounds checks per number), so the win is not limited to long runs.
+
 ## Span-resolution cost — the O(log n)-per-token re-access (`tokenize_and_read`)
 
 Tokenizing is cheap and 0-alloc, but a `Span` is `(offset, len)`: reading a token's bytes later means

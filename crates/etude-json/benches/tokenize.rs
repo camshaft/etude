@@ -136,6 +136,28 @@ fn corpus() -> Vec<(&'static str, String)> {
     }
     objects.push(']');
 
+    // Long digit runs: big integers and high-precision decimals (the arbitrary-precision numbers an
+    // etude-decimal consumer parses). Every value has a ~60-digit integer part and a ~40-digit
+    // fraction plus an exponent, so each number is one long digit run per component — the case the
+    // per-leaf digit scan is built for, versus the short 1–5 digit values in the arrays above.
+    let mut big_numbers = String::from("[");
+    for i in 0..2_000u64 {
+        if i > 0 {
+            big_numbers.push(',');
+        }
+        let int_part: String = (0..60)
+            .map(|k| char::from(b'1' + ((i + k) % 9) as u8))
+            .collect();
+        let frac_part: String = (0..40)
+            .map(|k| char::from(b'0' + ((i + k) % 10) as u8))
+            .collect();
+        big_numbers.push_str(&format!(
+            "-{int_part}.{frac_part}e{}",
+            (i % 300) as i64 - 150
+        ));
+    }
+    big_numbers.push(']');
+
     vec![
         ("array_10k_ints", array_ints),
         ("array_10k_floats", array_floats),
@@ -143,6 +165,7 @@ fn corpus() -> Vec<(&'static str, String)> {
         ("big_string_100k", big_string),
         ("nested_100", nested),
         ("objects_1k", objects),
+        ("big_numbers_2k", big_numbers),
     ]
 }
 
