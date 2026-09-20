@@ -18,7 +18,7 @@ use bytes::Bytes;
 use bytes::buf::UninitSlice;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_buffer::reader::Buffer as _;
-use etude_buffer::reader::IoSlice;
+use etude_buffer::reader::{Chain, IoSlice};
 use etude_buffer::writer::Buffer as _;
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -165,5 +165,78 @@ fn bench_vectored(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_copy_into, bench_put_uninit, bench_vectored);
+/// `Chain` drains reader `a` fully, then `b`, presenting them as one stream. This measures the
+/// dispatch overhead of the chained drain by draining two 32 KiB `Bytes` halves via `Chain` versus a
+/// single contiguous 64 KiB `Bytes`, both `copy_into` a fresh `Vec<u8>` (the same 64 KiB copied either
+/// way). Any gap is `Chain`'s per-drain bookkeeping (the `buffer_is_empty` check and the `a`-then-`b`
+/// hand-off), not extra copying. (aarch64, jemalloc, release.)
+fn bench_chain(c: &mut Criterion) {
+    const HALF: usize = 32 * 1024;
+    let half = Bytes::from(vec![0xABu8; HALF]);
+    let whole = Bytes::from(vec![0xABu8; 2 * HALF]);
+
+    let mut g = group(c, "chain/two_halves_to_vec");
+    g.bench_function(BenchmarkId::from_parameter("2x32KiB"), |b| {
+        b.iter(|| {
+            let mut r = Chain::new(half.clone(), half.clone());
+            let mut dst: Vec<u8> = Vec::with_capacity(2 * HALF);
+            r.copy_into(&mut dst).unwrap();
+            black_box(dst)
+        })
+    });
+    g.finish();
+
+    let mut g = group(c, "chain/one_source_to_vec");
+    g.bench_function(BenchmarkId::from_parameter("1x64KiB"), |b| {
+        b.iter(|| {
+            let mut r = whole.clone();
+            let mut dst: Vec<u8> = Vec::with_capacity(2 * HALF);
+            r.copy_into(&mut dst).unwrap();
+            black_box(dst)
+        })
+    });
+    g.finish();
+}
+
+/// `partial_copy_into` copies until the destination is full and *returns* the trailing chunk for the
+/// caller to place — it is the zero-copy hand-off point (a chunk-holding sink or a rope can adopt that
+/// `Bytes` by reference). `copy_into` instead copies that trailing chunk too. This contrasts the two on
+/// a single 64 KiB `Bytes` drained into a `Vec<u8>` (a non-specializing sink): `partial_copy_into`
+/// returns the whole chunk via a refcount move (`split_to`, no memcpy), while `copy_into` memcpys it.
+/// The destination `Vec` is pre-allocated in both arms, so the delta is exactly the trailing-chunk copy.
+fn bench_partial(c: &mut Criterion) {
+    const N: usize = 64 * 1024;
+    let src = Bytes::from(vec![0xABu8; N]);
+
+    let mut g = group(c, "partial/return_trailing");
+    g.bench_function(BenchmarkId::from_parameter("64KiB"), |b| {
+        b.iter(|| {
+            let mut r = src.clone();
+            let mut dst: Vec<u8> = Vec::with_capacity(N);
+            let trailing = r.partial_copy_into(&mut dst).unwrap();
+            black_box((dst, trailing.len()))
+        })
+    });
+    g.finish();
+
+    let mut g = group(c, "partial/copy_trailing");
+    g.bench_function(BenchmarkId::from_parameter("64KiB"), |b| {
+        b.iter(|| {
+            let mut r = src.clone();
+            let mut dst: Vec<u8> = Vec::with_capacity(N);
+            r.copy_into(&mut dst).unwrap();
+            black_box(dst)
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_copy_into,
+    bench_put_uninit,
+    bench_vectored,
+    bench_chain,
+    bench_partial
+);
 criterion_main!(benches);
