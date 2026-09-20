@@ -95,6 +95,15 @@ impl Rng {
         assert_eq!(a.denom(), b.denom(), "eqden pair must share a denominator");
         (a, b)
     }
+    /// A proper-fraction rational in `(0, 1)` of ~`nbytes` width: the numerator is one byte narrower than
+    /// the denominator, so `num < den` and the integer part is 0. Two of these (with different, random
+    /// denominators) both have integer part 0, so a comparison cannot decide on the first Euclidean step
+    /// and the continued-fraction method recurses — the cmp worst case (see the `cmp_close` group).
+    fn rat_lt1(&mut self, nbytes: usize) -> Rational {
+        let den = self.big(nbytes);
+        let num = self.big(nbytes - 1); // strictly narrower ⇒ num < den ⇒ value in (0, 1)
+        Rational::new(num, den).expect("nonzero denominator")
+    }
 }
 
 /// The `num-bigint` value equal to `b` (via the public two's-complement encoding).
@@ -309,6 +318,30 @@ fn bench(c: &mut Criterion) {
             let mut rng = Rng(0x1234_5678 ^ (nbytes as u64));
             let a = rng.rat(nbytes);
             let b = rng.rat(nbytes);
+            let (ra, rb) = (to_ref(&a), to_ref(&b));
+            g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
+                be.iter(|| black_box(a.cmp(black_box(b))))
+            });
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", label),
+                &(&ra, &rb),
+                |be, (a, b)| be.iter(|| black_box(a.cmp(black_box(b)))),
+            );
+        }
+        g.finish();
+    }
+
+    // Worst-case comparison: both operands are proper fractions in (0,1) with DIFFERENT denominators, so
+    // their integer parts tie (both 0) and the continued-fraction comparison must recurse rather than
+    // decide on the first Euclidean step. This is the deterministic counterpart to the `cmp` group above,
+    // whose single random draw hits this recursive case only by luck (e.g. its 2048b tier); it bounds cmp's
+    // cost when operands are genuinely close in magnitude.
+    {
+        let mut g = group(c, "cmp_close");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x0bad_c0de ^ (nbytes as u64));
+            let a = rng.rat_lt1(nbytes);
+            let b = rng.rat_lt1(nbytes);
             let (ra, rb) = (to_ref(&a), to_ref(&b));
             g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
                 be.iter(|| black_box(a.cmp(black_box(b))))
