@@ -415,6 +415,30 @@ frame off the front or trimming a tail is close to free), while the priciest spl
 mid-cut; there is no folding or degeneracy involved — both are the same fast path, just touching
 different amounts of the tree.
 
+### Assemble from many fragments (runnable: `cargo bench -p etude-bytevec -- assemble`)
+
+Gathering scattered buffers into one rope — 1024 chunks assembled as 64 fragments of 16. Two rope
+strategies for the same result: fold via repeated `append` (each an O(log₃₂) RRB concat) vs collecting
+every chunk at once (one bulk bottom-up build). This is the concat/rebalance path the per-op and workload
+sweeps do not reach (aarch64, jemalloc, release):
+
+| strategy | time |
+|----------|------|
+| rope, `append`-fold | 41.4 µs (was 58.4 µs) |
+| rope, `from_iter` (bulk) | ~19 µs |
+| naive deque, append-fold | ~25 µs |
+
+Two things this surfaced. First a **validation**: a random `byte_at` on the `append`-folded rope (61.9 ns)
+is indistinguishable from one on the bulk-built rope (60.6 ns), so repeatedly repacking the concat seam
+does *not* leave a degenerate tree — the assembled structure reads exactly as well. Second a **fix**: the
+`append`-fold was needlessly building a whole tree for each tiny fragment and concat-repacking the seam.
+Appending a *small* `other` (≤ `FANOUT` chunks — which, since a `Deep` rope always holds more than
+`DEMOTE_AT` chunks, is always a flat fragment) now pushes its handful of chunks straight onto the back
+(batched into blocks) instead, which took the fold **58.4 → 41.4 µs (~29%)** with no change to the
+large-`other` case (`append_mid/deep` still shares structurally via `concat`, unchanged at 1.44 µs). Bulk
+`from_iter` is still the fastest way to assemble when every fragment is in hand at once — reach for the
+`append`-fold only when the fragments arrive incrementally.
+
 ## Historical: the switch from a flat deque to the tiered rope
 
 The head-to-head that justified reimplementing this crate — the **rope** (current) vs. the **flat

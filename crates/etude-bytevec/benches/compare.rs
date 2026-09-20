@@ -1365,6 +1365,75 @@ fn bench_split_position(c: &mut Criterion) {
     }
 }
 
+/// Assembling one large rope from many fragments (scattered buffers gathered into one) — exercises the
+/// concat / rebalance path the per-op and workload sweeps do not. Two rope strategies for the same
+/// 1024-chunk result: fold via repeated `append` (each an O(log₃₂) RRB concat that repacks the seam,
+/// leaving the interior shared) vs collecting every chunk at once (one bulk bottom-up build). A random
+/// `byte_at` on each assembled rope then checks whether the concat-built tree reads as fast as the
+/// bulk-built one (i.e. whether repeated seam-repacking degrades the structure).
+fn bench_assemble(c: &mut Criterion) {
+    const PIECES: usize = 64;
+    const PER: usize = 16; // PIECES * PER = 1024 chunks
+    let frags: Vec<Vec<Bytes>> = (0..PIECES)
+        .map(|p| (0..PER).map(|i| mtu_chunk((p * PER + i) as u8)).collect())
+        .collect();
+    let flat: Vec<Bytes> = frags.iter().flatten().cloned().collect();
+
+    let mut g = group(c, "assemble");
+    g.bench_function("rope_concat_fold", |b| {
+        b.iter(|| {
+            let mut acc = ByteVec::new();
+            for f in &frags {
+                let mut piece: ByteVec = f.iter().cloned().collect();
+                acc.append(&mut piece);
+            }
+            black_box(acc)
+        })
+    });
+    g.bench_function("rope_from_iter", |b| {
+        b.iter(|| black_box(flat.iter().cloned().collect::<ByteVec>()))
+    });
+    g.bench_function("naive_concat_fold", |b| {
+        b.iter(|| {
+            let mut acc = NaiveVec::new();
+            for f in &frags {
+                let mut piece: NaiveVec = f.iter().cloned().collect();
+                acc.append(&mut piece);
+            }
+            black_box(acc)
+        })
+    });
+    g.finish();
+
+    // Post-assembly read: does the concat-built tree read as fast as the bulk-built one?
+    let concat_built: ByteVec = {
+        let mut acc = ByteVec::new();
+        for f in &frags {
+            let mut piece: ByteVec = f.iter().cloned().collect();
+            acc.append(&mut piece);
+        }
+        acc
+    };
+    let bulk_built: ByteVec = flat.iter().cloned().collect();
+    let total = bulk_built.len();
+    let mut g = group(c, "assemble_read");
+    g.bench_function("concat_built_byte_at", |b| {
+        let mut st = 0x9E37_79B9u64;
+        b.iter(|| {
+            st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+            black_box(concat_built.byte_at((st >> 33) as usize % total))
+        })
+    });
+    g.bench_function("bulk_built_byte_at", |b| {
+        let mut st = 0x9E37_79B9u64;
+        b.iter(|| {
+            st = st.wrapping_mul(6364136223846793005).wrapping_add(1);
+            black_box(bulk_built.byte_at((st >> 33) as usize % total))
+        })
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_split_position,
@@ -1374,6 +1443,7 @@ criterion_group!(
     bench_churn_sweep,
     bench_access_pattern,
     bench_mixed_rw,
+    bench_assemble,
     bench_push_back,
     bench_push_front,
     bench_mutating,

@@ -1221,6 +1221,16 @@ impl<K> Rope<K> {
             return;
         }
 
+        // Small `other` onto a larger `self`: pushing its few chunks onto `self`'s back (batched into
+        // blocks by `push_chunk_back`) is cheaper than building a whole tree for `other` and repacking
+        // the concat seam. Only worthwhile while `other` is small — a large `other` is better shared
+        // structurally via `concat` below (which moves no chunks), so gate on a single block's worth.
+        if taken.chunk_count() <= FANOUT {
+            self.push_all(taken);
+            self.check_invariants();
+            return;
+        }
+
         // Otherwise fold both to trees and concat (O(log), subtree-sharing).
         let left = core::mem::take(self).into_tree();
         let right = taken.into_tree();
