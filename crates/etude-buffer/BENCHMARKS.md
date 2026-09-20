@@ -29,8 +29,31 @@ relies on to absorb received buffers without a copy. The takeaway for callers: d
 chunk-holding sink (a `Bytes` queue, a rope) keeps the payload zero-copy; draining into a contiguous
 `Vec`/`BytesMut`/slice pays the memcpy that the contiguous representation requires.
 
+## `put_uninit_slice` — the zero-init write path (runnable: `cargo bench -p etude-buffer -- put_uninit`)
+
+`put_uninit_slice` writes directly into a destination's spare capacity through a closure, avoiding a
+staging copy. Before the closure runs it zero-initializes the exposed region — a soundness floor so a
+closure that under-fills can never expose stale/uninitialized heap. When the closure fills the *whole*
+region (the common case: a socket read that fills its buffer), that memset is immediately overwritten,
+so it is pure overhead. Contrasting `put_uninit_slice` (zero-init + full fill) against a plain
+`put_slice` of the same payload (a single copy), into a fresh `Vec<u8>` (aarch64, jemalloc, release):
+
+| op | 64 B | 1400 B | 64 KiB |
+|----|------|--------|--------|
+| `put_uninit_slice` (zero-init + fill) | 13.3 ns | 122 ns | 2.00 µs |
+| `put_slice` (single copy) | 6.8 ns | 87 ns | 1.22 µs |
+| redundant zero-init overhead | ~2.0× | ~1.4× | ~1.65× |
+
+The zero-init is a full extra pass over the region, so it roughly doubles a small write and adds ~65% to
+a 64 KiB one — material, not noise. This is a real optimization target: when the caller knows the
+closure fills the entire region (or reports how many bytes it wrote), the redundant memset over the
+written prefix can be skipped, keeping only the soundness floor over any *unwritten* tail. That is an API
+change on a trait `etude-bytevec` depends on (its `Builder::for_socket_read` routes through this), so it
+is being pursued as a coordinated follow-up rather than folded in here.
+
 ## Next targets
 
-Hot paths still to bench (subsequent passes): the chunked/vectored reader path (`IoSlice` / `Chain`
-readers, which exercise the internal `vectored_copy` scatter/gather), `put_uninit_slice` (the
-socket-read zero-init write path), and `partial_copy_into`'s trailing-chunk hand-off.
+Hot paths still to bench (subsequent passes): the chunked/vectored `IoSlice` reader drain (multi-segment
+`put_slice`), `partial_copy_into`'s trailing-chunk hand-off, and the `Chain` reader. The
+`slice::vectored_copy` scatter helper is crate-private and currently used only in tests, so it is not on
+a benchable production path.
