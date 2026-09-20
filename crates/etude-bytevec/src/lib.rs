@@ -1953,13 +1953,27 @@ impl<K> Rope<K> {
         rope
     }
 
-    /// Demotes a `Deep` rope back to `Small` once it drains below `DEMOTE_AT` chunks.
-    #[inline]
+    /// The hot-path demote gate, called after every pop/truncate. Kept tiny and always-inlined so it
+    /// does not bloat those callers: it only reads the (O(1) cached) chunk counts and compares. The
+    /// actual flatten is out-of-line in [`demote_now`](Self::demote_now) behind `#[cold]`, so the
+    /// common "no demote" case in a drain loop is just a couple of loads and a branch — the closure +
+    /// repr-rebuild body no longer inlines into the pop loop.
+    #[inline(always)]
     fn maybe_demote(&mut self) {
-        let should = matches!(&self.repr, Repr::Deep(_)) && self.chunk_count() <= DEMOTE_AT;
-        if !should {
-            return;
+        let should_demote = match &self.repr {
+            Repr::Deep(d) => d.head.len() + d.tree.chunk_count() + d.tail.len() <= DEMOTE_AT,
+            Repr::Small { .. } => false,
+        };
+        if should_demote {
+            self.demote_now();
         }
+    }
+
+    /// Flattens a `Deep` rope back into the `Small` tier. The cold half of
+    /// [`maybe_demote`](Self::maybe_demote) — reached only when the count has actually fallen to
+    /// `DEMOTE_AT`, so it is kept out-of-line.
+    #[cold]
+    fn demote_now(&mut self) {
         // flatten everything back into a head + additional deque (direct traversal, not the iterator)
         let mut additional: VecDeque<Bytes> = VecDeque::new();
         self.for_each_chunk(|c| additional.push_back(c.clone()));
