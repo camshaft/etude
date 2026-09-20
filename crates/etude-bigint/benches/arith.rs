@@ -271,9 +271,10 @@ fn bench_sign_magnitude_roundtrip(c: &mut Criterion) {
     g.finish();
 }
 
-/// `clone` across tiers — the small-value inline magnitude repr makes a ≤128-bit clone allocation-free
-/// (a stack copy), where a `Vec`-backed magnitude heap-allocates. Clone-heavy callers (e.g. rational
-/// reciprocal) live or die on this at the small tiers.
+/// `clone` across tiers — the magnitude is a `Vec`, so a clone heap-allocates even a one-limb value;
+/// that allocation is the 64b loss (num-bigint has a small-value fast path). A deferred inline small-value
+/// repr would make a ≤128-bit clone a stack copy. Clone-heavy callers (e.g. rational reciprocal) live or
+/// die on this at the small tiers.
 fn bench_clone(c: &mut Criterion) {
     let mut g = group(c, "clone");
     let mut rng = Rng(0x0102_0304_0506_0708);
@@ -290,8 +291,8 @@ fn bench_clone(c: &mut Criterion) {
     g.finish();
 }
 
-/// `from_i64` — constructing a small value. Inline (no heap allocation) vs num-bigint's `Vec`-backed
-/// `BigInt::from`.
+/// `from_i64` — constructing a small value. Our `Vec`-backed one-limb magnitude heap-allocates (the 64b
+/// loss vs num-bigint's small-value fast path; a deferred inline repr would close it).
 fn bench_from_i64(c: &mut Criterion) {
     let mut g = group(c, "from_i64");
     g.bench_function("etude", |bch| {
