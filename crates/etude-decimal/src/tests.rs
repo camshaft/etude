@@ -375,6 +375,86 @@ fn native_arith_tier_boundaries() {
 }
 
 #[test]
+fn div_matches_bigdecimal() {
+    // `div` returns `Some(exact)` only when the quotient TERMINATES (the reduced denominator's prime
+    // factors ⊆ {2, 5}), and `None` otherwise (or on a zero divisor). The generated differential harness
+    // covers parse/cmp and the deterministic tier test covers add/sub/mul, but neither exercises `div`
+    // against the reference — this closes that gap on both arms (a false accept OR a false `None` shows
+    // immediately). Terminating quotients are checked two ways: the result reconstructs the dividend
+    // (`q * divisor == dividend`, via the oracle-checked `mul`) AND its value equals bigdecimal's division.
+    let terminating: &[(&str, &str)] = &[
+        ("1", "2"),        // 0.5
+        ("1", "8"),        // 0.125
+        ("3", "40"),       // 0.075
+        ("10", "4"),       // 2.5
+        ("6", "0.5"),      // 12
+        ("0.6", "0.3"),    // 2
+        ("7", "1"),        // 7 (divisor 1)
+        ("0", "3"),        // 0 (zero dividend)
+        ("12345", "1000"), // 12.345
+        ("1", "1024"),     // 2^-10 terminates (denominator is 2^10)
+        ("1", "9765625"),  // 1 / 5^10 terminates (0.0000001024)
+        ("-1", "4"),       // -0.25 (negative dividend)
+        ("1", "-4"),       // -0.25 (negative divisor)
+        ("-1", "-4"),      // 0.25 (negative ÷ negative)
+        // Wide coefficient forcing the exact `Big` path (exceeds i128), still terminating (÷ 2):
+        ("340282366920938463463374607431768211456", "2"), // 2^128 / 2 = 2^127
+    ];
+    for &(a, b) in terminating {
+        let (da, db) = (Decimal::from_str(a).unwrap(), Decimal::from_str(b).unwrap());
+        let (ra, rb) = (
+            BigDecimal::from_str(a).unwrap(),
+            BigDecimal::from_str(b).unwrap(),
+        );
+        let q = da
+            .div(&db)
+            .unwrap_or_else(|| panic!("{a} / {b} terminates → Some"));
+        // Reconstruction: q * divisor == dividend (exact; `mul` is itself oracle-checked).
+        assert_eq!(q.mul(&db), da, "reconstruct {a} / {b}: q*b != a");
+        // Value agrees with the reference's (exact, for a terminating quotient within its precision).
+        assert_same(&q, &(&ra / &rb));
+    }
+
+    // Non-terminating quotients must be `None` — and that must be a TRUE non-termination (no false `None`):
+    // confirm the reference cannot represent it exactly either (its rounded quotient fails to reconstruct).
+    let non_terminating: &[(&str, &str)] = &[
+        ("1", "3"),
+        ("2", "3"),
+        ("1", "7"),
+        ("10", "6"),
+        ("1", "30"),
+        ("-1", "3"), // sign does not affect termination
+        ("1", "-6"),
+    ];
+    for &(a, b) in non_terminating {
+        let (da, db) = (Decimal::from_str(a).unwrap(), Decimal::from_str(b).unwrap());
+        assert!(da.div(&db).is_none(), "{a} / {b} is non-terminating → None");
+        let (ra, rb) = (
+            BigDecimal::from_str(a).unwrap(),
+            BigDecimal::from_str(b).unwrap(),
+        );
+        assert_ne!(
+            &(&ra / &rb) * &rb,
+            ra,
+            "{a} / {b} must be non-terminating in the reference too (guards against a false None)"
+        );
+    }
+
+    // Zero divisor → None regardless of dividend.
+    assert!(
+        Decimal::from_str("5")
+            .unwrap()
+            .div(&Decimal::zero())
+            .is_none(),
+        "x / 0 → None"
+    );
+    assert!(
+        Decimal::zero().div(&Decimal::zero()).is_none(),
+        "0 / 0 → None"
+    );
+}
+
+#[test]
 fn to_f64_matches_float_parse() {
     // Correctly-rounded direct conversion must agree bit-for-bit with the std float parser (itself
     // correctly rounded) across normals, rounding boundaries, subnormals, overflow, and underflow.
