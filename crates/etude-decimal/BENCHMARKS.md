@@ -261,17 +261,22 @@ mantissa), so it has its own cell — `12345678.9012345` (15 significant digits)
 `bigdecimal` has no exact-terminating division — its `/` is precision-bounded (that comparison is the
 `div_round` group above). This tracks our exact `div`'s cost across tiers (divisor `2^10`). A dividend that
 fits `i128` reduces and factor-strips (gcd, 2s, 5s) entirely in native `u128` — no chain of `Big` divmods —
-so the `64b` tier drops sharply; wider dividends keep the exact `Big` path. Also measured over a rotating
-batch of dividends per tier now (the `now` column) — the numbers barely move, confirming the fixed-`2^10`
-strip is operand-insensitive at these sizes (unlike `div_round`, which the rotation corrected materially).
+so the `64b` tier drops sharply; wider dividends keep the exact `Big` path.
+
+The wide tiers then collapsed an order of magnitude when `etude-bigint` #295 added a single-limb `gcd` fast
+path: the reduction step computes `gcd(dividend, divisor)`, and with the divisor `2^10` (one limb) against a
+wide dividend that is exactly the `gcd(wide, small)` shape #295 turned from `O(bit_len · n)` into `O(n)`.
+That `gcd` was the dominant cost at scale — `1024b` `9.626 µs → 912 ns` (10.6×), `4096b`
+`110.3 µs → 1.600 µs` (69×). The `now` column is the post-#295 batch; `64b` is unchanged (its native-`u128`
+strip never called `Big::gcd`).
 
 | tier | etude (before) | etude (now) |
 |------|---------------:|------------:|
-| 64b   | 876 ns   | 207 ns |
-| 256b  | 1.863 µs | 1.830 µs |
-| 1024b | 10.11 µs | 9.626 µs |
-| 2048b | 30.33 µs | 30.83 µs |
-| 4096b | 108.0 µs | 110.3 µs |
+| 64b   | 876 ns   | 207.66 ns |
+| 256b  | 1.863 µs | 766.93 ns |
+| 1024b | 10.11 µs | 912.06 ns |
+| 2048b | 30.33 µs | 1.157 µs |
+| 4096b | 108.0 µs | 1.600 µs |
 
 ### `new` — construction + canonicalization (etude only)
 
