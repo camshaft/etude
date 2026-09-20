@@ -1,0 +1,50 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-json-serde"
+version = "0.1.0"
+description = "Adapter: an etude-serde Deserializer over the etude-json Tokenizer (the grammar/parser layer on the lexer). DRAFT/SPIKE — first consumer of the rope-native serde seam, pending design review."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = ["etude-json/std", "etude-serde/std", "etude-bytevec/std"]
+
+[dependencies]
+# The lexer this adapter drives.
+etude-json = { version = "0.1", path = "../etude-json", default-features = false }
+# The rope-native value model / Visitor seam this adapter implements.
+etude-serde = { version = "0.1", path = "../etude-serde", default-features = false }
+# The input rope (string decode is resolved against it).
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
+# Zero-copy string values: an escape-free string's content is handed as an O(1) StrRope slice.
+etude-strrope = { version = "0.1", path = "../etude-strrope", default-features = false }
+
+[dev-dependencies]
+# Differential oracle: the adapter is now a grammar-enforcing parser, so its accept/reject must match
+# serde_json (unlike the bare lexer).
+serde_json = "1"
+# Build input ropes with explicit chunk layouts.
+bytes = "1"
+# Property/differential fuzzing of the adapter against serde_json (mirrors etude-json's tokenizer-level
+# bolero tests; runs bounded under `cargo test`, fuzzable under `cargo bolero`).
+bolero = "0.13"
+# A concrete number value type, to prove the real number decode: Decimal::parse over the lexeme
+# sub-rope's byte iterator. The adapter core stays value-type-agnostic (a consumer picks the type).
+etude-decimal = { version = "0.1", path = "../etude-decimal" }
+
+# criterion (rayon) and jemalloc do not build for wasm; they are only needed by the native `scoreboard`
+# bench, so gate them off wasm (mirrors the etude-bigint / etude-bytevec bench setup).
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+# Wall-clock scoreboard vs serde_json (the alloc scoreboard's time counterpart).
+criterion = "0.5"
+# Match the host allocator so the numbers reflect production allocation behavior.
+tikv-jemallocator = "0.6"
+
+[[bench]]
+name = "scoreboard"
+harness = false
