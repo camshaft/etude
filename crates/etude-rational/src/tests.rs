@@ -576,3 +576,48 @@ fn differential_oracle() {
             }
         });
 }
+
+#[test]
+fn rational_sum_accumulator_matches_by_value_and_numrational() {
+    // Validate the RationalSum scratch-reuse accumulator against BOTH the by-value Rational::add/sub fold
+    // and num-rational, step by step. Mixes add and sub, distinct AND equal denominators (10 repeats — the
+    // eqden fast path), integers (den 1), and a sign/zero crossing. Each step must stay canonical and agree.
+    let terms = [
+        (3i64, 10i64),
+        (2, 10),
+        (1, 6),
+        (5, 7),
+        (-4, 7),
+        (7, 3),
+        (1, 1),
+        (-3, 10),
+        (3, 10),
+    ];
+    let subtract = [false, false, true, false, true, false, true, true, true];
+
+    use num_traits::Zero;
+    let mut acc = RationalSum::zero();
+    let mut byval = Rational::zero();
+    let mut rref = BigRational::zero();
+    for (&(n, d), &sub) in terms.iter().zip(subtract.iter()) {
+        let r = Rational::from_ratio_i64(n, d).unwrap();
+        let rr = BigRational::new(BigInt::from(n), BigInt::from(d));
+        if sub {
+            acc.sub(&r);
+            byval = byval.sub(&r);
+            rref -= rr;
+        } else {
+            acc.add(&r);
+            byval = byval.add(&r);
+            rref += rr;
+        }
+        assert_eq!(
+            acc.value(),
+            &byval,
+            "RationalSum != by-value fold after {n}/{d} sub={sub}"
+        );
+        assert_same(acc.value(), &rref);
+    }
+    // into_value returns the final accumulated value.
+    assert_eq!(acc.into_value(), byval);
+}
