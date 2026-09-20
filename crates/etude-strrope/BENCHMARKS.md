@@ -40,7 +40,7 @@ cheap), at 1000 chunks the rope's O(1) share pulls far ahead (159 ns vs 1.06 µs
 | `slice` | deep | 31.2 µs | 401 ns | same — the rope's structural share only pays off well past 56 KiB |
 | `eq` / `cmp` | deep | 8.5 µs | 1.65 µs | two-cursor chunk walk vs one contiguous `memcmp` |
 | `display` | deep | 16.6 µs | 1.24 µs | one `write_str` per chunk vs one for the whole string |
-| `chars().count()` | deep | 202 µs | 4.39 µs | per-codepoint decode vs `str`'s specialized byte-scan count |
+| `chars().count()` | deep | 25.2 µs | 4.71 µs | specialized byte-scan count (no decode); residual is per-chunk iteration over 1000 leaves vs one contiguous scan |
 | `char_indices().last()` | deep | 387 µs | 4.7 ns | forward O(n) scan vs `str`'s O(1) reverse iterator |
 | `debug` | deep | 315 µs | 47.6 µs | per-chunk `escape_debug` |
 
@@ -52,8 +52,10 @@ that is already chunked (streamed / sliced / shared), not for building small str
 
 Measured hot paths worth a code-opt pass (own PRs, operator review):
 
-- `chars()` / `char_indices()` — ~46x off std at depth; decode contiguous runs harder / avoid the
-  per-codepoint `from_utf8` on the seam-free interior.
+- `chars().count()` — done: specialized to a non-continuation-byte scan (no decode), 202 µs → 25.2 µs
+  at depth (~8x). Residual vs std is the per-chunk iteration; a contiguous scan is not possible over a rope.
+- `char_indices()` / `chars()` decode (collect, iterate) — still decodes each codepoint; skipping the
+  per-chunk re-validation on the seam-free interior (the content is valid by invariant) is the next lever.
 - `char_indices().last()` — a `DoubleEndedIterator` for `chars()` would make `.last()` / `.next_back()`
   O(1)-from-the-back instead of a full forward scan. Deferred until a consumer needs reverse iteration.
 - `eq` / `cmp` at depth — the chunk-walk carries per-chunk setup; a coarser run comparison could close
