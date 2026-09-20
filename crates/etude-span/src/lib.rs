@@ -32,31 +32,37 @@ pub struct Span {
 
 impl Span {
     /// A span covering the half-open byte range `[start, end)`.
+    #[inline]
     pub fn new(start: usize, end: usize) -> Span {
         Span { start, end }
     }
 
     /// The inclusive start byte offset.
+    #[inline]
     pub fn start(&self) -> usize {
         self.start
     }
 
     /// The exclusive end byte offset.
+    #[inline]
     pub fn end(&self) -> usize {
         self.end
     }
 
     /// The number of bytes the span covers.
+    #[inline]
     pub fn len(&self) -> usize {
         self.end - self.start
     }
 
     /// Whether the span is empty (`start == end`).
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }
 
     /// The span as a `start..end` range, for slicing the input rope.
+    #[inline]
     pub fn range(&self) -> core::ops::Range<usize> {
         self.start..self.end
     }
@@ -81,6 +87,7 @@ pub struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     /// Create a cursor positioned at the first byte of `input`.
+    #[inline]
     pub fn new(input: &'a ByteVec) -> Self {
         let mut cursor = Cursor {
             chunks: input.chunks(),
@@ -95,11 +102,16 @@ impl<'a> Cursor<'a> {
     }
 
     /// The current byte without advancing, or `None` at end of input.
+    ///
+    /// `#[inline]` because this is the tokenizer inner loop's per-byte read: called from a downstream
+    /// crate it must inline to a slice load, not a cross-crate call (measured ~10-30x on a full scan).
+    #[inline]
     pub fn peek(&self) -> Option<u8> {
         self.chunk.get(self.pos).copied()
     }
 
     /// The absolute byte offset of the current position (equals the input length at end of input).
+    #[inline]
     pub fn offset(&self) -> usize {
         self.base + self.pos
     }
@@ -107,12 +119,18 @@ impl<'a> Cursor<'a> {
     /// The unread bytes of the current leaf (empty when exhausted). Borrows the input, not `self`, so
     /// a caller can scan it and then mutate the cursor (e.g. [`Cursor::skip_in_chunk`]). Use it to
     /// bulk-scan a run within one leaf, then [`Cursor::skip_in_chunk`] past it.
+    #[inline]
     pub fn chunk_tail(&self) -> &'a [u8] {
         &self.chunk[self.pos..]
     }
 
     /// Advance past the current byte. The caller must have observed a byte via [`Cursor::peek`] first
     /// (so `pos < chunk.len()`); at a leaf boundary this refills to the next non-empty leaf.
+    ///
+    /// `#[inline]` for the same reason as [`Cursor::peek`]: the hot per-byte increment must inline
+    /// into the caller. The cold leaf-boundary `refill` stays out of line so the inlined body is just
+    /// the increment and the boundary branch.
+    #[inline]
     pub fn bump(&mut self) {
         self.pos += 1;
         if self.pos >= self.chunk.len() {
@@ -123,6 +141,7 @@ impl<'a> Cursor<'a> {
     /// Advance `k` bytes within the current leaf. The caller guarantees `k <= chunk_tail().len()`
     /// (the skip stays inside the current leaf); refills when it lands exactly at the leaf end. This
     /// is the bulk path: a run of bytes is skipped in one step instead of `k` `bump`s.
+    #[inline]
     pub fn skip_in_chunk(&mut self, k: usize) {
         self.pos += k;
         if self.pos >= self.chunk.len() {
@@ -132,6 +151,10 @@ impl<'a> Cursor<'a> {
 
     /// Move to the next non-empty leaf (or the exhausted state), crediting the leaving leaf's whole
     /// length to `base` so [`Cursor::offset`] stays absolute.
+    ///
+    /// `#[cold]`: this fires only at a leaf boundary, so keeping it out of line lets the inlined
+    /// `bump`/`skip_in_chunk` hot path stay just the increment and the boundary branch.
+    #[cold]
     fn refill(&mut self) {
         self.base += self.chunk.len();
         self.pos = 0;
