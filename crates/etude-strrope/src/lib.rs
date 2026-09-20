@@ -1149,12 +1149,20 @@ mod tests {
             );
             // The specialized `Chars::count()` (byte scan, no decode) must equal the decoded count,
             // fresh and after partially advancing (so `cur`/`carry` mid-iteration state is exercised).
-            assert_eq!(s.chars().count(), text.chars().count(), "count at size {size}");
+            assert_eq!(
+                s.chars().count(),
+                text.chars().count(),
+                "count at size {size}"
+            );
             let mut it = s.chars();
             for _ in 0..3 {
                 it.next();
             }
-            assert_eq!(it.count(), text.chars().count() - 3, "mid-iter count at size {size}");
+            assert_eq!(
+                it.count(),
+                text.chars().count() - 3,
+                "mid-iter count at size {size}"
+            );
         }
     }
 
