@@ -90,6 +90,20 @@ release):
   / human-readable-payload shape. A new corpus shape added with this change; the other documents are
   compact, so they have no inter-token whitespace to skip.
 
+## Perf-pass status — clean-win well harvested
+
+All three of the tokenizer's byte-at-a-time inner scans now bulk-skip a run with one per-leaf
+`position` pass instead of a call per byte: the string content scan, the number digit scan, and the
+whitespace scan. With those applied, `etude_json` tokenize beats `serde_json` on every realistic shape
+(arrays, objects, pretty-printed, big numbers), at zero allocations.
+
+The one remaining tokenizer lever is a SIMD / `memchr`-style leaf scan for the closing quote / escape,
+which would help only `big_string_100k` (a single ~100 KB string — not a real consumer payload, where
+`serde_json` is still ~3.3× faster). It is an **optional** follow-up: it adds a dependency to an
+otherwise dependency-light lexer, so it is deliberately not taken here, against the crate's lean ethos.
+Absent that dependency there is no further clean tokenizer win — the crate is in light-monitor mode,
+to be revived on a measured regression or a new document shape.
+
 ## Span-resolution cost — the O(log n)-per-token re-access (`tokenize_and_read`)
 
 Tokenizing is cheap and 0-alloc, but a `Span` is `(offset, len)`: reading a token's bytes later means
