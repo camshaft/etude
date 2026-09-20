@@ -52,10 +52,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
 | cmp                       | 4096b  | 27.4 ns   | 27.9 ns    | **0.98**  |
-| to_decimal_string         | 64b    | 58.3 ns   | 72.2 ns    | **0.81**  |
-| to_decimal_string         | 256b   | 342 ns    | 248 ns     | 1.38      |
-| to_decimal_string         | 1024b  | 1.63 µs   | 2.22 µs    | **0.74**  |
-| to_decimal_string         | 4096b  | 14.3 µs   | 21.0 µs    | **0.68**  |
+| to_decimal_string         | 64b    | 41.1 ns   | 72.5 ns    | **0.57**  |
+| to_decimal_string         | 256b   | 311 ns    | 247 ns     | 1.26      |
+| to_decimal_string         | 1024b  | 1.37 µs   | 2.22 µs    | **0.62**  |
+| to_decimal_string         | 4096b  | 13.4 µs   | 20.9 µs    | **0.64**  |
 | sign_magnitude_roundtrip  | 64b    | 35.2 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 256b   | 41.6 ns   | —          | —         |
 | sign_magnitude_roundtrip  | 1024b  | 75.0 ns   | —          | —         |
@@ -359,6 +359,13 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   buffer from the right, so the digits land most-significant-first with no reversal pass and no second
   buffer. Helps most where the formatter is the larger share of the work: 64b 61.9 → 58.3 ns
   (0.86× → **0.81×**), 1024b 3.19 → 3.14 µs (1.44× → **1.42×**); 256b/4096b within noise (divmod-dominated).
+- **Two-digits-per-step chunk formatter** — `write_decimal_chunk` extracted one digit per iteration
+  (`v % 10`, `v /= 10`). It now extracts two per iteration via a compile-time `DIGIT_PAIRS` table
+  (`v % 100` indexes the pair `"00".."99"`), halving the divisions and stores in the digit loop. Since
+  every `to_decimal` tier formats its 19-digit chunks through this path, every tier speeds up: 64b
+  57.1 → 41.1 ns (0.79× → **0.57×**), 256b 369 → 311 ns (1.49× → **1.26×**), 1024b 1.64 → 1.37 µs
+  (0.74× → **0.62×**), 4096b 14.4 → 13.4 µs (0.68× → **0.64×**). This is the shared base-10 render path
+  behind etude-decimal's `to_string`, so the win carries into that crate.
 - **Pre-reserved byte serializers** — `to_sign_magnitude_bytes` (the canonical map-key encoding) and
   `to_le_twos_complement_bytes` built their output `Vec` with `Vec::new()` and grew it 8 bytes per limb,
   reallocating up the doubling schedule; and the trailing sign-guard byte then forced one more realloc
@@ -390,11 +397,12 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
 
 ## Where the gaps remain (optimization order)
 
-1. **to_decimal_string at 256b (1.38×).** The only remaining `to_decimal` loss — 1024b (0.74×) and 4096b
-   (0.68×) now win after raising the recursive threshold to 64 (the linear peel beats the recursive split
-   through 64 limbs; see landed). 256b is the linear peel at 4 limbs: alloc-free, dividing by `10^19` with
-   a precomputed reciprocal, so the residual is per-chunk constant factors (~5 chunks), not an algorithm
-   choice — num-bigint's small-value radix conversion is simply tighter here. Low headroom.
+1. **to_decimal_string at 256b (1.26×).** The only remaining `to_decimal` loss — 64b (0.57×), 1024b
+   (0.62×) and 4096b (0.64×) win (recursive-threshold retune + the two-digit chunk formatter; see landed).
+   256b is the linear peel at 4 limbs: alloc-free, dividing by `10^19` with a precomputed reciprocal, so
+   the residual is per-chunk constant factors (~5 chunks), not an algorithm choice — num-bigint's
+   small-value radix conversion is still tighter here. The two-digit formatter narrowed it (1.38× → 1.26×);
+   remaining headroom is low.
 2. **clone / from_i64 / neg / abs at 64b (2.20× / 1.77× / 2.19× / 1.80×).** All four are the same
    small-value path heap-allocating a one-limb `Vec`. An inline small-value magnitude repr fixes them
    together (measured clone 2.20→~1.0×, from_i64 1.77→0.97×) but _regresses_ add/mul unless the arithmetic

@@ -1246,6 +1246,20 @@ fn emit_decimal_linear<W: core::fmt::Write>(mag: &[u64], w: &mut W) -> core::fmt
     Ok(())
 }
 
+/// The 100 two-digit strings `"00".."99"` packed as bytes, so `DIGIT_PAIRS[2d..2d+2]` is the ASCII of
+/// `d` (`0..=99`) with its leading zero. Lets [`write_decimal_chunk`] emit two digits per `/100` step
+/// instead of one per `/10` — halving the divisions and stores in the digit loop. Built at compile time.
+const DIGIT_PAIRS: [u8; 200] = {
+    let mut t = [0u8; 200];
+    let mut d = 0usize;
+    while d < 100 {
+        t[d * 2] = b'0' + (d / 10) as u8;
+        t[d * 2 + 1] = b'0' + (d % 10) as u8;
+        d += 1;
+    }
+    t
+};
+
 /// Format one `10^19` chunk `v` into a fixed stack buffer — most-significant digit first, left-padded
 /// with `'0'` to at least `pad` digits — and write it to the sink in a single `write_str` (the bytes
 /// are ASCII digits, hence valid UTF-8). No allocation.
@@ -1256,16 +1270,29 @@ fn write_decimal_chunk<W: core::fmt::Write>(
 ) -> core::fmt::Result {
     // Fill one buffer from the right (least-significant digit written last), so the digits land
     // most-significant first with no separate reversal pass. A u64 is at most 20 decimal digits.
+    // Two digits per iteration via `DIGIT_PAIRS` (one `/100` + one table lookup replaces two `/10`s).
     let mut buf = [0u8; 20];
     let mut i = buf.len();
     if v == 0 {
         i -= 1;
         buf[i] = b'0';
     } else {
-        while v > 0 {
+        while v >= 100 {
+            let p = ((v % 100) * 2) as usize;
+            i -= 2;
+            buf[i] = DIGIT_PAIRS[p];
+            buf[i + 1] = DIGIT_PAIRS[p + 1];
+            v /= 100;
+        }
+        // 1 or 2 remaining digits (v < 100): emit the pair without its leading zero.
+        if v >= 10 {
+            let p = (v * 2) as usize;
+            i -= 2;
+            buf[i] = DIGIT_PAIRS[p];
+            buf[i + 1] = DIGIT_PAIRS[p + 1];
+        } else {
             i -= 1;
-            buf[i] = b'0' + (v % 10) as u8;
-            v /= 10;
+            buf[i] = b'0' + v as u8;
         }
     }
     // Left-pad with '0' up to `pad` digits (pad ≤ 19 ≤ 20; a full chunk already has ≥ pad digits, so
