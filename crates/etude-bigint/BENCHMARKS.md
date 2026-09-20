@@ -44,10 +44,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | div_small (n / 1-limb)    | 256b   | 66.5 ns   | 122 ns     | **0.54**  |
 | div_small (n / 1-limb)    | 1024b  | 128 ns    | 465 ns     | **0.27**  |
 | div_small (n / 1-limb)    | 4096b  | 377 ns    | 1.70 µs    | **0.22**  |
-| gcd                       | 64b    | 279 ns    | 1.14 µs    | **0.25**  |
-| gcd                       | 256b   | 1.83 µs   | 4.72 µs    | **0.39**  |
-| gcd                       | 1024b  | 14.5 µs   | 23.2 µs    | **0.63**  |
-| gcd                       | 4096b  | 162 µs    | 191 µs     | **0.85**  |
+| gcd †                     | 64b    | 121 ns    | 1.32 µs    | **0.09**  |
+| gcd †                     | 256b   | 2.26 µs   | 5.02 µs    | **0.45**  |
+| gcd †                     | 1024b  | 16.4 µs   | 24.2 µs    | **0.68**  |
+| gcd †                     | 4096b  | 168 µs    | 194 µs     | **0.86**  |
 | gcd_small (wide / 1-limb) | 64b    | 88.3 ns   | 834 ns     | **0.11**  |
 | gcd_small (wide / 1-limb) | 256b   | 116 ns    | 2.89 µs    | **0.04**  |
 | gcd_small (wide / 1-limb) | 1024b  | 187 ns    | 10.9 µs    | **0.02**  |
@@ -99,10 +99,18 @@ while num-bigint has a recursive combine; a subquadratic combine here is a futur
 already a win).
 
 (divmod's dividend is twice the divisor's width — the `2n / n` shape. gcd (binary/Stein) now wins at
-every tier (0.25–0.85×): its inner loop subtracts in place (`sub_mag_inplace`) rather than allocating a
+every tier (0.09–0.86×): its inner loop subtracts in place (`sub_mag_inplace`) rather than allocating a
 fresh magnitude each of its thousands of shift-and-subtract steps, which cut the loop's allocator traffic
 and beat num-bigint's subquadratic gcd even at 4096b. sign_magnitude_roundtrip is the canonical map-key
 encode+decode; num-bigint has no matching operation.)
+
+† **gcd is averaged over an 8-pair batch per tier** (per-op figures = batch ÷ 8). Unlike the
+width-deterministic ops (add/sub/mul, whose runtime depends only on operand width), gcd's runtime
+depends on the operand *values* — two coprime operands run the full binary-GCD descent while a large
+shared factor short-circuits it — so a single random pair per tier gave a jumpy, non-monotonic cell (a
+false-regression trap a consumer hit twice). Batching stabilizes the cell; etude and num-bigint time the
+identical batch, so the ratio stays fair. (This also corrected the 64b cell, whose old single pair was
+an unrepresentative slow case: 0.25× → **0.09×**.)
 
 ### Large-tier probe: where the subquadratic algorithms cross over
 
