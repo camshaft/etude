@@ -240,6 +240,32 @@ The whole binop board dropped again after etude-bigint's in-place Stein gcd (#20
 every reduction; that also closed the last gcd-bound cells (`normalize`/`add_eqden` now win all tiers), so
 the previously-deferred **Lehmer/HGCD** gcd is no longer gap-closing and has been dropped.
 
+## Accumulator (`RationalSum` — scratch-reuse folds)
+
+`RationalSum` is an in-place accumulator for hot summation loops: it owns its scratch `Big`s and
+reduces each `add`/`sub` step against them, so a fold of `N` terms allocates a bounded working set
+instead of a fresh `Rational` per step. The `sum_accumulate` group folds `N = 32` shared-denominator
+terms three ways (`etude-sum` = `RationalSum`, `etude-byval` = the by-value `Rational::add` fold,
+`num-rational` = `BigRational += `):
+
+| tier  | etude-sum | etude-byval | num-rational | sum vs byval | sum vs num |
+|-------|-----------|-------------|--------------|--------------|------------|
+| 64b   | 17.9 µs   | 19.7 µs     | 49.6 µs      | **0.91**     | **0.36**   |
+| 256b  | 89.4 µs   | 89.1 µs     | 184.7 µs     | ~1.00        | **0.48**   |
+| 1024b | 540 µs    | 540 µs      | 823 µs       | ~1.00        | **0.66**   |
+| 2048b | 1.593 ms  | 1.593 ms    | 2.167 ms     | ~1.00        | **0.74**   |
+| 4096b | 5.388 ms  | 5.387 ms    | 6.442 ms     | ~1.00        | **0.84**   |
+
+The win over by-value is **small-operand-concentrated**: at 64b the per-step allocation is a real
+fraction of the work, so eliding it buys **~9%**; from 256b up the fold is reduction/multiply-bound and
+the allocation is amortized to noise, so `RationalSum` converges to **parity** with the by-value fold.
+It is *not* a large-tier mover — its value is the 64b hot-loop win plus the ergonomics of a
+zero-per-step-alloc accumulator API. Against num-rational the whole fold wins at every tier (the crate's
+standing lead), widening at small operands. The accumulator mirrors `addsub_big`'s lcm-reduction exactly
+(coprime-skip, small-`g` reduce, zero-sum guard) — an earlier naive version that skipped those reductions
+was *slower* than by-value at 4096b, so alloc-elision alone is not sufficient: the accumulator must
+replicate the by-value algorithm's reductions.
+
 ## Rendering (`to_string` / `Display`)
 
 `to_string` is our alloc-lean `Display` (one `String` via `Big::write_decimal`). Current ratios
@@ -268,6 +294,15 @@ very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
+- **slice 43** — added `RationalSum`, an in-place scratch-reuse accumulator for hot summation folds
+  (owns its working `Big`s; each `add`/`sub` reduces against them, so an `N`-term fold allocates a bounded
+  set rather than one fresh `Rational` per step). Built on etude-bigint's new `&mut`-accumulator surface
+  (`add_assign`/`sub_assign`/`mul_into`/`div_exact_assign`/`gcd_into`). Wins **~9% over by-value at 64b**
+  (alloc elision), converges to **parity** from 256b up (reduction/multiply-bound; allocation amortized) —
+  small-operand-concentrated, not a large-tier mover. The accumulator mirrors `addsub_big`'s lcm-reduction
+  exactly; a first naive version that skipped those reductions was *slower* than by-value at 4096b (recorded
+  as a lesson: alloc-elision alone loses to a worse algorithm). Additive pub API + differential oracle
+  (`RationalSum` fold ≡ by-value fold ≡ num-rational at every step). Operator-reviewed lib change.
 - **slice 42** (bench-only) — hardened the core binop board against operand luck. Each `add`/`sub`/`mul`/`div`
   cell is now timed per-op, averaged over 8 operand pairs per tier (criterion `Throughput`), with coprime
   denominators so add/sub measure the common `addsub_big` branch. A single random draw could land on an

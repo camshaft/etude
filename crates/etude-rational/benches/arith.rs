@@ -625,6 +625,70 @@ fn bench(c: &mut Criterion) {
         }
         g.finish();
     }
+
+    // Accumulation: fold N rationals (sharing a base denominator, so the accumulator width stays bounded)
+    // into one running value. `RationalSum` reuses its scratch buffers — zero fresh allocation in the steady
+    // state — whereas repeated by-value `Rational::add` returns a fresh `Rational` each step, and
+    // num-rational's `+=` also allocates each step. Reported per-element (per add) via `Throughput`. This is
+    // the payoff of etude-bigint's `&mut`-accumulator surface (mul_into/add_assign/gcd_into/div_exact_assign).
+    {
+        use etude_rational::RationalSum;
+        const N: usize = 32;
+        let mut g = group(c, "sum_accumulate");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0xacc0_5eed ^ (nbytes as u64));
+            let one = Big::from_i64(1);
+            let den = rng.big(nbytes);
+            // N terms k_i/den with numerators coprime to `den` (so `new` keeps the shared denominator).
+            let terms: Vec<Rational> = (0..N)
+                .map(|_| {
+                    let mut n = rng.big(nbytes);
+                    while n.gcd(&den) != one {
+                        n = n.add(&one);
+                    }
+                    Rational::new(n, den.clone()).expect("nonzero denominator")
+                })
+                .collect();
+            let refs: Vec<BigRational> = terms.iter().map(to_ref).collect();
+            g.throughput(criterion::Throughput::Elements(N as u64));
+            g.bench_with_input(BenchmarkId::new("etude-sum", label), &terms, |be, terms| {
+                be.iter(|| {
+                    let mut acc = RationalSum::zero();
+                    for t in terms {
+                        acc.add(black_box(t));
+                    }
+                    black_box(acc.into_value())
+                })
+            });
+            g.bench_with_input(
+                BenchmarkId::new("etude-byval", label),
+                &terms,
+                |be, terms| {
+                    be.iter(|| {
+                        let mut acc = Rational::zero();
+                        for t in terms {
+                            acc = acc.add(black_box(t));
+                        }
+                        black_box(acc)
+                    })
+                },
+            );
+            g.bench_with_input(
+                BenchmarkId::new("num-rational", label),
+                &refs,
+                |be, refs| {
+                    be.iter(|| {
+                        let mut acc = BigRational::from_integer(BigInt::from(0));
+                        for t in refs {
+                            acc += black_box(t);
+                        }
+                        black_box(acc)
+                    })
+                },
+            );
+        }
+        g.finish();
+    }
 }
 
 criterion_group!(benches, bench);

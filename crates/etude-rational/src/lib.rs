@@ -884,5 +884,139 @@ fn cross_reduce_mul(a: &Big, b: &Big, c: &Big, d: &Big) -> (Big, Big) {
     (num, den)
 }
 
+/// A mutable accumulator for summing many [`Rational`]s with **scratch-buffer reuse**.
+///
+/// Repeatedly folding with by-value [`Rational::add`]/[`Rational::sub`] allocates fresh `Big`s every step
+/// (each returns a new `Rational`). `RationalSum` instead keeps the running value plus a few reusable `Big`
+/// scratch buffers and combines in place via etude-bigint's `&mut`-accumulator primitives
+/// (`mul_into`/`add_assign`/`sub_assign`/`gcd_into`/`div_exact_assign`), so a long accumulation loop
+/// allocates only while the operands' width is still growing and reuses that capacity in the steady state.
+///
+/// The accumulated value is always canonical (`den > 0`, lowest terms, `0/1` for zero) — identical to
+/// folding with [`Rational::add`]/[`Rational::sub`]. Read it with [`RationalSum::value`] or take it with
+/// [`RationalSum::into_value`].
+#[derive(Clone, Debug)]
+pub struct RationalSum {
+    value: Rational,
+    // Reusable scratch. `sa`/`sb` hold the cross products (`sa` then the summed numerator), `sden` the new
+    // denominator; `g` = gcd(b, d) of the denominators; `dog`/`bog` = d/g and b/g for the lcm reduction
+    // (`dog` is then reused for the numerator-reducing gcd h). All grow once and are reused thereafter.
+    sa: Big,
+    sb: Big,
+    sden: Big,
+    g: Big,
+    dog: Big,
+    bog: Big,
+}
+
+impl RationalSum {
+    /// A new accumulator seeded with `initial`.
+    pub fn new(initial: Rational) -> RationalSum {
+        RationalSum {
+            value: initial,
+            sa: Big::zero(),
+            sb: Big::zero(),
+            sden: Big::zero(),
+            g: Big::zero(),
+            dog: Big::zero(),
+            bog: Big::zero(),
+        }
+    }
+
+    /// A new accumulator seeded with zero (`0/1`).
+    pub fn zero() -> RationalSum {
+        RationalSum::new(Rational::zero())
+    }
+
+    /// The current accumulated value (canonical).
+    pub fn value(&self) -> &Rational {
+        &self.value
+    }
+
+    /// Consume the accumulator, returning the accumulated value.
+    pub fn into_value(self) -> Rational {
+        self.value
+    }
+
+    /// Add `other` into the running value in place: `value += other`, reusing the scratch buffers.
+    pub fn add(&mut self, other: &Rational) {
+        self.combine(other, false);
+    }
+
+    /// Subtract `other` from the running value in place: `value -= other`, reusing the scratch buffers.
+    pub fn sub(&mut self, other: &Rational) {
+        self.combine(other, true);
+    }
+
+    fn combine(&mut self, other: &Rational, subtract: bool) {
+        if self.value.den == other.den {
+            // Equal denominators: `(a ± c)/b`, reduced — fully in place on `value`, no cross-multiplies and
+            // no denominator product (mirrors `Rational::add`'s fast path). The denominator is unchanged by
+            // the sum, so reduce `value.num`/`value.den` by their gcd.
+            if subtract {
+                self.value.num.sub_assign(&other.num);
+            } else {
+                self.value.num.add_assign(&other.num);
+            }
+            self.value.num.gcd_into(&self.value.den, &mut self.g);
+            if self.g.bit_len() != 1 {
+                // g > 1 (an O(1) check). `gcd(0, den) = den`, so a zero sum reduces to canonical `0/1`.
+                let _ = self.value.num.div_exact_assign(&self.g);
+                let _ = self.value.den.div_exact_assign(&self.g);
+            }
+            return;
+        }
+        // General path — lcm-reduced, mirroring `addsub_big`: reduce over `g = gcd(b, d)` on the DENOMINATORS
+        // first, so the new denominator is the lcm (not the full `b*d` product) and the final reduce is over
+        // the small `g`, not the `~2n`-bit numerator. (A naive `(a*d ± c*b)/(b*d)` + `gcd(num, b*d)` reduce
+        // is markedly slower at large widths — the scratch reuse does not pay for the worse algorithm.)
+        self.value.den.gcd_into(&other.den, &mut self.g); // g = gcd(b, d)
+        if self.g.bit_len() == 1 {
+            // Coprime denominators: `num = a*d ± c*b` over `b*d` is already canonical (both operands are
+            // canonical and `gcd(b, d) = 1`), so no final reduce is needed unless the sum is zero.
+            self.value.num.mul_into(&other.den, &mut self.sa); // a*d
+            other.num.mul_into(&self.value.den, &mut self.sb); // c*b
+            if subtract {
+                self.sa.sub_assign(&self.sb);
+            } else {
+                self.sa.add_assign(&self.sb);
+            }
+            if self.sa.is_zero() {
+                self.value = Rational::zero();
+                return;
+            }
+            self.value.den.mul_into(&other.den, &mut self.sden); // b*d > 0
+        } else {
+            // Shared factor `g`: `d/g` and `b/g` reduce the operands before multiplying, so the denominator
+            // is `lcm = b*(d/g)` and the numerator reduces against the small `g` (`gcd(num, lcm) = gcd(num, g)`).
+            self.dog.clone_from(&other.den);
+            let _ = self.dog.div_exact_assign(&self.g); // d/g
+            self.bog.clone_from(&self.value.den);
+            let _ = self.bog.div_exact_assign(&self.g); // b/g
+            self.value.num.mul_into(&self.dog, &mut self.sa); // a*(d/g)
+            other.num.mul_into(&self.bog, &mut self.sb); // c*(b/g)
+            if subtract {
+                self.sa.sub_assign(&self.sb);
+            } else {
+                self.sa.add_assign(&self.sb);
+            }
+            if self.sa.is_zero() {
+                self.value = Rational::zero();
+                return;
+            }
+            self.value.den.mul_into(&self.dog, &mut self.sden); // lcm = b*(d/g) > 0
+            // h = gcd(|num|, g); reduce both by it (reuse `dog` as h, free after the multiplies).
+            self.sa.gcd_into(&self.g, &mut self.dog);
+            if self.dog.bit_len() != 1 {
+                let _ = self.sa.div_exact_assign(&self.dog);
+                let _ = self.sden.div_exact_assign(&self.dog);
+            }
+        }
+        // Move the reduced result into `value`; the old components become next iteration's scratch.
+        core::mem::swap(&mut self.value.num, &mut self.sa);
+        core::mem::swap(&mut self.value.den, &mut self.sden);
+    }
+}
+
 #[cfg(test)]
 mod tests;
