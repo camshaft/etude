@@ -51,9 +51,32 @@ written prefix can be skipped, keeping only the soundness floor over any *unwrit
 change on a trait `etude-bytevec` depends on (its `Builder::for_socket_read` routes through this), so it
 is being pursued as a coordinated follow-up rather than folded in here.
 
+## `IoSlice` vectored drain (runnable: `cargo bench -p etude-buffer -- vectored`)
+
+`IoSlice` presents a slice of byte segments as one logical stream; its `copy_into` drains them segment
+by segment (`read_chunk` per segment, then `put_slice`). Draining the same 64 KiB as many small
+segments versus as a single contiguous `Bytes` source, both into a fresh `Vec<u8>`, isolates the
+per-segment overhead the vectored path adds on top of the underlying memcpy (`IoSlice::new` scans the
+segments once to total their length; that construction is included, as a real vectored read must build
+the reader):
+
+| source | drain into `Vec<u8>` | per-segment overhead |
+|--------|----------------------|----------------------|
+| 1024 × 64 B segments | 4.98 µs | ~3.5 ns |
+| 256 × 256 B segments | 2.40 µs | ~3.8 ns |
+| 16 × 4 KiB segments | 1.54 µs | ~6 ns |
+| 1 × 64 KiB contiguous | 1.44 µs | — (baseline memcpy) |
+
+The vectored drain **converges to the contiguous memcpy baseline as segments grow** — 16 × 4 KiB (1.54 µs)
+is within ~7% of the single-copy 1.44 µs — because with few large segments the per-byte memcpy dominates
+and the per-segment bookkeeping is amortized away. The per-segment overhead itself is ~3.5–6 ns (one
+`read_chunk` control-flow step plus a `put_slice` call per segment), so it only bites when segments are
+tiny: 1024 × 64 B pays ~3.5 µs of it on top of the 1.44 µs copy. The takeaway: `IoSlice` is near-optimal
+for MTU-sized-and-larger segments; a producer emitting a great many tiny segments pays measurable
+per-segment cost and should coalesce upstream where it can.
+
 ## Next targets
 
-Hot paths still to bench (subsequent passes): the chunked/vectored `IoSlice` reader drain (multi-segment
-`put_slice`), `partial_copy_into`'s trailing-chunk hand-off, and the `Chain` reader. The
-`slice::vectored_copy` scatter helper is crate-private and currently used only in tests, so it is not on
-a benchable production path.
+Hot paths still to bench (subsequent passes): `partial_copy_into`'s trailing-chunk hand-off and the
+`Chain` reader. The `slice::vectored_copy` scatter helper is crate-private and currently used only in
+tests, so it is not on a benchable production path.

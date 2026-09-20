@@ -18,6 +18,7 @@ use bytes::Bytes;
 use bytes::buf::UninitSlice;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_buffer::reader::Buffer as _;
+use etude_buffer::reader::IoSlice;
 use etude_buffer::writer::Buffer as _;
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -124,5 +125,45 @@ fn bench_put_uninit(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_copy_into, bench_put_uninit);
+/// `IoSlice` is the vectored reader: it presents a slice of byte segments as one logical stream, and
+/// its `copy_into` drains them segment by segment (`read_chunk` per segment, then `put_slice`). This
+/// contrasts draining the same 64 KiB as many small segments against a single contiguous `Bytes`
+/// source, both into a fresh `Vec<u8>`, to isolate the per-segment overhead of the vectored path
+/// (segment-boundary bookkeeping plus one `put_slice` per segment) on top of the underlying memcpy.
+/// `IoSlice::new` scans the segments once to total their length, so its construction is included, as a
+/// real vectored read must build the reader. (aarch64, jemalloc, release.)
+fn bench_vectored(c: &mut Criterion) {
+    const TOTAL: usize = 64 * 1024;
+
+    for &(count, size) in &[(1024usize, 64usize), (256, 256), (16, 4096)] {
+        let segments: Vec<Vec<u8>> = (0..count).map(|_| vec![0xABu8; size]).collect();
+        let label = format!("{count}x{size}B");
+
+        let mut g = group(c, "vectored/io_slice_to_vec");
+        g.bench_function(BenchmarkId::from_parameter(&label), |b| {
+            b.iter(|| {
+                let mut r = IoSlice::new(&segments);
+                let mut dst: Vec<u8> = Vec::with_capacity(TOTAL);
+                r.copy_into(&mut dst).unwrap();
+                black_box(dst)
+            })
+        });
+        g.finish();
+    }
+
+    // Baseline: the same total bytes as one contiguous source — a single memcpy, no segment boundaries.
+    let src = Bytes::from(vec![0xABu8; TOTAL]);
+    let mut g = group(c, "vectored/contiguous_to_vec");
+    g.bench_function(BenchmarkId::from_parameter("1x65536B"), |b| {
+        b.iter(|| {
+            let mut r = src.clone();
+            let mut dst: Vec<u8> = Vec::with_capacity(TOTAL);
+            r.copy_into(&mut dst).unwrap();
+            black_box(dst)
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(benches, bench_copy_into, bench_put_uninit, bench_vectored);
 criterion_main!(benches);
