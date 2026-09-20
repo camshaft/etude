@@ -424,6 +424,26 @@ fn bench(c: &mut Criterion) {
         g.finish();
     }
 
+    // Exponentiation: `pow` raises the canonical numerator/denominator separately by square-and-multiply,
+    // with NO reduce gcd (`n^k` and `d^k` stay coprime). Base is a proper fraction of the tier width raised
+    // to a fixed moderate exponent.
+    {
+        const EXP: i32 = 8;
+        let mut g = group(c, "pow");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x9077_0000 ^ (nbytes as u64));
+            let a = rng.rat_lt1(nbytes);
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter(|| black_box(black_box(a).pow(EXP).expect("nonzero base")))
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, ra| {
+                be.iter(|| black_box(black_box(ra).pow(EXP)))
+            });
+        }
+        g.finish();
+    }
+
     // Worst-case comparison: both operands are proper fractions in (0,1) with DIFFERENT denominators, so
     // their integer parts tie (both 0) and the continued-fraction comparison must recurse rather than
     // decide on the first Euclidean step. This is the deterministic counterpart to the `cmp` group above,

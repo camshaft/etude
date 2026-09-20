@@ -391,6 +391,35 @@ impl Rational {
         Some(Rational { num, den })
     }
 
+    /// `self` raised to the integer power `exp`, exact. Returns `None` only for `0` to a negative power
+    /// (undefined); every other case is `Some`.
+    ///
+    /// Because `self` is canonical (`gcd(|num|, den) == 1`), `num^k` and `den^k` are coprime for any `k`,
+    /// so the result is **already in lowest terms — no reduce gcd**: each component is raised by
+    /// square-and-multiply (`big_pow`, over the Karatsuba-backed `Big::mul`) and the denominator stays
+    /// positive (`den > 0`), so the sign follows `num^k` naturally. A negative exponent reciprocates first
+    /// (`recip` is an `O(1)` swap on a canonical value): `(n/d)^-k = (d/n)^k`.
+    pub fn pow(&self, exp: i32) -> Option<Rational> {
+        if exp == 0 {
+            return Some(Rational::one());
+        }
+        if exp < 0 {
+            // (n/d)^-k = (d/n)^k; recip is None only for zero (0 to a negative power is undefined).
+            return self.recip().map(|r| r.pow_positive(exp.unsigned_abs()));
+        }
+        Some(self.pow_positive(exp as u32))
+    }
+
+    /// `self` raised to a strictly-positive power `k`, exact and canonical without a reduce gcd (see
+    /// [`Rational::pow`]). `self` is canonical, so `num^k / den^k` is already in lowest terms.
+    fn pow_positive(&self, k: u32) -> Rational {
+        debug_assert!(k >= 1, "pow_positive requires k >= 1");
+        Rational {
+            num: big_pow(&self.num, k),
+            den: big_pow(&self.den, k),
+        }
+    }
+
     /// Native-integer quotient when every component fits `i64` (`self`/`other` nonzero, checked by the
     /// `div` caller). `a*d` and `b*c` fit `i128`, so no overflow; the divisor's numerator `c` may be
     /// negative, so the sign is moved onto the numerator. Returns `None` to fall back to the `Big` path.
@@ -739,6 +768,29 @@ fn addsub_big(a: &Big, b: &Big, c: &Big, d: &Big, subtract: bool) -> Rational {
     let num = num.div_exact(&h).expect("h divides num");
     let den = lcm.div_exact(&h).expect("h divides lcm");
     Rational { num, den }
+}
+
+/// `base` raised to the power `exp` (`exp >= 1`) by binary square-and-multiply, over the Karatsuba-backed
+/// `Big::mul`. `exp == 0` is handled by the caller (`Rational::pow` returns `1/1`). Sign follows `base`
+/// (`Big::mul` is sign-correct, so a negative base to an even power is positive).
+fn big_pow(base: &Big, exp: u32) -> Big {
+    debug_assert!(exp >= 1, "big_pow requires exp >= 1");
+    let mut acc: Option<Big> = None;
+    let mut sq = base.clone();
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            acc = Some(match acc {
+                Some(a) => a.mul(&sq),
+                None => sq.clone(),
+            });
+        }
+        e >>= 1;
+        if e > 0 {
+            sq = sq.mul(&sq);
+        }
+    }
+    acc.expect("exp >= 1 ⇒ at least one bit set")
 }
 
 /// Normalize a raw `num/den` pair into canonical form: strictly-positive denominator (sign moved to the

@@ -340,6 +340,43 @@ fn mul_div_cross_reduction() {
 }
 
 #[test]
+fn pow_matches_numrational() {
+    let mk = |n: i64, d: i64| {
+        (
+            Rational::from_ratio_i64(n, d).unwrap(),
+            BigRational::new(BigInt::from(n), BigInt::from(d)),
+        )
+    };
+    // Differential oracle across sign combinations and exponents (zero, small, wide-via-squaring, negative).
+    let cases = [(2, 3), (-2, 3), (3, 4), (-5, 7), (1, 1), (7, 2), (-1, 6)];
+    let exps = [0i32, 1, 2, 3, 5, 8, 13, -1, -2, -4, -7];
+    for &(n, d) in &cases {
+        let (r, b) = mk(n, d);
+        for &e in &exps {
+            let got = r
+                .pow(e)
+                .expect("nonzero base has a value for every exponent");
+            assert_same(&got, &b.pow(e));
+        }
+    }
+    // Zero: 0^0 == 1, 0^positive == 0, 0^negative == None (undefined).
+    assert_eq!(Rational::zero().pow(0).unwrap().to_decimal_string(), "1");
+    assert_eq!(Rational::zero().pow(5).unwrap().to_decimal_string(), "0");
+    assert!(Rational::zero().pow(-1).is_none());
+    assert!(Rational::zero().pow(-3).is_none());
+    // Result stays canonical/coprime with no reduce gcd: (2/3)^10 = 1024/59049.
+    assert_eq!(
+        mk(2, 3).0.pow(10).unwrap().to_decimal_string(),
+        "1024/59049"
+    );
+    // Sign follows an odd/even exponent; negative exponents reciprocate.
+    assert_eq!(mk(-2, 3).0.pow(2).unwrap().to_decimal_string(), "4/9");
+    assert_eq!(mk(-2, 3).0.pow(3).unwrap().to_decimal_string(), "-8/27");
+    assert_eq!(mk(2, 3).0.pow(-2).unwrap().to_decimal_string(), "9/4");
+    assert_eq!(mk(-2, 3).0.pow(-3).unwrap().to_decimal_string(), "-27/8");
+}
+
+#[test]
 fn mul_div_native_u64_magnitude() {
     // Exercise the native u128 mul/div paths: components whose MAGNITUDE fits u64 but exceeds i64 (the `64b`
     // band), so `mul_small`/`div_small` (i64) miss them and `mul_small_u128`/`div_small_u128` take over. The
