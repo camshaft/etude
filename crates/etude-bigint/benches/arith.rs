@@ -9,7 +9,7 @@
 //! the bench never touches `Big`'s private internals) — a rebuild measures the same inputs. Tiers are
 //! named by bit width (`limbs * 32`). Run with `cargo bench -p etude-bigint`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_bigint::Big;
 use num_bigint::BigInt;
 use std::hint::black_box;
@@ -666,6 +666,171 @@ fn bench_last_decimal_digit(c: &mut Criterion) {
     g.finish();
 }
 
+/// Accumulate a sum of N same-width operands into a running accumulator — the &mut-accumulator surface
+/// (`add_assign`) vs num-bigint's in-place `+=`. This is the shape fraction reduction runs (a chain of
+/// cross-term adds into one accumulator): the point of `add_assign` is one buffer grown in place across
+/// the whole chain rather than a fresh magnitude per step, so the head-to-head here is against
+/// num-bigint's own in-place `+=` (its best), not its by-value `+`.
+fn bench_sum_accumulate(c: &mut Criterion) {
+    const N: usize = 64;
+    let mut g = group(c, "sum_accumulate");
+    let mut rng = Rng(0x5150_5150_5150_5150);
+    for &(label, nbytes) in TIERS {
+        let ours: Vec<Big> = (0..N).map(|_| rng.big(nbytes)).collect();
+        let theirs: Vec<BigInt> = ours.iter().map(to_num).collect();
+        g.bench_with_input(BenchmarkId::new("etude", label), &ours, |bch, ops| {
+            bch.iter(|| {
+                let mut acc = Big::zero();
+                for x in black_box(ops) {
+                    acc.add_assign(x);
+                }
+                black_box(acc)
+            })
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &theirs,
+            |bch, ops| {
+                bch.iter(|| {
+                    let mut acc = BigInt::from(0u64);
+                    for x in black_box(ops) {
+                        acc += x;
+                    }
+                    black_box(acc)
+                })
+            },
+        );
+    }
+    g.finish();
+}
+
+/// Multiply a batch of N same-width operand pairs, each product into ONE reused scratch `Big`
+/// (`mul_into`) vs num-bigint's by-value `*` (a fresh allocation per product). This is fraction
+/// reduction's shape — the cross terms `a·d`, `c·b`, `b·d` land in reused scratch every step — so the
+/// win `mul_into` exists for is the amortized-away allocation: after the scratch reaches steady size the
+/// etude loop allocates nothing, where num-bigint allocates a product `Vec` each time. (etude's own
+/// by-value `mul` would allocate per call exactly as num-bigint does; the reuse is the delta.) At the
+/// 4096b tier both operands are past the Karatsuba threshold, so `mul_into` replaces the buffer rather
+/// than reusing it — expect parity there, matching `mul`.
+fn bench_mul_into_reuse(c: &mut Criterion) {
+    const N: usize = 32;
+    let mut g = group(c, "mul_into_reuse");
+    let mut rng = Rng(0x0d15_ea5e_0d15_ea5e);
+    for &(label, nbytes) in TIERS {
+        let pairs: Vec<(Big, Big)> = (0..N).map(|_| (rng.big(nbytes), rng.big(nbytes))).collect();
+        let npairs: Vec<(BigInt, BigInt)> =
+            pairs.iter().map(|(a, b)| (to_num(a), to_num(b))).collect();
+        g.bench_with_input(BenchmarkId::new("etude", label), &pairs, |bch, pairs| {
+            bch.iter(|| {
+                let mut out = Big::zero();
+                for (a, b) in black_box(pairs) {
+                    a.mul_into(b, &mut out);
+                    black_box(&out);
+                }
+            })
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &npairs,
+            |bch, pairs| {
+                bch.iter(|| {
+                    for (a, b) in black_box(pairs) {
+                        black_box(a * b);
+                    }
+                })
+            },
+        );
+    }
+    g.finish();
+}
+
+/// `gcd_into` reused-scratch: N same-width gcds, each into ONE reused `out` (`gcd_into`) vs num-bigint's
+/// `Integer::gcd`. `gcd_into` reuses `out`'s buffer as the algorithm's `a` scratch, so it saves one clone
+/// per call vs the by-value `gcd` (which clones both operands and allocates a result); num-bigint
+/// allocates a fresh gcd each call.
+fn bench_gcd_into_reuse(c: &mut Criterion) {
+    use num_integer::Integer;
+    const N: usize = 32;
+    let mut g = group(c, "gcd_into_reuse");
+    let mut rng = Rng(0x6cd0_6cd0_6cd0_6cd0);
+    for &(label, nbytes) in TIERS {
+        let pairs: Vec<(Big, Big)> = (0..N).map(|_| (rng.big(nbytes), rng.big(nbytes))).collect();
+        let npairs: Vec<(BigInt, BigInt)> =
+            pairs.iter().map(|(a, b)| (to_num(a), to_num(b))).collect();
+        g.bench_with_input(BenchmarkId::new("etude", label), &pairs, |bch, pairs| {
+            bch.iter(|| {
+                let mut out = Big::zero();
+                for (a, b) in black_box(pairs) {
+                    a.gcd_into(b, &mut out);
+                    black_box(&out);
+                }
+            })
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &npairs,
+            |bch, pairs| {
+                bch.iter(|| {
+                    for (a, b) in black_box(pairs) {
+                        black_box(a.gcd(b));
+                    }
+                })
+            },
+        );
+    }
+    g.finish();
+}
+
+/// Fraction-reduction step over N pairs: `g = gcd(num, den); num /= g; den /= g` — the real consumer
+/// shape for `gcd_into` + `div_exact_assign` together. etude reuses one `g` scratch across the batch
+/// (`gcd_into`) and divides in place (`div_exact_assign`), so a reduced pair costs zero fresh
+/// allocations in steady state; num-bigint allocates a gcd and two quotients per pair. `iter_batched`
+/// supplies a fresh mutable batch each iteration (the in-place divides consume their operands) — the
+/// clone is in the excluded setup, so only the reduction work is timed, symmetrically for both sides.
+fn bench_reduce_fraction(c: &mut Criterion) {
+    use num_integer::Integer;
+    const N: usize = 16;
+    let mut grp = group(c, "reduce_fraction");
+    let mut rng = Rng(0x2ed0_2ed0_2ed0_2ed0);
+    for &(label, nbytes) in TIERS {
+        let pairs: Vec<(Big, Big)> = (0..N).map(|_| (rng.big(nbytes), rng.big(nbytes))).collect();
+        let npairs: Vec<(BigInt, BigInt)> =
+            pairs.iter().map(|(a, b)| (to_num(a), to_num(b))).collect();
+        grp.bench_with_input(BenchmarkId::new("etude", label), &pairs, |bch, pairs| {
+            bch.iter_batched(
+                || pairs.clone(),
+                |batch| {
+                    let mut g = Big::zero();
+                    for (mut num, den) in batch {
+                        num.gcd_into(&den, &mut g);
+                        let mut den = den;
+                        num.div_exact_assign(&g);
+                        den.div_exact_assign(&g);
+                        black_box((num, den));
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        grp.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &npairs,
+            |bch, pairs| {
+                bch.iter_batched(
+                    || pairs.clone(),
+                    |batch| {
+                        for (num, den) in batch {
+                            let g = num.gcd(&den);
+                            black_box((&num / &g, &den / &g));
+                        }
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+    grp.finish();
+}
 criterion_group!(
     benches,
     bench_add,
@@ -696,6 +861,10 @@ criterion_group!(
     bench_from_base_10_pow_k,
     bench_decimal_digit_count,
     bench_i128,
-    bench_last_decimal_digit
+    bench_last_decimal_digit,
+    bench_sum_accumulate,
+    bench_mul_into_reuse,
+    bench_gcd_into_reuse,
+    bench_reduce_fraction
 );
 criterion_main!(benches);

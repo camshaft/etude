@@ -219,6 +219,56 @@ impl Big {
         strip(a);
     }
 
+    /// `a += b` in place over magnitudes. Reuses `a`'s buffer, growing it only when `b` is wider or a
+    /// carry escapes the top limb. A `u128` accumulator holds each limb sum plus carry (carry is 0 or 1).
+    /// The in-place counterpart of [`Big::add_mag`]; used by the `&mut`-accumulator surface
+    /// ([`Big::add_assign`]/[`Big::sub_assign`]) so a running sum grows in its own buffer with no fresh
+    /// magnitude per step. Adding never exposes a trailing zero limb (the top limb only grows), so no
+    /// re-strip is needed.
+    fn add_mag_inplace(a: &mut Vec<u64>, b: &[u64]) {
+        if a.len() < b.len() {
+            a.resize(b.len(), 0);
+        }
+        let mut carry = 0u128;
+        for (ai, &bv) in a.iter_mut().zip(b.iter()) {
+            let s = *ai as u128 + bv as u128 + carry;
+            *ai = s as u64;
+            carry = s >> 64;
+        }
+        // Propagate the remaining carry through `a`'s higher limbs, then push a new top limb if it escapes.
+        for ai in a.iter_mut().skip(b.len()) {
+            if carry == 0 {
+                break;
+            }
+            let s = *ai as u128 + carry;
+            *ai = s as u64;
+            carry = s >> 64;
+        }
+        if carry != 0 {
+            a.push(carry as u64);
+        }
+    }
+
+    /// `a = b - a` in place over magnitudes ("reverse subtract"), requiring `b >= a` (caller ensures via
+    /// `cmp_mag`). Reuses `a`'s buffer, growing it to `b`'s width first, then runs the same branchless
+    /// `u64` borrow chain as [`Big::sub_mag`] with the operands swapped. Lets the accumulator surface keep
+    /// the result in `a`'s buffer when `|b| > |a|` (opposite-sign add where the addend is larger) instead
+    /// of allocating a fresh magnitude. Because `b >= a`, the final borrow is always 0.
+    fn rsub_mag_inplace(a: &mut Vec<u64>, b: &[u64]) {
+        if a.len() < b.len() {
+            a.resize(b.len(), 0);
+        }
+        let mut borrow = 0u64;
+        for (i, ai) in a.iter_mut().enumerate() {
+            let bv = *b.get(i).unwrap_or(&0);
+            let (d1, b1) = bv.overflowing_sub(*ai);
+            let (d2, b2) = d1.overflowing_sub(borrow);
+            *ai = d2;
+            borrow = (b1 | b2) as u64;
+        }
+        strip(a);
+    }
+
     /// `a * b` over magnitudes, returning a normalized magnitude. Schoolbook O(n·m) below
     /// [`KARATSUBA_THRESHOLD`] limbs; Karatsuba (O(n^1.585)) once both operands are at least that wide.
     fn mul_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
@@ -229,6 +279,25 @@ impl Big {
             mul_schoolbook(a, b)
         } else {
             mul_karatsuba(a, b)
+        }
+    }
+
+    /// `out = a * b` over magnitudes, reusing `out`'s buffer. The in-place counterpart of [`Big::mul_mag`]
+    /// for the [`Big::mul_into`] accumulator primitive. The schoolbook path (below [`KARATSUBA_THRESHOLD`])
+    /// accumulates directly into `out`'s existing allocation ([`mul_schoolbook_into`]), so a caller
+    /// multiplying repeatedly into one scratch `Big` (fraction reduction's cross terms) allocates nothing
+    /// after the buffer reaches its steady size. The Karatsuba path is arithmetic-bound (O(n^1.585)) and
+    /// its allocations are amortized over that work — an in-place variant was measured to give no win at
+    /// those sizes — so it just replaces `out`'s magnitude with a freshly built one.
+    fn mul_mag_into(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
+        if a.is_empty() || b.is_empty() {
+            out.clear();
+            return;
+        }
+        if a.len().min(b.len()) < KARATSUBA_THRESHOLD {
+            mul_schoolbook_into(a, b, out);
+        } else {
+            *out = mul_karatsuba(a, b);
         }
     }
 
@@ -333,6 +402,74 @@ impl Big {
         Big::add_signed(self.neg, &self.mag, !other.neg, &other.mag)
     }
 
+    /// `self += other`, in place. Same value as `self = self.add(other)` but reuses `self`'s magnitude
+    /// buffer instead of allocating a fresh result, so a running accumulator sums a sequence with no
+    /// per-step allocation (the `&mut`-accumulator surface consumed by fraction reduction). Same-sign adds
+    /// the magnitudes in place; opposite-sign subtracts the smaller from the larger (in place, or
+    /// reverse-in-place when the addend is larger) and takes the larger operand's sign. The result is
+    /// canonical: the magnitude helpers strip trailing zeros, and an exact cancellation resets to zero.
+    // Inherent method mirroring the by-value `add`; not the `core::ops::AddAssign` trait (the surface is a
+    // deliberate set of caller-owned-scratch primitives, called by name, not operator sugar).
+    #[allow(clippy::should_implement_trait)]
+    pub fn add_assign(&mut self, other: &Big) {
+        if other.is_zero() {
+            return;
+        }
+        if self.is_zero() {
+            self.neg = other.neg;
+            self.mag.clear();
+            self.mag.extend_from_slice(&other.mag);
+            return;
+        }
+        if self.neg == other.neg {
+            Big::add_mag_inplace(&mut self.mag, &other.mag);
+        } else {
+            match Big::cmp_mag(&self.mag, &other.mag) {
+                Ordering::Equal => {
+                    self.mag.clear();
+                    self.neg = false;
+                }
+                Ordering::Greater => Big::sub_mag_inplace(&mut self.mag, &other.mag),
+                Ordering::Less => {
+                    Big::rsub_mag_inplace(&mut self.mag, &other.mag);
+                    self.neg = other.neg;
+                }
+            }
+        }
+    }
+
+    /// `self -= other`, in place. The subtracting counterpart of [`Big::add_assign`] — identical to
+    /// `self + (-other)`, computed by flipping `other`'s sign as a local (no negated copy allocated). Same
+    /// zero-alloc, canonical-result guarantees.
+    #[allow(clippy::should_implement_trait)]
+    pub fn sub_assign(&mut self, other: &Big) {
+        if other.is_zero() {
+            return;
+        }
+        let other_neg = !other.neg;
+        if self.is_zero() {
+            self.neg = other_neg;
+            self.mag.clear();
+            self.mag.extend_from_slice(&other.mag);
+            return;
+        }
+        if self.neg == other_neg {
+            Big::add_mag_inplace(&mut self.mag, &other.mag);
+        } else {
+            match Big::cmp_mag(&self.mag, &other.mag) {
+                Ordering::Equal => {
+                    self.mag.clear();
+                    self.neg = false;
+                }
+                Ordering::Greater => Big::sub_mag_inplace(&mut self.mag, &other.mag),
+                Ordering::Less => {
+                    Big::rsub_mag_inplace(&mut self.mag, &other.mag);
+                    self.neg = other_neg;
+                }
+            }
+        }
+    }
+
     /// `self * other`.
     pub fn mul(&self, other: &Big) -> Big {
         let mag = Big::mul_mag(&self.mag, &other.mag);
@@ -342,6 +479,19 @@ impl Big {
         };
         r.normalize();
         r
+    }
+
+    /// `out = self * other`, writing the product into a caller-owned `out` (the `&mut`-accumulator
+    /// surface's multiply). Same value as `out = self.mul(other)` but reuses `out`'s magnitude buffer
+    /// instead of allocating a fresh result, so a caller that multiplies repeatedly into one scratch `Big`
+    /// (fraction reduction building `a·d`, `c·b`, `b·d` into reused scratch each step) allocates nothing in
+    /// steady state. `out` may be any `Big`; its previous value is overwritten. The result is canonical:
+    /// the in-place magnitude multiply strips trailing zeros and `normalize` fixes a zero product's sign,
+    /// so it is byte-identical to the by-value [`mul`](Big::mul).
+    pub fn mul_into(&self, other: &Big, out: &mut Big) {
+        Big::mul_mag_into(&self.mag, &other.mag, &mut out.mag);
+        out.neg = self.neg != other.neg;
+        out.normalize();
     }
 
     /// Truncating division + remainder: returns `(quotient, remainder)` where
@@ -383,6 +533,29 @@ impl Big {
         };
         q.normalize();
         Some(q)
+    }
+
+    /// `self /= divisor` in place (truncating toward zero, the same quotient as [`Big::div_exact`]),
+    /// returning `false` (and leaving `self` unchanged) when `divisor` is zero. The `&mut`-accumulator
+    /// surface's exact-divide: fraction reduction divides `num` and `den` by their gcd, discarding the
+    /// (zero) remainder. A single-limb divisor — the common case, since a reducing gcd is often one limb —
+    /// divides `self`'s magnitude in place (`div_rem_limb_inplace`, no allocation); a multi-limb divisor
+    /// takes the shared Knuth core, which allocates its quotient internally. Canonical result: the sign is
+    /// `self.neg != divisor.neg` and `normalize` strips trailing zeros / fixes a zero quotient's sign.
+    pub fn div_exact_assign(&mut self, divisor: &Big) -> bool {
+        if divisor.is_zero() {
+            return false;
+        }
+        let result_neg = self.neg != divisor.neg;
+        if divisor.mag.len() == 1 {
+            div_rem_limb_inplace(&mut self.mag, divisor.mag[0]);
+        } else {
+            let (qmag, _rmag) = divmod_mag_impl(&self.mag, &divisor.mag, false);
+            self.mag = qmag;
+        }
+        self.neg = result_neg;
+        self.normalize();
+        true
     }
 
     /// The remainder `|self| mod d` for a single-limb divisor `d`, or `None` when `d` is zero. Returns
@@ -452,6 +625,45 @@ impl Big {
         let mut g = Big { neg: false, mag: a };
         g.normalize();
         g
+    }
+
+    /// `out = gcd(|self|, |other|)`, writing the result into a caller-owned `out` (the `&mut`-accumulator
+    /// surface's gcd). Same value as `out = self.gcd(other)` but reuses `out`'s buffer as the algorithm's
+    /// `a` scratch instead of cloning `self`'s magnitude into a fresh one — one fewer allocation per call,
+    /// so fraction reduction (which takes a gcd of `num`/`den` every step) reuses one gcd scratch across
+    /// the loop. The binary-GCD steps are identical to [`Big::gcd`]; `out` is always non-negative and
+    /// canonical.
+    pub fn gcd_into(&self, other: &Big, out: &mut Big) {
+        // Reuse out's allocation as the `a` scratch (= |self|); `b` (= |other|) is the one unavoidable
+        // clone (the algorithm consumes it).
+        out.neg = false;
+        let mut a = core::mem::take(&mut out.mag);
+        a.clear();
+        a.extend_from_slice(&self.mag);
+        let mut b = other.mag.clone();
+        // gcd(x, 0) = |x| (covers gcd(0, 0) = 0).
+        if a.is_empty() || b.is_empty() {
+            out.mag = if a.is_empty() { b } else { a };
+            out.normalize();
+            return;
+        }
+        let tz_a = trailing_zeros_mag(&a);
+        let shift = tz_a.min(trailing_zeros_mag(&b));
+        shr_bits(&mut a, tz_a);
+        loop {
+            let tz_b = trailing_zeros_mag(&b);
+            shr_bits(&mut b, tz_b); // b is now odd
+            if Big::cmp_mag(&a, &b) == Ordering::Greater {
+                core::mem::swap(&mut a, &mut b);
+            }
+            Big::sub_mag_inplace(&mut b, &a); // odd − odd = even, ≥ 0; reuses b's buffer
+            if b.is_empty() {
+                break; // gcd of the odd parts is `a`
+            }
+        }
+        shl_bits(&mut a, shift); // restore the common power of two
+        out.mag = a;
+        out.normalize();
     }
 
     // ─── conversions ──────────────────────────────────────────────────────────────────────────
@@ -1096,6 +1308,34 @@ fn mul_schoolbook(a: &[u64], b: &[u64]) -> Vec<u64> {
     }
     strip(&mut out);
     out
+}
+
+/// Schoolbook `a * b` accumulated into `out`'s existing buffer (the in-place counterpart of
+/// [`mul_schoolbook`]). Clears `out` and resizes it to `a.len() + b.len()` zeroed limbs — reusing the
+/// allocation when its capacity already suffices, so a caller reusing one scratch `Big` across many
+/// products allocates only until the buffer reaches steady size. Identical accumulation to
+/// [`mul_schoolbook`]; `a`, `b` are non-empty.
+fn mul_schoolbook_into(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
+    out.clear();
+    out.resize(a.len() + b.len(), 0);
+    for (i, &av) in a.iter().enumerate() {
+        let mut carry = 0u64;
+        for (j, &bv) in b.iter().enumerate() {
+            let (hi, lo) = wide_mul(av, bv);
+            let (s1, c1) = out[i + j].overflowing_add(lo);
+            let (s2, c2) = s1.overflowing_add(carry);
+            out[i + j] = s2;
+            carry = hi + c1 as u64 + c2 as u64;
+        }
+        let mut k = i + b.len();
+        while carry != 0 {
+            let (s, c) = out[k].overflowing_add(carry);
+            out[k] = s;
+            carry = c as u64;
+            k += 1;
+        }
+    }
+    strip(out);
 }
 
 /// Karatsuba `a * b` over magnitudes. Split each operand at `k` limbs (`a = a1·Bᵏ + a0`), then
