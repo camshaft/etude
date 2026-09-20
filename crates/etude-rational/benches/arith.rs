@@ -13,7 +13,7 @@
 //! by a handful of `Big` multiplies plus a gcd-normalize, so the `normalize` (via `new`) cell is the
 //! most load-bearing one. Run with `cargo bench -p etude-rational`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_bigint::Big;
 use etude_rational::Rational;
 use num_bigint::BigInt;
@@ -466,6 +466,62 @@ fn bench(c: &mut Criterion) {
             let ra = to_ref(&a);
             g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
                 be.iter(|| black_box(a.abs()))
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
+                be.iter(|| black_box(a.abs()))
+            });
+        }
+        g.finish();
+    }
+
+    // Consuming sign transforms. `into_recip`/`into_neg`/`into_abs` reuse the owned components instead of
+    // cloning them: `into_recip` of a positive value just swaps the two fields (zero allocation), and
+    // `into_neg`/`into_abs` move the unchanged denominator rather than cloning it. `iter_batched` hands each
+    // iteration a fresh owned clone in the UNtimed setup, so the timed region measures only the transform.
+    // num-rational has no consuming form, so its `recip`/`-`/`abs` (`&self`, the fastest it offers) is the
+    // reference — the win is exactly the clone this API elides.
+    {
+        let mut g = group(c, "into_recip");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0xdead_beef ^ (nbytes as u64));
+            let a = rng.rat(nbytes);
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter_batched(
+                    || a.clone(),
+                    |a| a.into_recip().expect("nonzero"),
+                    BatchSize::SmallInput,
+                )
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
+                be.iter(|| black_box(a.recip()))
+            });
+        }
+        g.finish();
+    }
+    {
+        let mut g = group(c, "into_neg");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x0f0f_a5a5 ^ (nbytes as u64));
+            let a = rng.rat(nbytes);
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter_batched(|| a.clone(), |a| a.into_neg(), BatchSize::SmallInput)
+            });
+            g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
+                be.iter(|| black_box(-a))
+            });
+        }
+        g.finish();
+    }
+    {
+        let mut g = group(c, "into_abs");
+        for &(label, nbytes) in TIERS {
+            let mut rng = Rng(0x5c5c_3210 ^ (nbytes as u64));
+            let a = rng.rat(nbytes).neg();
+            let ra = to_ref(&a);
+            g.bench_with_input(BenchmarkId::new("etude", label), &a, |be, a| {
+                be.iter_batched(|| a.clone(), |a| a.into_abs(), BatchSize::SmallInput)
             });
             g.bench_with_input(BenchmarkId::new("num-rational", label), &ra, |be, a| {
                 be.iter(|| black_box(a.abs()))

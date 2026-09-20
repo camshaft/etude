@@ -229,6 +229,37 @@ fn division_of_fractions() {
 }
 
 #[test]
+fn consuming_sign_transforms_match_borrowing() {
+    // into_neg / into_abs / into_recip reuse the owned allocations but must be value- and
+    // canonical-form-identical to their borrowing counterparts across every sign, including zero.
+    for (n, d) in [
+        (3, 10),
+        (-3, 10),
+        (7, 1),
+        (-7, 1),
+        (0, 1),
+        (1, -2),
+        (-6, -8),
+    ] {
+        let r = Rational::from_ratio_i64(n, d).unwrap();
+        assert_eq!(r.clone().into_neg(), r.neg(), "into_neg {n}/{d}");
+        assert_eq!(r.clone().into_abs(), r.abs(), "into_abs {n}/{d}");
+        assert_eq!(r.clone().into_recip(), r.recip(), "into_recip {n}/{d}");
+    }
+    // Zero has no reciprocal.
+    assert!(Rational::zero().into_recip().is_none());
+    // Positive-numerator reciprocal is the zero-allocation swap path: 3/7 -> 7/3.
+    assert_eq!(
+        Rational::from_ratio_i64(3, 7)
+            .unwrap()
+            .into_recip()
+            .unwrap()
+            .to_decimal_string(),
+        "7/3"
+    );
+}
+
+#[test]
 fn display_matches_to_decimal_string() {
     use alloc::format;
     for (n, d) in [(3, 10), (-3, 10), (10, 5), (0, 7), (1, -2), (-6, -8)] {
@@ -520,13 +551,29 @@ fn apply_op(
             }
             (a.div(&b).expect("nonzero divisor divides"), &ra / &rb)
         }
-        4 => (a.neg(), -ra),
-        5 => (a.abs(), if ra < BigRational::zero() { -ra } else { ra }),
+        4 => {
+            // The consuming variant must match the borrowing one (same value, same canonical form).
+            assert_eq!(a.clone().into_neg(), a.neg(), "into_neg != neg: {a:?}");
+            (a.neg(), -ra)
+        }
+        5 => {
+            assert_eq!(a.clone().into_abs(), a.abs(), "into_abs != abs: {a:?}");
+            (a.abs(), if ra < BigRational::zero() { -ra } else { ra })
+        }
         6 => {
             if ra.is_zero() {
                 assert!(a.recip().is_none(), "our recip of zero must be None");
+                assert!(
+                    a.clone().into_recip().is_none(),
+                    "into_recip of zero must be None"
+                );
                 return;
             }
+            assert_eq!(
+                a.clone().into_recip().expect("into_recip of nonzero"),
+                a.recip().expect("recip of nonzero"),
+                "into_recip != recip: {a:?}"
+            );
             (a.recip().expect("recip of nonzero"), ra.recip())
         }
         _ => {

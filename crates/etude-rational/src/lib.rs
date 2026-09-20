@@ -157,6 +157,50 @@ impl Rational {
         }
     }
 
+    /// The additive inverse `-self`, consuming `self`. Same result as [`Rational::neg`], but the
+    /// denominator is unchanged so its allocation is moved rather than cloned — one fewer `Big`
+    /// allocation. Only the numerator's sign flips; the value stays canonical.
+    pub fn into_neg(self) -> Rational {
+        let Rational { num, den } = self;
+        Rational {
+            num: num.neg(),
+            den,
+        }
+    }
+
+    /// The absolute value `|self|`, consuming `self`. Same result as [`Rational::abs`], but the
+    /// denominator (already positive) is moved rather than cloned — one fewer `Big` allocation.
+    pub fn into_abs(self) -> Rational {
+        let Rational { num, den } = self;
+        Rational {
+            num: num.abs(),
+            den,
+        }
+    }
+
+    /// The reciprocal `1/self` (`den/num`), consuming `self`. Returns `None` when `self` is zero.
+    ///
+    /// Same result as [`Rational::recip`] (no gcd is needed — the reciprocal of a canonical value is
+    /// canonical), but it reuses the owned components instead of cloning them. For a positive numerator
+    /// the two fields just swap, so the common case allocates nothing at all; a negative numerator negates
+    /// both terms to keep the denominator positive (as `recip` does).
+    pub fn into_recip(self) -> Option<Rational> {
+        if self.num.is_zero() {
+            return None;
+        }
+        let Rational { num, den } = self;
+        if num.is_negative() {
+            // num < 0 ⇒ raw `den/num` has a negative denominator; negate both terms (see `recip`).
+            Some(Rational {
+                num: den.neg(),
+                den: num.neg(),
+            })
+        } else {
+            // num > 0 ⇒ `den/num` is already canonical: swap the owned components, zero allocation.
+            Some(Rational { num: den, den: num })
+        }
+    }
+
     /// Exact sum `self + other`. `a/b + c/d = (a*d + c*b)/(b*d)`, renormalized.
     pub fn add(&self, other: &Rational) -> Rational {
         // Native i128 fast path FIRST: for i64-fitting operands (the common small case) this covers the
