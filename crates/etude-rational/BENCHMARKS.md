@@ -160,10 +160,10 @@ num-rational always uses `BigInt`, so this is a large win:
 
 | op      | operands | etude    | num-rational | ratio     |
 |---------|----------|----------|--------------|-----------|
-| mul_i64 | 48-bit   | 0.20 µs  | 4.13 µs      | **0.048** |
-| div_i64 | 48-bit   | 0.23 µs  | 4.26 µs      | **0.054** |
-| add_i64 | 48-bit   | 0.16 µs  | 3.14 µs      | **0.050** |
-| sub_i64 | 48-bit   | 0.16 µs  | 3.18 µs      | **0.049** |
+| mul_i64 | 48-bit   | 0.17 µs  | 4.13 µs      | **0.042** |
+| div_i64 | 48-bit   | 0.21 µs  | 4.26 µs      | **0.048** |
+| add_i64 | 48-bit   | 0.13 µs  | 3.14 µs      | **0.042** |
+| sub_i64 | 48-bit   | 0.13 µs  | 3.18 µs      | **0.041** |
 | cmp_i64 | 48-bit   | 8.7 ns   | ~55 ns       | **~0.16** |
 | add_eqden_i64 | 48-bit | 0.10 µs | 0.47 µs   | **0.21**  |
 | from_ratio_i64 | 48-bit | 0.12 µs | 1.14 µs  | **0.103** |
@@ -175,10 +175,12 @@ for the common i64-fitting case. The native `add`/`sub` path is tried BEFORE the
 path, so small **equal-denominator** add/sub (`add_eqden_i64` — a shared-denominator accumulation, e.g.
 tallying `k/1_000_003`) also goes native rather than allocating a Big sum + Big-gcd normalize: **0.26×**
 num-rational (~3.8× faster). The residual ~0.2 µs (after `mul`/`div` cross-reduce on
-the i64 originals — slice 26) is dominated by the two result-`Big` allocations (`from_i64`) — both
-implementations must allocate the result; only our *arithmetic* went native, and etude-bigint's 1-limb
-`Big` allocation is itself ~1.8× num-bigint's (their deferred inline-repr item), so that residual will
-shrink further when that lands.
+the i64 originals — slice 26) is dominated by the two result-`Big` allocations — both
+implementations must allocate the result; only our *arithmetic* went native. Slice 38 boxed those
+results via `Big::from_i128` (a direct ≤2-limb build) instead of a sign-magnitude byte round-trip,
+cutting −11–15% off every native op. What remains is etude-bigint's 1-limb `Big` allocation itself,
+which is ~1.8× num-bigint's (their deferred inline-repr item), so the residual will shrink further
+when that lands.
 
 **A second native tier covers the `64b` byte-width band** (`~1-limb` components whose top magnitude bit is
 set, so they exceed `i64` and miss the `to_i64` paths, but whose magnitudes still fit `u64`). There `mul`,
@@ -380,6 +382,14 @@ very wide renders are unaffected. Re-bench on each render land.
   (added the 2048b/4096b rows). Closes the last gcd-bound parity/loss class — the only remaining non-wins
   are `recip`/`neg`/`abs`@64b (etude-bigint small-`Big` inline-repr). Scoreboard refresh only, no local
   change. etude-bigint has consequently deprioritized Lehmer/HGCD (no longer needed to close a gap).
+- **slice 38** — box native-path results via `Big::from_i128` (direct ≤2-limb build) instead of a
+  sign-magnitude byte round-trip. `big_from_i128`/`big_from_u128` had encoded the `i128`/`u128` result to a
+  17-byte buffer and re-parsed it whenever the value exceeded `i64` — which is the *common* case for the
+  native paths (a 48-bit × 48-bit numerator is ~96-bit), so every native op paid an encode+decode. Switching
+  to the direct limb constructor sped up every small-operand hot path: **add_i64 0.15 → 0.13 µs (−15%),
+  sub_i64 −15%, mul_i64 0.20 → 0.17 µs (−14%), div_i64 0.23 → 0.21 µs (−11%)**, and the u64-band **mul/64b
+  0.27 → 0.25 µs, div/64b 0.24 → 0.22 µs (−6%)** (`big_from_u128` uses `from_i128` for magnitudes ≤ `i128::MAX`,
+  keeping the byte path only for the `(2^127, 2^128)` products). No behavior change; differential oracle green.
 - **slice 37** — banked the rest of etude-bigint #207 (in-place Stein gcd): slice 33 refreshed only
   `normalize`/`add_eqden`, but the **binops** also route their reductions through that gcd — `add`/`sub` via
   `gcd(b, d)` (`addsub_big`) and `mul`/`div` via `gcd(a,d)`+`gcd(c,b)` (`cross_reduce_mul`) — so all four

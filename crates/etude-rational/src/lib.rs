@@ -829,27 +829,22 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-/// Box an `i128` as a `Big`: `from_i64` when it fits (the usual case), else via the canonical
-/// sign-magnitude byte encoding (17 bytes holds any `i128`).
+/// Box an `i128` as a `Big` via [`Big::from_i128`], a direct limb build (≤ 2 limbs, no byte buffer) — the
+/// limb-level twin of `from_i64`. Used to box the result of the native `i128` arithmetic fast paths, whose
+/// products routinely exceed `i64` (e.g. a 48-bit × 48-bit numerator is ~96-bit), so a byte-encode/decode
+/// round-trip would run on every native op.
 fn big_from_i128(v: i128) -> Big {
-    if let Ok(v64) = i64::try_from(v) {
-        Big::from_i64(v64)
-    } else {
-        let mut buf = [0u8; 17]; // 1 sign byte + up to 16 magnitude bytes
-        let n =
-            Big::i128_to_sign_magnitude_bytes_into(v, &mut buf).expect("17 bytes holds any i128");
-        Big::from_sign_magnitude_bytes(&buf[..n])
-    }
+    Big::from_i128(v)
 }
 
-/// Box a `u128` magnitude with an explicit sign as a `Big`. `from_i64` when the magnitude fits `i64` (the
-/// small case), else via the canonical sign-magnitude byte encoding: `[sign] + 16 little-endian magnitude
-/// bytes` (any `u128` magnitude fits, including the `~2^128` products the native `u128` mul/div path can
-/// produce, which exceed `i128`). Trailing zero magnitude bytes are tolerated (the parser strips them).
+/// Box a `u128` magnitude with an explicit sign as a `Big`. When the magnitude fits `i128` (all but the
+/// `(2^127, 2^128)` top band that only the native `u128` mul/div products can reach) it uses the direct
+/// limb constructor [`Big::from_i128`]; otherwise it falls back to the canonical sign-magnitude byte
+/// encoding (`[sign] + 16 little-endian magnitude bytes`), the only path that can hold a full `u128`.
 fn big_from_u128(mag: u128, negative: bool) -> Big {
-    if mag <= i64::MAX as u128 {
-        let v = mag as i64;
-        return Big::from_i64(if negative { -v } else { v });
+    if mag <= i128::MAX as u128 {
+        let v = mag as i128;
+        return Big::from_i128(if negative { -v } else { v });
     }
     let mut buf = [0u8; 17]; // 1 sign byte + 16 magnitude bytes
     buf[0] = negative as u8;
