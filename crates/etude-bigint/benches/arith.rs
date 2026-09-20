@@ -666,6 +666,44 @@ fn bench_last_decimal_digit(c: &mut Criterion) {
     g.finish();
 }
 
+/// Accumulate a sum of N same-width operands into a running accumulator — the &mut-accumulator surface
+/// (`add_assign`) vs num-bigint's in-place `+=`. This is the shape fraction reduction runs (a chain of
+/// cross-term adds into one accumulator): the point of `add_assign` is one buffer grown in place across
+/// the whole chain rather than a fresh magnitude per step, so the head-to-head here is against
+/// num-bigint's own in-place `+=` (its best), not its by-value `+`.
+fn bench_sum_accumulate(c: &mut Criterion) {
+    const N: usize = 64;
+    let mut g = group(c, "sum_accumulate");
+    let mut rng = Rng(0x5150_5150_5150_5150);
+    for &(label, nbytes) in TIERS {
+        let ours: Vec<Big> = (0..N).map(|_| rng.big(nbytes)).collect();
+        let theirs: Vec<BigInt> = ours.iter().map(to_num).collect();
+        g.bench_with_input(BenchmarkId::new("etude", label), &ours, |bch, ops| {
+            bch.iter(|| {
+                let mut acc = Big::zero();
+                for x in black_box(ops) {
+                    acc.add_assign(x);
+                }
+                black_box(acc)
+            })
+        });
+        g.bench_with_input(
+            BenchmarkId::new("num-bigint", label),
+            &theirs,
+            |bch, ops| {
+                bch.iter(|| {
+                    let mut acc = BigInt::from(0u64);
+                    for x in black_box(ops) {
+                        acc += x;
+                    }
+                    black_box(acc)
+                })
+            },
+        );
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -696,6 +734,7 @@ criterion_group!(
     bench_from_base_10_pow_k,
     bench_decimal_digit_count,
     bench_i128,
-    bench_last_decimal_digit
+    bench_last_decimal_digit,
+    bench_sum_accumulate
 );
 criterion_main!(benches);

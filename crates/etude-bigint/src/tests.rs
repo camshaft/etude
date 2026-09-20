@@ -64,6 +64,19 @@ fn check_pair(a: &Big, b: &Big) {
     assert_eq!(to_ref(&a.mul(b)), &ra * &rb, "mul {a:?} {b:?}");
     assert_eq!(to_ref(&a.neg()), -&ra, "neg {a:?}");
     assert_eq!(to_ref(&a.abs()), ra.abs(), "abs {a:?}");
+
+    // In-place accumulator ops: the result must be BYTE-IDENTICAL to the by-value form (derived `Eq`
+    // compares sign+limbs), so `add_assign`/`sub_assign` land in canonical form — sacred for map keys.
+    {
+        let mut acc = a.clone();
+        acc.add_assign(b);
+        assert_eq!(acc, a.add(b), "add_assign == add {a:?} {b:?}");
+        assert_eq!(to_ref(&acc), &ra + &rb, "add_assign value {a:?} {b:?}");
+        let mut acc = a.clone();
+        acc.sub_assign(b);
+        assert_eq!(acc, a.sub(b), "sub_assign == sub {a:?} {b:?}");
+        assert_eq!(to_ref(&acc), &ra - &rb, "sub_assign value {a:?} {b:?}");
+    }
     assert_eq!(
         a.to_decimal_string(),
         ra.to_string(),

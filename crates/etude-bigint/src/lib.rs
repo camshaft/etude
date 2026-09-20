@@ -219,6 +219,56 @@ impl Big {
         strip(a);
     }
 
+    /// `a += b` in place over magnitudes. Reuses `a`'s buffer, growing it only when `b` is wider or a
+    /// carry escapes the top limb. A `u128` accumulator holds each limb sum plus carry (carry is 0 or 1).
+    /// The in-place counterpart of [`Big::add_mag`]; used by the `&mut`-accumulator surface
+    /// ([`Big::add_assign`]/[`Big::sub_assign`]) so a running sum grows in its own buffer with no fresh
+    /// magnitude per step. Adding never exposes a trailing zero limb (the top limb only grows), so no
+    /// re-strip is needed.
+    fn add_mag_inplace(a: &mut Vec<u64>, b: &[u64]) {
+        if a.len() < b.len() {
+            a.resize(b.len(), 0);
+        }
+        let mut carry = 0u128;
+        for (ai, &bv) in a.iter_mut().zip(b.iter()) {
+            let s = *ai as u128 + bv as u128 + carry;
+            *ai = s as u64;
+            carry = s >> 64;
+        }
+        // Propagate the remaining carry through `a`'s higher limbs, then push a new top limb if it escapes.
+        for ai in a.iter_mut().skip(b.len()) {
+            if carry == 0 {
+                break;
+            }
+            let s = *ai as u128 + carry;
+            *ai = s as u64;
+            carry = s >> 64;
+        }
+        if carry != 0 {
+            a.push(carry as u64);
+        }
+    }
+
+    /// `a = b - a` in place over magnitudes ("reverse subtract"), requiring `b >= a` (caller ensures via
+    /// `cmp_mag`). Reuses `a`'s buffer, growing it to `b`'s width first, then runs the same branchless
+    /// `u64` borrow chain as [`Big::sub_mag`] with the operands swapped. Lets the accumulator surface keep
+    /// the result in `a`'s buffer when `|b| > |a|` (opposite-sign add where the addend is larger) instead
+    /// of allocating a fresh magnitude. Because `b >= a`, the final borrow is always 0.
+    fn rsub_mag_inplace(a: &mut Vec<u64>, b: &[u64]) {
+        if a.len() < b.len() {
+            a.resize(b.len(), 0);
+        }
+        let mut borrow = 0u64;
+        for (i, ai) in a.iter_mut().enumerate() {
+            let bv = *b.get(i).unwrap_or(&0);
+            let (d1, b1) = bv.overflowing_sub(*ai);
+            let (d2, b2) = d1.overflowing_sub(borrow);
+            *ai = d2;
+            borrow = (b1 | b2) as u64;
+        }
+        strip(a);
+    }
+
     /// `a * b` over magnitudes, returning a normalized magnitude. Schoolbook O(n·m) below
     /// [`KARATSUBA_THRESHOLD`] limbs; Karatsuba (O(n^1.585)) once both operands are at least that wide.
     fn mul_mag(a: &[u64], b: &[u64]) -> Vec<u64> {
@@ -331,6 +381,74 @@ impl Big {
     /// magnitude normalizes to canonical zero regardless.)
     pub fn sub(&self, other: &Big) -> Big {
         Big::add_signed(self.neg, &self.mag, !other.neg, &other.mag)
+    }
+
+    /// `self += other`, in place. Same value as `self = self.add(other)` but reuses `self`'s magnitude
+    /// buffer instead of allocating a fresh result, so a running accumulator sums a sequence with no
+    /// per-step allocation (the `&mut`-accumulator surface consumed by fraction reduction). Same-sign adds
+    /// the magnitudes in place; opposite-sign subtracts the smaller from the larger (in place, or
+    /// reverse-in-place when the addend is larger) and takes the larger operand's sign. The result is
+    /// canonical: the magnitude helpers strip trailing zeros, and an exact cancellation resets to zero.
+    // Inherent method mirroring the by-value `add`; not the `core::ops::AddAssign` trait (the surface is a
+    // deliberate set of caller-owned-scratch primitives, called by name, not operator sugar).
+    #[allow(clippy::should_implement_trait)]
+    pub fn add_assign(&mut self, other: &Big) {
+        if other.is_zero() {
+            return;
+        }
+        if self.is_zero() {
+            self.neg = other.neg;
+            self.mag.clear();
+            self.mag.extend_from_slice(&other.mag);
+            return;
+        }
+        if self.neg == other.neg {
+            Big::add_mag_inplace(&mut self.mag, &other.mag);
+        } else {
+            match Big::cmp_mag(&self.mag, &other.mag) {
+                Ordering::Equal => {
+                    self.mag.clear();
+                    self.neg = false;
+                }
+                Ordering::Greater => Big::sub_mag_inplace(&mut self.mag, &other.mag),
+                Ordering::Less => {
+                    Big::rsub_mag_inplace(&mut self.mag, &other.mag);
+                    self.neg = other.neg;
+                }
+            }
+        }
+    }
+
+    /// `self -= other`, in place. The subtracting counterpart of [`Big::add_assign`] — identical to
+    /// `self + (-other)`, computed by flipping `other`'s sign as a local (no negated copy allocated). Same
+    /// zero-alloc, canonical-result guarantees.
+    #[allow(clippy::should_implement_trait)]
+    pub fn sub_assign(&mut self, other: &Big) {
+        if other.is_zero() {
+            return;
+        }
+        let other_neg = !other.neg;
+        if self.is_zero() {
+            self.neg = other_neg;
+            self.mag.clear();
+            self.mag.extend_from_slice(&other.mag);
+            return;
+        }
+        if self.neg == other_neg {
+            Big::add_mag_inplace(&mut self.mag, &other.mag);
+        } else {
+            match Big::cmp_mag(&self.mag, &other.mag) {
+                Ordering::Equal => {
+                    self.mag.clear();
+                    self.neg = false;
+                }
+                Ordering::Greater => Big::sub_mag_inplace(&mut self.mag, &other.mag),
+                Ordering::Less => {
+                    Big::rsub_mag_inplace(&mut self.mag, &other.mag);
+                    self.neg = other_neg;
+                }
+            }
+        }
     }
 
     /// `self * other`.

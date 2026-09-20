@@ -233,6 +233,19 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   allocator traffic and improved every gcd tier: 64b 840 → 279 ns (0.75 → **0.25×**), 256b 4.06 → 1.83 µs
   (0.86 → **0.39×**), 1024b 23.0 → 14.5 µs (0.99 → **0.63×**), 4096b 210 → 162 µs (1.10 → **0.85×**) — the
   last losing gcd tier flips to a win, a full sweep, and rippled into etude-rational's `normalize`/`add_eqden`.
+- **`&mut`-accumulator surface (`add_assign`/`sub_assign`)** — in-place signed add/sub that grow the
+  running accumulator in its own limb buffer (same-sign `add_mag_inplace`, opposite-sign
+  `sub_mag_inplace`/`rsub_mag_inplace`) instead of allocating a fresh magnitude per step. Consumed by
+  fraction reduction, which sums a chain of cross-terms into one accumulator. The `sum_accumulate` bench
+  (64 same-width operands folded into one accumulator) is against num-bigint's *own in-place* `+=` — its
+  best — not its by-value `+`:
+
+  | tier   | etude (`add_assign`) | num-bigint (`+=`) | vs num-bigint |
+  |--------|----------------------|-------------------|---------------|
+  | 64b    | 440 ns               | 1.29 µs           | **0.34×**     |
+  | 256b   | 600 ns               | 1.58 µs           | **0.38×**     |
+  | 1024b  | 1.30 µs              | 2.76 µs           | **0.47×**     |
+  | 4096b  | 4.73 µs              | 7.47 µs           | **0.63×**     |
 - **Karatsuba multiply** above a 40-limb crossover (three half-size products via
   `z1 = (a0+a1)(b0+b1) − z0 − z2`; recurses through the schoolbook base case): mul/4096b 6.19 µs → 5.14 µs
   (1.24× → 1.03× num-bigint). Smaller tiers stay schoolbook (unchanged).
