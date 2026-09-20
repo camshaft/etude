@@ -621,6 +621,19 @@ impl Big {
             g.normalize();
             return g;
         }
+        // Fast path for a single-limb operand (the common `gcd(huge, small)`, e.g. a small-factor
+        // reduction). One Euclid step — `huge mod small` via the single-limb reciprocal scan (`O(n)`) —
+        // collapses the wide operand to a `u64`, then a native `u64` binary gcd finishes it. Stein alone
+        // would grind the wide operand down in `O(bit_len)` shift-and-subtract steps of `O(n)` limbs each.
+        if a.len() == 1 || b.len() == 1 {
+            // Both limbs are nonzero here (canonical single-limb magnitudes have a nonzero top limb).
+            let (wide, small) = if a.len() == 1 { (&b, a[0]) } else { (&a, b[0]) };
+            let g = gcd_u64(small, rem_by_limb(wide, small));
+            return Big {
+                neg: false,
+                mag: alloc::vec![g], // g ≥ 1 (gcd of two positive values), so this is canonical
+            };
+        }
         // Pull out the common factor of two; then keep `a` odd for the loop.
         let tz_a = trailing_zeros_mag(&a);
         let shift = tz_a.min(trailing_zeros_mag(&b));
@@ -1490,6 +1503,29 @@ fn trailing_zeros_mag(m: &[u64]) -> usize {
         }
     }
     0 // all-zero magnitude — callers guard against this
+}
+
+/// Binary GCD of two `u64`s (Stein's algorithm on native words). `gcd(x, 0) = x`, `gcd(0, 0) = 0`.
+/// Finishes the single-limb [`Big::gcd`] fast path after one big-by-small remainder step.
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    if a == 0 {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    let shift = (a | b).trailing_zeros();
+    a >>= a.trailing_zeros();
+    loop {
+        b >>= b.trailing_zeros();
+        if a > b {
+            core::mem::swap(&mut a, &mut b);
+        }
+        b -= a;
+        if b == 0 {
+            return a << shift;
+        }
+    }
 }
 
 /// `m >>= k` bits (little-endian; normalized out).

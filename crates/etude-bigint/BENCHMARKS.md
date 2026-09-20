@@ -48,6 +48,10 @@ optimizations land. `ratio` is `etude / num-bigint`: `<1.00` = we are faster (**
 | gcd                       | 256b   | 1.83 µs   | 4.72 µs    | **0.39**  |
 | gcd                       | 1024b  | 14.5 µs   | 23.2 µs    | **0.63**  |
 | gcd                       | 4096b  | 162 µs    | 191 µs     | **0.85**  |
+| gcd_small (wide / 1-limb) | 64b    | 88.3 ns   | 834 ns     | **0.11**  |
+| gcd_small (wide / 1-limb) | 256b   | 116 ns    | 2.89 µs    | **0.04**  |
+| gcd_small (wide / 1-limb) | 1024b  | 187 ns    | 10.9 µs    | **0.02**  |
+| gcd_small (wide / 1-limb) | 4096b  | 440 ns    | 63.0 µs    | **0.007** |
 | cmp                       | 64b    | 2.63 ns   | 3.23 ns    | **0.81**  |
 | cmp                       | 256b   | 3.66 ns   | 3.94 ns    | **0.93**  |
 | cmp                       | 1024b  | 9.06 ns   | 8.93 ns    | 1.01      |
@@ -252,6 +256,13 @@ tiny render nearly matches); the single-limb tier rides `u64::ilog10`. It also r
   | 256b   | 600 ns               | 1.58 µs           | **0.38×**     |
   | 1024b  | 1.30 µs              | 2.76 µs           | **0.47×**     |
   | 4096b  | 4.73 µs              | 7.47 µs           | **0.63×**     |
+- **Single-limb gcd fast path** — `gcd(wide, small)` (a common shape: any small-factor reduction, a
+  `normalize` against a small gcd) ran Stein over the wide operand, grinding it down in `O(bit_len)`
+  shift-and-subtract steps of `O(n)` limbs each. When one operand is a single limb it now takes one
+  Euclid step — `wide mod small` via the single-limb reciprocal scan (`O(n)`) — collapsing the wide
+  operand to a `u64`, then finishes with a native `u64` binary gcd (`gcd_u64`). `O(n)` instead of
+  `O(bit_len·n)`: gcd_small 64b 239 → 88 ns (2.7×), 256b 1.18 µs → 117 ns (10×), 1024b 9.09 µs → 187 ns
+  (49×), 4096b 109 µs → 440 ns (**249×**). Reported by etude-rational (a wide add/sub cell was gcd-bound).
 - **Karatsuba multiply** above a 40-limb crossover (three half-size products via
   `z1 = (a0+a1)(b0+b1) − z0 − z2`; recurses through the schoolbook base case): mul/4096b 6.19 µs → 5.14 µs
   (1.24× → 1.03× num-bigint). Smaller tiers stay schoolbook (unchanged).
