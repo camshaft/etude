@@ -99,33 +99,39 @@ subtract in place (#207), turning raw gcd into a full sweep. The only non-wins l
 
 The borrowing `recip`/`neg`/`abs` must clone both components to return an owned value, and at 64b that
 1-limb `Big` clone is the whole cost. When the caller owns the operand and does not need it afterwards
-(`x = x.into_recip()`), the consuming variants reuse those allocations instead: `into_recip` of a positive
-value just swaps the two owned fields (**zero allocation**), and `into_neg`/`into_abs` move the unchanged
-denominator rather than cloning it (one fewer allocation). Measured with `iter_batched` (the operand is
-cloned in the untimed setup, so only the transform is timed); num-rational has no consuming form, so its
-`recip`/`-`/`abs` is the reference — note our side additionally carries the `iter_batched` harness overhead,
-so these ratios are conservative.
+(`x = x.into_recip()`), the consuming variants reuse those allocations instead. All three are now **fully
+zero-allocation**: `into_recip` swaps the two owned fields (negating both in place when the numerator is
+negative), and `into_neg`/`into_abs` flip the numerator's sign in place via etude-bigint's `Big::negate` /
+`Big::abs_assign` (an `O(1)` sign-bit toggle — no magnitude copy) while moving the denominator unchanged.
+Measured with `iter_batched` (the operand is cloned in the untimed setup, so only the transform is timed);
+num-rational has no consuming form, so its `recip`/`-`/`abs` is the reference — note our side additionally
+carries the `iter_batched` harness overhead, so these ratios are conservative.
 
 | op         | tier   | etude     | num-rational | ratio     |
 |------------|--------|-----------|--------------|-----------|
-| into_recip | 64b    | 7.3 ns    | 12.8 ns      | **0.57**  |
-| into_recip | 256b   | 7.3 ns    | 28.9 ns      | **0.25**  |
-| into_recip | 1024b  | 7.3 ns    | 31.9 ns      | **0.23**  |
-| into_neg   | 64b    | 16.9 ns   | 17.9 ns      | **0.94**  |
-| into_neg   | 256b   | 17.3 ns   | 28.4 ns      | **0.61**  |
-| into_neg   | 1024b  | 18.9 ns   | 32.1 ns      | **0.59**  |
-| into_abs   | 64b    | 16.6 ns   | 16.5 ns      | 1.01      |
-| into_abs   | 256b   | 17.2 ns   | 34.2 ns      | **0.50**  |
-| into_abs   | 1024b  | 18.8 ns   | 36.9 ns      | **0.55**  |
+| into_recip | 64b    | 14.0 ns   | 12.2 ns      | 1.15 ⚠    |
+| into_recip | 256b   | 14.1 ns   | 28.9 ns      | **0.49**  |
+| into_recip | 1024b  | 14.1 ns   | 31.7 ns      | **0.45**  |
+| into_neg   | 64b    | 7.05 ns   | 17.5 ns      | **0.40**  |
+| into_neg   | 256b   | 7.16 ns   | 29.4 ns      | **0.24**  |
+| into_neg   | 1024b  | 7.10 ns   | 32.4 ns      | **0.22**  |
+| into_abs   | 64b    | 7.71 ns   | 16.3 ns      | **0.47**  |
+| into_abs   | 256b   | 7.70 ns   | 34.7 ns      | **0.22**  |
+| into_abs   | 1024b  | 7.82 ns   | 37.4 ns      | **0.21**  |
 
-`into_recip` is flat at ~7.3 ns across every tier — the positive-numerator case is a pure field swap, so
-its cost is independent of operand size and it now **beats num-rational at 64b (0.57×)**, the one cell the
-borrowing `recip` loses (2.34×). `into_neg` flips 64b to a win (**0.94×** vs the borrowing `neg`'s 1.51×) and
-`into_abs` reaches parity (1.01× vs 1.59×) by moving the denominator instead of cloning it; both win
-decisively from 256b up. The residual 64b gap on `into_neg`/`into_abs` is the single remaining `Big` clone
-(`num.neg()`/`num.abs()`, which allocate); an etude-bigint in-place sign flip would take them to zero
-allocation and a clean win. Covered by `consuming_sign_transforms_match_borrowing` and the differential
-oracle (both assert the consuming and borrowing results are value- and canonical-form-identical).
+Wiring the in-place sign flips took **`into_neg` 0.94× → 0.40×** and **`into_abs` 1.01× → 0.47×** at 64b —
+`into_abs@64b` flips from a loss to a decisive win, and both are now ~4–5× faster than num-rational from
+256b up (the sign toggle is `O(1)` while num-rational's grows with size). This closes the last consuming-
+transform gap the borrowing forms left (`neg`/`abs`@64b at 1.5–1.6×). Covered by
+`consuming_sign_transforms_match_borrowing` and the differential oracle (both assert the consuming and
+borrowing results are value- and canonical-form-identical).
+
+⚠ `into_recip`@64b reads **1.15×** here — a regression on its **unchanged** positive-swap branch (this PR
+touched only the negative-numerator branch, making it zero-alloc too). num-rational's `into_recip` is stable
+(12.8 → 12.2 ns), so this is not machine load: the etude field-swap path measured ~7.3 ns at #274 and ~14 ns
+now, i.e. a **~2× cost increase on a 1-limb `Big` swap/move+drop introduced by an etude-bigint landing
+between #274 and now** (the `&mut`-accumulator surface / #275 / #268 / #271). Flagged to etude-bigint to
+bisect Big's move/`Drop` cost for single-limb values; `into_recip` still wins decisively at 256b/1024b.
 
 The large-tier `cmp` lead comes from the continued-fraction comparison, sharpened two ways: a
 **borrow-first-iteration** (components passed by reference; the first Euclidean step allocates nothing and,
@@ -270,6 +276,15 @@ very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
+- **slice 43** — wired etude-bigint's in-place `Big::negate` / `Big::abs_assign` (landed as etude #275) into
+  the consuming sign transforms. `into_neg`/`into_abs` now flip the numerator's sign in place instead of
+  allocating a fresh magnitude via `Big::neg`/`Big::abs`, and `into_recip`'s negative-numerator branch
+  negates the swapped fields in place — all three are fully zero-allocation. **`into_neg`@64b 0.94× → 0.40×**,
+  **`into_abs`@64b 1.01× → 0.47×** (loss → win). Also surfaced an unrelated `into_recip`@64b regression
+  (7.3 → 14 ns on the unchanged swap branch; num-rational stable) flagged to etude-bigint as a 1-limb `Big`
+  move/`Drop` cost increase. (An interim `RationalSum` accumulator, proposed as etude #294, was **closed** by
+  operator design-taste ruling — no separate data structure for marginal gains — so this in-place-on-the-
+  existing-type work is the landed form of the scratch-reuse lever.)
 - **slice 42** (bench-only) — hardened the core binop board against operand luck. Each `add`/`sub`/`mul`/`div`
   cell is now timed per-op, averaged over 8 operand pairs per tier (criterion `Throughput`), with coprime
   denominators so add/sub measure the common `addsub_big` branch. A single random draw could land on an
