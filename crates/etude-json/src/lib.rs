@@ -512,6 +512,29 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    /// Bulk-skip a run of ASCII digits (`0`–`9`) from the current position, crossing rope-leaf
+    /// boundaries. This replaces a per-byte `peek`/`bump` loop with one contiguous-slice `position`
+    /// scan per leaf — the same lever the string scan uses — so a long digit run (a big integer or a
+    /// high-precision fraction) costs one scan per leaf rather than a call per digit.
+    fn skip_digits(&mut self) {
+        loop {
+            let tail = self.cursor.chunk_tail();
+            match tail.iter().position(|b| !b.is_ascii_digit()) {
+                Some(k) => {
+                    self.cursor.skip_in_chunk(k);
+                    return;
+                }
+                None => {
+                    if tail.is_empty() {
+                        return;
+                    }
+                    // Whole leaf is digits — advance to its end and continue in the next leaf.
+                    self.cursor.skip_in_chunk(tail.len());
+                }
+            }
+        }
+    }
+
     /// Scan a numeric literal beginning at `self.pos`, validating the JSON number grammar
     /// `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
     fn scan_number(&mut self) -> Result<Token, Error> {
@@ -529,9 +552,7 @@ impl<'a> Tokenizer<'a> {
             Some(b'0') => self.cursor.bump(),
             Some(b'1'..=b'9') => {
                 self.cursor.bump();
-                while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
-                    self.cursor.bump();
-                }
+                self.skip_digits();
             }
             _ => {
                 return Err(Error {
@@ -553,9 +574,7 @@ impl<'a> Tokenizer<'a> {
                     kind: ErrorKind::InvalidNumber,
                 });
             }
-            while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
-                self.cursor.bump();
-            }
+            self.skip_digits();
             fraction = Some(Span::new(frac_start, self.cursor.offset()));
         }
 
@@ -580,9 +599,7 @@ impl<'a> Tokenizer<'a> {
                     kind: ErrorKind::InvalidNumber,
                 });
             }
-            while matches!(self.cursor.peek(), Some(b'0'..=b'9')) {
-                self.cursor.bump();
-            }
+            self.skip_digits();
             exponent = Some(Span::new(exp_start, self.cursor.offset()));
         }
 
