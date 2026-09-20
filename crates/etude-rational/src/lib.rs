@@ -187,16 +187,10 @@ impl Rational {
         }
         let Rational { num, den } = self;
         if num.is_negative() {
-            // num < 0 ⇒ raw `den/num` has a negative denominator; negate both terms in place (see
-            // `recip`). The owned components swap roles and flip sign via `Big::negate` (`O(1)`, no
-            // magnitude copy), so this branch is now zero allocation too.
-            let (mut new_num, mut new_den) = (den, num);
-            new_num.negate();
-            new_den.negate();
-            Some(Rational {
-                num: new_num,
-                den: new_den,
-            })
+            // num < 0 ⇒ raw `den/num` has a negative denominator; handled out of line (see
+            // `recip_negative`). Cold + not inlined so this rare branch's locals do not perturb the hot
+            // positive-swap codegen — inlining it in place cost the positive branch ~6 ns (#299 → this fix).
+            Some(recip_negative(num, den))
         } else {
             // num > 0 ⇒ `den/num` is already canonical: swap the owned components, zero allocation.
             Some(Rational { num: den, den: num })
@@ -739,6 +733,23 @@ fn addsub_big(a: &Big, b: &Big, c: &Big, d: &Big, subtract: bool) -> Rational {
     let num = num.div_exact(&h).expect("h divides num");
     let den = lcm.div_exact(&h).expect("h divides lcm");
     Rational { num, den }
+}
+
+/// Reciprocal of a negative-numerator canonical rational (the rare `into_recip` branch): the raw `den/num`
+/// would have a negative denominator, so swap the owned components and flip both signs in place via
+/// `Big::negate` (`O(1)`, no magnitude copy) — zero allocation. Kept out of line (`#[cold]` +
+/// `#[inline(never)]`) so its locals do not perturb the hot positive-swap branch's codegen (inlining it
+/// there regressed the positive branch ~6 ns — a same-function co-regression).
+#[cold]
+#[inline(never)]
+fn recip_negative(num: Big, den: Big) -> Rational {
+    let (mut new_num, mut new_den) = (den, num);
+    new_num.negate();
+    new_den.negate();
+    Rational {
+        num: new_num,
+        den: new_den,
+    }
 }
 
 /// Normalize a raw `num/den` pair into canonical form: strictly-positive denominator (sign moved to the

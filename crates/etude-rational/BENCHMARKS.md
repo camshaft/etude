@@ -133,9 +133,9 @@ carries the `iter_batched` harness overhead, so these ratios are conservative.
 
 | op         | tier   | etude     | num-rational | ratio     |
 |------------|--------|-----------|--------------|-----------|
-| into_recip | 64b    | 14.0 ns   | 12.2 ns      | 1.15 ⚠    |
-| into_recip | 256b   | 14.1 ns   | 28.9 ns      | **0.49**  |
-| into_recip | 1024b  | 14.1 ns   | 31.7 ns      | **0.45**  |
+| into_recip | 64b    | 7.4 ns    | 12.7 ns      | **0.58**  |
+| into_recip | 256b   | 7.4 ns    | 28.8 ns      | **0.26**  |
+| into_recip | 1024b  | 7.4 ns    | 31.8 ns      | **0.23**  |
 | into_neg   | 64b    | 7.05 ns   | 17.5 ns      | **0.40**  |
 | into_neg   | 256b   | 7.16 ns   | 29.4 ns      | **0.24**  |
 | into_neg   | 1024b  | 7.10 ns   | 32.4 ns      | **0.22**  |
@@ -150,12 +150,13 @@ transform gap the borrowing forms left (`neg`/`abs`@64b at 1.5–1.6×). Covered
 `consuming_sign_transforms_match_borrowing` and the differential oracle (both assert the consuming and
 borrowing results are value- and canonical-form-identical).
 
-⚠ `into_recip`@64b reads **1.15×** here — a regression on its **unchanged** positive-swap branch (this PR
-touched only the negative-numerator branch, making it zero-alloc too). num-rational's `into_recip` is stable
-(12.8 → 12.2 ns), so this is not machine load: the etude field-swap path measured ~7.3 ns at #274 and ~14 ns
-now, i.e. a **~2× cost increase on a 1-limb `Big` swap/move+drop introduced by an etude-bigint landing
-between #274 and now** (the `&mut`-accumulator surface / #275 / #268 / #271). Flagged to etude-bigint to
-bisect Big's move/`Drop` cost for single-limb values; `into_recip` still wins decisively at 256b/1024b.
+`into_recip` is flat at ~7.4 ns across all tiers (a pure field swap, size-independent) and **wins every tier
+(0.58× at 64b, 0.23–0.26× above)**. It briefly regressed to ~14 ns (1.15×@64b) when the in-place negative
+branch was inlined into `into_recip` in #299: that rare branch's extra locals perturbed the hot positive-swap
+codegen — a **same-function co-regression** (confirmed by bisect: pre-#299 7.7 ns vs post-#299 14 ns on one
+host, with `Big`'s struct/size/`Drop` unchanged since #36). Moving the negative branch to a `#[cold]
+#[inline(never)]` `recip_negative` helper restored the swap to ~7.4 ns. Lesson: an in-place edit to a rare
+branch can silently deoptimize the hot branch of the same function; keep cold branches out of line.
 
 The large-tier `cmp` lead comes from the continued-fraction comparison, sharpened two ways: a
 **borrow-first-iteration** (components passed by reference; the first Euclidean step allocates nothing and,
@@ -300,6 +301,12 @@ very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
+- **slice 45** — fixed the `into_recip`@64b co-regression from #299. Bisect (with etude-bigint, who ruled out
+  a `Big`-side change — struct/size/`Drop` unchanged since #36) pinned it to #299's inlined in-place negative
+  branch perturbing the hot positive-swap codegen of the **same function** (pre-#299 7.7 ns → post-#299 14 ns
+  on one host). Moved the rare negative branch to a `#[cold] #[inline(never)]` `recip_negative` helper:
+  `into_recip`@64b **14 ns → 7.4 ns**, back to a win (**1.15× → 0.58×**). Lesson recorded: an in-place edit to
+  a rare branch can silently deoptimize the hot branch of the same function — keep cold branches out of line.
 - **slice 44** (bench-only) — added the `add_shared` group: add/sub on denominators sharing a small factor
   (`g = 210`), exercising `addsub_big`'s **shared-factor branch** (`den = lcm`, reduce `gcd(num, g)`) that
   the coprime `rat_pair` board deliberately excludes. This is the everyday case (`1/12 + 1/8`) and the one
