@@ -212,6 +212,28 @@ fn bench_gcd(c: &mut Criterion) {
     binop(c, "gcd", TIERS, |a, b| a.gcd(b), |a, b| a.gcd(b));
 }
 
+/// `gcd(wide, small)` — a wide operand against a single-limb one (e.g. a small-factor reduction). This
+/// hits the single-limb fast path (one big-by-small remainder, then a native `u64` gcd) rather than
+/// grinding the wide operand through Stein in O(bit_len) steps. Small divisor is a fixed odd value.
+fn bench_gcd_small(c: &mut Criterion) {
+    use num_integer::Integer;
+    let mut g = group(c, "gcd_small");
+    let mut rng = Rng(0x63c9_a17e_44d0_2b95);
+    let small = Big::from_i64(1_000_000_007);
+    let nsmall = to_num(&small);
+    for &(label, nbytes) in TIERS {
+        let a = rng.big(nbytes);
+        let na = to_num(&a);
+        g.bench_with_input(BenchmarkId::new("etude", label), &a, |bch, a| {
+            bch.iter(|| black_box(black_box(a).gcd(black_box(&small))))
+        });
+        g.bench_with_input(BenchmarkId::new("num-bigint", label), &na, |bch, a| {
+            bch.iter(|| black_box(black_box(a).gcd(black_box(&nsmall))))
+        });
+    }
+    g.finish();
+}
+
 fn bench_cmp(c: &mut Criterion) {
     let mut g = group(c, "cmp");
     let mut rng = Rng(0x0102_0304_0506_0708);
@@ -869,6 +891,7 @@ criterion_group!(
     bench_div_exact,
     bench_div_small,
     bench_gcd,
+    bench_gcd_small,
     bench_cmp,
     bench_to_decimal,
     bench_sign_magnitude_roundtrip,

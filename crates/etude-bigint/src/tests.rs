@@ -902,6 +902,28 @@ fn gcd_wide_operands_vs_num_bigint() {
     let a = mk(&mut rng, 18);
     check(&a, &a);
     check(&a, &Big::from_i64(1));
+    // (5) single-limb-operand fast path: gcd(wide, small) for assorted small divisors, both orders,
+    // including the reported `gcd(huge, {2,3})` case and a full-width `u64` divisor. A planted factor
+    // confirms `gcd(small·w, small) == small`.
+    let small_big = |v: u64| {
+        let mut b = Big {
+            neg: false,
+            mag: alloc::vec![v],
+        };
+        b.normalize();
+        b
+    };
+    for small in [2u64, 3, 6, 7, 42, 1_000_000_007, u64::MAX] {
+        let w = mk(&mut rng, 24);
+        let sb = small_big(small);
+        check(&w, &sb);
+        check(&sb, &w);
+        assert_eq!(
+            w.mul(&sb).gcd(&sb),
+            sb,
+            "gcd(small*w, small) == small {small}"
+        );
+    }
 }
 
 #[test]
