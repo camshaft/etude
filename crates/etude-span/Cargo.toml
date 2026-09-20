@@ -25,3 +25,11 @@ bytes = "1"
 # Coverage-guided property testing for the cursor against a flat byte-slice model.
 bolero = "0.13"
 bolero-generator = "0.13"
+# `span` bench harness (cursor scan throughput vs the per-byte `byte_at` descent).
+criterion = "0.5"
+# Matches the host allocator so benchmarks reflect production allocation behavior.
+tikv-jemallocator = "0.6"
+
+[[bench]]
+name = "span"
+harness = false
