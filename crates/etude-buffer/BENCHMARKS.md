@@ -75,8 +75,44 @@ tiny: 1024 × 64 B pays ~3.5 µs of it on top of the 1.44 µs copy. The takeaway
 for MTU-sized-and-larger segments; a producer emitting a great many tiny segments pays measurable
 per-segment cost and should coalesce upstream where it can.
 
+## `Chain` reader (runnable: `cargo bench -p etude-buffer -- chain`)
+
+`Chain` drains reader `a` fully, then `b`, presenting the two as one stream. Draining two 32 KiB `Bytes`
+halves through a `Chain` versus a single contiguous 64 KiB `Bytes`, both `copy_into` a fresh `Vec<u8>`
+(the same 64 KiB copied either way):
+
+| source | copy_into `Vec<u8>` |
+|--------|---------------------|
+| `Chain` of 2 × 32 KiB | 1.29 µs |
+| 1 × 64 KiB contiguous | 1.43 µs |
+
+The two are within noise (~10%), both memcpy-bound on the same 64 KiB — `Chain`'s per-drain bookkeeping
+(the `buffer_is_empty` check and the `a`-then-`b` hand-off) is negligible next to the copy. Composing
+readers with `Chain` is effectively free; the cost is whatever the underlying readers' drain costs.
+
+## `partial_copy_into` trailing-chunk hand-off (runnable: `cargo bench -p etude-buffer -- partial`)
+
+`partial_copy_into` copies until the destination is full and *returns* the trailing chunk for the caller
+to place — the zero-copy hand-off point, where a chunk-holding sink or a rope can adopt that `Bytes` by
+reference. `copy_into` instead copies that trailing chunk too. On a single 64 KiB `Bytes` drained into a
+`Vec<u8>` (a non-specializing sink), with the destination pre-allocated in both arms so the delta is
+exactly the trailing-chunk copy:
+
+| operation | 64 KiB `Bytes` → `Vec<u8>` |
+|-----------|----------------------------|
+| `partial_copy_into` (returns trailing chunk) | 407 ns |
+| `copy_into` (copies trailing chunk) | 1.46 µs |
+
+Returning the trailing chunk is **~3.6× cheaper** — `partial_copy_into` hands it back via a `split_to`
+refcount move (no memcpy), while `copy_into` memcpys it into the `Vec`. The ~1.05 µs delta is that
+64 KiB copy. This is the mechanism a chunk-holding consumer (a `Bytes` queue, `etude-bytevec`'s builder)
+uses to absorb a received buffer without a copy: take the trailing chunk from `partial_copy_into` and
+`put_bytes` it by reference rather than letting `copy_into` flatten it.
+
 ## Next targets
 
-Hot paths still to bench (subsequent passes): `partial_copy_into`'s trailing-chunk hand-off and the
-`Chain` reader. The `slice::vectored_copy` scatter helper is crate-private and currently used only in
-tests, so it is not on a benchable production path.
+Coverage of the core reader/writer paths is in place: `copy_into` (copy vs handle-move), `put_uninit_slice`
+(zero-init cost), the `IoSlice` vectored drain, the `Chain` reader, and the `partial_copy_into`
+trailing-chunk hand-off. The `slice::vectored_copy` scatter helper is crate-private and currently used
+only in tests, so it is not on a benchable production path; it becomes a target if a production caller
+appears.
