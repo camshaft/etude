@@ -157,25 +157,22 @@ impl Rational {
         }
     }
 
-    /// The additive inverse `-self`, consuming `self`. Same result as [`Rational::neg`], but the
-    /// denominator is unchanged so its allocation is moved rather than cloned — one fewer `Big`
-    /// allocation. Only the numerator's sign flips; the value stays canonical.
+    /// The additive inverse `-self`, consuming `self`. Same result as [`Rational::neg`], but **zero
+    /// allocation**: the numerator's sign flips in place (`Big::negate`, an `O(1)` sign-bit toggle — no
+    /// magnitude copy) and the already-positive denominator is moved unchanged. The value stays canonical.
     pub fn into_neg(self) -> Rational {
-        let Rational { num, den } = self;
-        Rational {
-            num: num.neg(),
-            den,
-        }
+        let Rational { mut num, den } = self;
+        num.negate();
+        Rational { num, den }
     }
 
-    /// The absolute value `|self|`, consuming `self`. Same result as [`Rational::abs`], but the
-    /// denominator (already positive) is moved rather than cloned — one fewer `Big` allocation.
+    /// The absolute value `|self|`, consuming `self`. Same result as [`Rational::abs`], but **zero
+    /// allocation**: the numerator's sign clears in place (`Big::abs_assign`, an `O(1)` sign-bit clear —
+    /// no magnitude copy) and the already-positive denominator is moved unchanged.
     pub fn into_abs(self) -> Rational {
-        let Rational { num, den } = self;
-        Rational {
-            num: num.abs(),
-            den,
-        }
+        let Rational { mut num, den } = self;
+        num.abs_assign();
+        Rational { num, den }
     }
 
     /// The reciprocal `1/self` (`den/num`), consuming `self`. Returns `None` when `self` is zero.
@@ -190,10 +187,15 @@ impl Rational {
         }
         let Rational { num, den } = self;
         if num.is_negative() {
-            // num < 0 ⇒ raw `den/num` has a negative denominator; negate both terms (see `recip`).
+            // num < 0 ⇒ raw `den/num` has a negative denominator; negate both terms in place (see
+            // `recip`). The owned components swap roles and flip sign via `Big::negate` (`O(1)`, no
+            // magnitude copy), so this branch is now zero allocation too.
+            let (mut new_num, mut new_den) = (den, num);
+            new_num.negate();
+            new_den.negate();
             Some(Rational {
-                num: den.neg(),
-                den: num.neg(),
+                num: new_num,
+                den: new_den,
             })
         } else {
             // num > 0 ⇒ `den/num` is already canonical: swap the owned components, zero allocation.
