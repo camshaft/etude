@@ -20,7 +20,7 @@
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use etude_bytevec::ByteVec;
-use etude_span::Cursor;
+use etude_span::{Cursor, Span};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -117,5 +117,94 @@ fn bench_scan(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_scan);
+/// Build `n` bytes where a delimiter (`0x20`) lands on every `run + 1`-th byte, so the input is a
+/// stream of ~`run`-byte tokens separated by single delimiters.
+fn delimited(n: usize, run: usize) -> Vec<u8> {
+    const DELIM: u8 = b' ';
+    let mut v = vec![0xABu8; n];
+    let stride = run + 1;
+    let mut i = run;
+    while i < n {
+        v[i] = DELIM;
+        i += stride;
+    }
+    v
+}
+
+/// The realistic tokenizer shape: a delimited stream whose tokens straddle 64 B leaves. A tokenizer
+/// skips delimiters and stamps a [`Span`] per token. This contrasts the two ways to scan each token's
+/// run — the bulk path (find the next delimiter in `chunk_tail` with a slice scan, `skip_in_chunk` to
+/// it, continuing across leaf boundaries) versus naive per-byte `peek`/`bump` — at three token
+/// lengths. Short runs are delimiter-dense (per-byte cost dominates either way); long runs straddle
+/// leaves and reward the bulk scan. Each token stamps a `Span`, as a real tokenizer would.
+fn bench_tokenize(c: &mut Criterion) {
+    const N: usize = 64 * 1024;
+    const LEAF: usize = 64;
+    const DELIM: u8 = b' ';
+
+    for &run in &[4usize, 16, 100] {
+        let rope = rope_chunked(&delimited(N, run), LEAF);
+        let label = format!("run{run}");
+
+        // Bulk: within each leaf, locate the next delimiter with a slice scan and skip to it; a token
+        // that reaches the leaf end continues into the next leaf.
+        let mut g = group(c, "tokenize/bulk");
+        g.bench_function(BenchmarkId::from_parameter(&label), |b| {
+            b.iter(|| {
+                let mut cur = Cursor::new(&rope);
+                let mut token_bytes = 0u64;
+                while let Some(byte) = cur.peek() {
+                    if byte == DELIM {
+                        cur.bump();
+                        continue;
+                    }
+                    let start = cur.offset();
+                    loop {
+                        let tail = cur.chunk_tail();
+                        if tail.is_empty() {
+                            break;
+                        }
+                        match tail.iter().position(|&x| x == DELIM) {
+                            Some(k) => {
+                                cur.skip_in_chunk(k);
+                                break;
+                            }
+                            None => cur.skip_in_chunk(tail.len()),
+                        }
+                    }
+                    token_bytes += black_box(Span::new(start, cur.offset())).len() as u64;
+                }
+                black_box(token_bytes)
+            })
+        });
+        g.finish();
+
+        // Naive: the same tokenization done purely with per-byte peek/bump.
+        let mut g = group(c, "tokenize/peek_bump");
+        g.bench_function(BenchmarkId::from_parameter(&label), |b| {
+            b.iter(|| {
+                let mut cur = Cursor::new(&rope);
+                let mut token_bytes = 0u64;
+                while let Some(byte) = cur.peek() {
+                    if byte == DELIM {
+                        cur.bump();
+                        continue;
+                    }
+                    let start = cur.offset();
+                    while let Some(x) = cur.peek() {
+                        if x == DELIM {
+                            break;
+                        }
+                        cur.bump();
+                    }
+                    token_bytes += black_box(Span::new(start, cur.offset())).len() as u64;
+                }
+                black_box(token_bytes)
+            })
+        });
+        g.finish();
+    }
+}
+
+criterion_group!(benches, bench_scan, bench_tokenize);
 criterion_main!(benches);
