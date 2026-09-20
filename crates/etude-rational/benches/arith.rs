@@ -37,6 +37,14 @@ const TIERS: &[(&str, usize)] = &[
     ("4096b", 512),
 ];
 
+/// Number of independent operand pairs averaged per binary-op cell. A single random draw can land on an
+/// unrepresentative regime — e.g. denominators that share a factor (the `addsub_big` shared-factor branch)
+/// or cross-terms that cancel unusually — which previously produced non-monotonic board cells (a real
+/// gcd bug at add/sub@2048b, operand-luck at cmp@2048b). Timing the op over several pairs per criterion
+/// iteration, reported per-element via `Throughput`, makes each cell reflect the typical cost rather than
+/// one lucky or pathological draw.
+const SAMPLES: usize = 8;
+
 struct Rng(u64);
 impl Rng {
     fn byte(&mut self) -> u8 {
@@ -104,6 +112,31 @@ impl Rng {
         let num = self.big(nbytes - 1); // strictly narrower ⇒ num < den ⇒ value in (0, 1)
         Rational::new(num, den).expect("nonzero denominator")
     }
+    /// A pair of `nbytes`-wide rationals whose DENOMINATORS are coprime, so `add`/`sub` take the common
+    /// coprime `addsub_big` branch (`den = b*d`, no shared-factor reduction) rather than an operand-luck
+    /// draw that might hit the rarer shared-factor branch. Each numerator is made coprime to its own
+    /// denominator so `new` leaves the denominators intact (no silent shrink). Neutral for `mul`/`div`,
+    /// whose cross-reduction is on the numerator/denominator cross-pairs, not the two denominators.
+    fn rat_pair(&mut self, nbytes: usize) -> (Rational, Rational) {
+        let one = Big::from_i64(1);
+        let da = self.big(nbytes);
+        let mut db = self.big(nbytes);
+        while da.gcd(&db) != one {
+            db = db.add(&one);
+        }
+        let coprime_num = |rng: &mut Self, den: &Big| {
+            let mut n = rng.big(nbytes);
+            while n.gcd(den) != one {
+                n = n.add(&one);
+            }
+            n
+        };
+        let na = coprime_num(self, &da);
+        let nb = coprime_num(self, &db);
+        let a = Rational::new(na, da).expect("nonzero denominator");
+        let b = Rational::new(nb, db).expect("nonzero denominator");
+        (a, b)
+    }
 }
 
 /// The `num-bigint` value equal to `b` (via the public two's-complement encoding).
@@ -127,7 +160,9 @@ fn group<'a>(
     g
 }
 
-/// Bench a binary op on both implementations across `TIERS`, with same-width operands.
+/// Bench a binary op on both implementations across `TIERS`, with same-width operands. Each cell is timed
+/// over `SAMPLES` independent operand pairs per criterion iteration and reported per-element (via
+/// `Throughput`), so it reflects the op's typical cost over a spread of operands rather than one draw.
 fn binop(
     c: &mut Criterion,
     name: &str,
@@ -137,16 +172,27 @@ fn binop(
     let mut g = group(c, name);
     for &(label, nbytes) in TIERS {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (nbytes as u64));
-        let a = rng.rat(nbytes);
-        let b = rng.rat(nbytes);
-        let (ra, rb) = (to_ref(&a), to_ref(&b));
-        g.bench_with_input(BenchmarkId::new("etude", label), &(&a, &b), |be, (a, b)| {
-            be.iter(|| black_box(ours(black_box(a), black_box(b))))
+        let pairs: Vec<(Rational, Rational)> = (0..SAMPLES).map(|_| rng.rat_pair(nbytes)).collect();
+        let refs: Vec<(BigRational, BigRational)> =
+            pairs.iter().map(|(a, b)| (to_ref(a), to_ref(b))).collect();
+        g.throughput(criterion::Throughput::Elements(SAMPLES as u64));
+        g.bench_with_input(BenchmarkId::new("etude", label), &pairs, |be, pairs| {
+            be.iter(|| {
+                for (a, b) in pairs {
+                    black_box(ours(black_box(a), black_box(b)));
+                }
+            })
         });
         g.bench_with_input(
             BenchmarkId::new("num-rational", label),
-            &(&ra, &rb),
-            |be, (a, b)| be.iter(|| black_box(theirs(black_box(a), black_box(b)))),
+            &refs,
+            |be, refs| {
+                be.iter(|| {
+                    for (a, b) in refs {
+                        black_box(theirs(black_box(a), black_box(b)));
+                    }
+                })
+            },
         );
     }
     g.finish();

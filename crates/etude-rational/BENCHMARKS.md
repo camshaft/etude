@@ -5,7 +5,7 @@
 
 Head-to-head against [`num-rational`](https://crates.io/crates/num-rational)'s `BigRational`, the
 reference we optimize toward — the north star is to **beat it** (ratios below 1.00). `benches/arith.rs`
-measures each operation at three component-magnitude tiers (named by the per-component bit width) with
+measures each operation across five component-magnitude tiers (named by the per-component bit width) with
 the jemalloc allocator, deterministic operands built through the public API, and criterion. Run it with:
 
 ```
@@ -16,30 +16,38 @@ Numbers below are medians from one `aarch64-linux` run and are **indicative, not
 absolute times vary by machine; what matters is the **ratio to num-rational** and its movement as
 optimizations land. `ratio` is `etude / num-rational`: `<1.00` = we are faster (**bold**), `>1.00` = slower.
 
+The four core binary ops (`add`/`sub`/`mul`/`div`) are timed **per operation, averaged over 8 operand pairs
+per tier** (via criterion `Throughput`), so each cell reflects the op's typical cost rather than a single
+draw. A single random pair can land on an unrepresentative regime — this is what produced the earlier
+non-monotonic cells (`add`/`sub`@2048b, a real gcd bug caught because that draw shared a denominator factor;
+`cmp`@2048b, operand-luck) — so the binop operands additionally use **coprime denominators**, the common
+`addsub_big` branch (the rarer shared-factor branch is a separate concern). With averaging, `add`/`sub`
+scale monotonically (0.11× → 0.21×) instead of the old jagged 0.11/0.31/0.17/0.60/0.20.
+
 ## Current board (against etude-bigint's Stein binary gcd)
 
 | op         | tier   | etude     | num-rational | ratio     |
 |------------|--------|-----------|--------------|-----------|
-| add        | 64b    | 0.40 µs   | 3.70 µs      | **0.11**  |
-| add        | 256b   | 5.23 µs   | 16.7 µs      | **0.31**  |
-| add        | 1024b  | 15.8 µs   | 93.7 µs      | **0.17**  |
-| add        | 2048b  | 162 µs    | 270 µs       | **0.60**  |
-| add        | 4096b  | 176 µs    | 873 µs       | **0.20**  |
-| sub        | 64b    | 0.40 µs   | 3.85 µs      | **0.10**  |
-| sub        | 256b   | 5.35 µs   | 16.6 µs      | **0.32**  |
-| sub        | 1024b  | 15.7 µs   | 93.7 µs      | **0.17**  |
-| sub        | 2048b  | 163 µs    | 269 µs       | **0.61**  |
-| sub        | 4096b  | 176 µs    | 875 µs       | **0.20**  |
-| mul        | 64b    | 0.27 µs   | 4.99 µs      | **0.054** |
-| mul        | 256b   | 3.98 µs   | 20.2 µs      | **0.20**  |
-| mul        | 1024b  | 32.2 µs   | 116 µs       | **0.28**  |
-| mul        | 2048b  | 97.5 µs   | 329 µs       | **0.30**  |
-| mul        | 4096b  | 339 µs    | 1032 µs      | **0.33**  |
-| div        | 64b    | 0.24 µs   | 5.26 µs      | **0.045** |
-| div        | 256b   | 4.50 µs   | 21.3 µs      | **0.21**  |
-| div        | 1024b  | 31.2 µs   | 113 µs       | **0.28**  |
-| div        | 2048b  | 98.7 µs   | 329 µs       | **0.30**  |
-| div        | 4096b  | 340 µs    | 1037 µs      | **0.33**  |
+| add        | 64b    | 0.48 µs   | 4.43 µs      | **0.11**  |
+| add        | 256b   | 2.48 µs   | 16.9 µs      | **0.15**  |
+| add        | 1024b  | 17.3 µs   | 94.3 µs      | **0.18**  |
+| add        | 2048b  | 53.4 µs   | 275 µs       | **0.19**  |
+| add        | 4096b  | 185 µs    | 883 µs       | **0.21**  |
+| sub        | 64b    | 0.48 µs   | 4.33 µs      | **0.11**  |
+| sub        | 256b   | 2.49 µs   | 17.0 µs      | **0.15**  |
+| sub        | 1024b  | 17.3 µs   | 94.4 µs      | **0.18**  |
+| sub        | 2048b  | 53.5 µs   | 275 µs       | **0.19**  |
+| sub        | 4096b  | 185 µs    | 878 µs       | **0.21**  |
+| mul        | 64b    | 0.28 µs   | 5.40 µs      | **0.053** |
+| mul        | 256b   | 4.92 µs   | 21.5 µs      | **0.23**  |
+| mul        | 1024b  | 34.1 µs   | 116 µs       | **0.29**  |
+| mul        | 2048b  | 103 µs    | 333 µs       | **0.31**  |
+| mul        | 4096b  | 350 µs    | 1049 µs      | **0.33**  |
+| div        | 64b    | 0.29 µs   | 5.67 µs      | **0.052** |
+| div        | 256b   | 4.88 µs   | 21.3 µs      | **0.23**  |
+| div        | 1024b  | 33.7 µs   | 116 µs       | **0.29**  |
+| div        | 2048b  | 102 µs    | 334 µs       | **0.31**  |
+| div        | 4096b  | 350 µs    | 1048 µs      | **0.33**  |
 | recip      | 64b    | 29.7 ns   | 14.5 ns      | 2.04      |
 | recip      | 256b   | 29.3 ns   | 32.2 ns      | **0.91**  |
 | recip      | 1024b  | 32.1 ns   | 34.7 ns      | **0.93**  |
@@ -179,19 +187,22 @@ Sample ratios at the large tiers (`ratio = etude / num-rational`; full numbers v
 
 | op  | 1024b   | 4096b   |
 |-----|---------|---------|
-| mul | **0.28**| **0.33**|
-| div | **0.28**| **0.33**|
-| add | **0.17**| **0.20**|
+| mul | **0.29**| **0.33**|
+| div | **0.29**| **0.33**|
+| add | **0.18**| **0.21**|
 
-`mul`/`div` hold a **~3× lead** (cross-reduction halves the gcd work), and `add`/`sub` a **~5× lead**
-(**0.17–0.20×**). Earlier the add/sub large tiers narrowed to ~parity, which was mis-diagnosed as
-multiply-bound (awaiting Toom-3) — the real cost was the `2n`-bit reduce gcd over the `(a*d + c*b)/(b*d)`
-product. `add`/`sub` now reduce over `gcd(b, d)` on the *denominators* (an n-bit gcd) and, when they are
-coprime (the common random case), skip the reduce gcd entirely; when they share a factor `g`, they work
-over the lcm and reduce against the small `g` (`gcd(N, lcm) = gcd(N, g)`). So the multiply — not a wide
-gcd — is now the floor for add/sub, and it beats num-bigint's. (The 256b/2048b bench
-seeds happen to have `gcd(b, d) > 1`, so those cells sit at the lcm-branch ratio ~0.31/0.60 — an extra
-`gcd(num, g)` on the ~2n-bit numerator — rather than the coprime ~0.17; both branches beat num-rational.)
+`mul`/`div` hold a **~3× lead** (cross-reduction halves the gcd work); the lead does not *widen* at the
+large tiers — it plateaus at ~0.33×, since both implementations' schoolbook multiplies scale `O(n²)` and the
+constant-factor gap is what we keep. `add`/`sub` hold a **~5× lead** (**0.18–0.21×**), scaling monotonically.
+Earlier the add/sub large tiers *appeared* to narrow to ~parity, which was mis-diagnosed as multiply-bound
+(awaiting Toom-3) — the real cost was the `2n`-bit reduce gcd over the `(a*d + c*b)/(b*d)` product. `add`/`sub`
+now reduce over `gcd(b, d)` on the *denominators* (an n-bit gcd) and, when they are coprime (the common
+random case), skip the reduce gcd entirely; when they share a factor `g`, they work over the lcm and reduce
+against the small `g` (`gcd(N, lcm) = gcd(N, g)`). So the multiply — not a wide gcd — is the floor for
+add/sub, and it beats num-bigint's. (The earlier board's jagged add/sub cells — e.g. `256b` 0.31× and a
+`2048b` 0.60× spike — were single-draw artifacts: those seeds happened to have `gcd(b, d) > 1` and hit the
+shared-factor branch. The binop cells now average over several coprime-denominator pairs, so the board
+reflects the common branch and scales monotonically; the shared-factor branch is tracked separately.)
 The whole binop board dropped again after etude-bigint's in-place Stein gcd (#207), which rippled through
 every reduction; that also closed the last gcd-bound cells (`normalize`/`add_eqden` now win all tiers), so
 the previously-deferred **Lehmer/HGCD** gcd is no longer gap-closing and has been dropped.
@@ -224,6 +235,14 @@ very wide renders are unaffected. Re-bench on each render land.
 
 ## History
 
+- **slice 42** (bench-only) — hardened the core binop board against operand luck. Each `add`/`sub`/`mul`/`div`
+  cell is now timed per-op, averaged over 8 operand pairs per tier (criterion `Throughput`), with coprime
+  denominators so add/sub measure the common `addsub_big` branch. A single random draw could land on an
+  unrepresentative regime — the earlier jagged cells (add/sub `256b` 0.31× and a `2048b` 0.60× spike were
+  shared-factor draws; that same single-draw trap is how the slice-40 gcd bug and the cmp@2048b operand-luck
+  surfaced). `add`/`sub` now scale monotonically **0.11× → 0.21×** (was 0.11/0.31/0.17/0.60/0.20); `mul`/`div`
+  confirmed to hold ~0.33× at the large tiers (the lead plateaus, does not widen — both sides schoolbook
+  O(n²)). No code change; makes the scoreboard reflect the algorithm regime, not the draw. Self-merged.
 - **slice 41** (bench-only) — added the `cmp_close` group: a deterministic continued-fraction worst case
   (both operands proper fractions in `(0,1)` with different denominators, so their integer parts always
   tie and the comparison recurses). The existing random `cmp` row hits that recursive case only by luck —
