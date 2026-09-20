@@ -286,6 +286,17 @@ fn bench(c: &mut Criterion) {
         });
         g.finish();
 
+        // Forward full decode (materialize every char): unlike `count`/`last`, neither side has a
+        // specialization to hide behind, so this isolates raw per-codepoint decode speed.
+        let mut g = group(c, "chars_collect");
+        g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
+            b.iter(|| black_box(r.chars().collect::<String>()));
+        });
+        g.bench_with_input(BenchmarkId::new("std", n), &string, |b, s| {
+            b.iter(|| black_box(s.chars().collect::<String>()));
+        });
+        g.finish();
+
         let mut g = group(c, "char_indices_last");
         g.bench_with_input(BenchmarkId::new("strrope", n), &rope, |b, r| {
             b.iter(|| black_box(r.char_indices().last()));
