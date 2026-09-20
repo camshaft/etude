@@ -415,6 +415,14 @@ fn to_f64_matches_float_parse() {
         "2.2250738585072014e-308", // smallest positive normal
         "1e-400",                  // underflow → 0
         "-1e-400",
+        // u128 fast-path tier: coefficients above the 2^53 mantissa but within u128 (the 64b/128b range),
+        // integers and mixed scales — these route through the native u128 conversion, not the fast path.
+        "18446744073709551616",   // 2^64 (integer, shift < 0 branch)
+        "18446744073709551617",   // 2^64 + 1 (rounds)
+        "1.8446744073709551615",  // ~2^64 coefficient, value in (1, 2)
+        "0.18446744073709551615", // ~2^64 coefficient, value in (0, 1)
+        "170141183460469231731687303715884105727", // 2^127 - 1 = i128::MAX (top of the u128 path)
+        "3.40282366920938463463374607431768211455", // 2^128 - 1 coeff → exceeds i128, falls to Big path
     ] {
         let expected: f64 = s.parse().unwrap();
         let got = Decimal::from_str(s).unwrap().to_f64();
@@ -426,6 +434,35 @@ fn to_f64_matches_float_parse() {
             expected.to_bits()
         );
     }
+}
+
+#[test]
+// The bolero property harness spins forever under miri; the native u128 to_f64 path it fuzzes is covered
+// under miri by the deterministic `to_f64_matches_float_parse` boundary cases. Operator directive 2026-09-19.
+#[cfg_attr(
+    miri,
+    ignore = "bolero property harness spins under miri; u128 to_f64 covered by deterministic boundary test"
+)]
+fn to_f64_u128_path_matches_float_parse() {
+    // Dense differential over the native u128 `to_f64` fast path: a random `i128` coefficient (magnitudes
+    // above 2^53 route through the u128 path; the widest bail back to `Big`) at a random scale must convert
+    // bit-for-bit to the same `f64` as the std parser (itself correctly rounded) applied to the value's own
+    // canonical rendering. This pins the u128 path against an independent correctly-rounded oracle.
+    bolero::check!()
+        .with_type::<(i128, i16)>()
+        .for_each(|&(coeff, exp)| {
+            let d = Decimal::new(Big::from_i128(coeff), exp as i64);
+            let rendered = d.to_string();
+            let expected: f64 = rendered.parse().expect("canonical decimal render is a valid f64 literal");
+            let got = d.to_f64();
+            // `==` treats +0.0 and -0.0 as equal (our zero is unsigned) and compares infinities exactly.
+            assert!(
+                got == expected,
+                "to_f64 mismatch for coeff={coeff} exp={exp} ({rendered}): got {:#x} expected {:#x}",
+                got.to_bits(),
+                expected.to_bits()
+            );
+        });
 }
 
 #[test]

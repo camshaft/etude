@@ -30,7 +30,7 @@ cargo bench -p etude-decimal --bench arith
 - **Ratio = etude median / bigdecimal median.** `< 1.00` means `etude-decimal` is faster. Medians below
   are from a single run on an aarch64 host (`Linux 6.12 aarch64`); treat them as directional.
 
-## Scoreboard (2026-09-19)
+## Scoreboard (2026-09-20)
 
 ### `add` — exact aligned sum
 
@@ -225,15 +225,21 @@ extra fast path.
 ### `to_f64` — correctly-rounded conversion to `f64` — we win at scale
 
 Operand scaled into `f64` range (value in `(0, 1)`) so the full big-int-ratio path runs rather than
-short-circuiting on overflow. Our direct method scales far better than `bigdecimal`'s.
+short-circuiting on overflow. Our direct method scales far better than `bigdecimal`'s at the large tiers.
+A coefficient whose magnitude fits `u128` (the `64b` tier and beyond) now takes a native `u128` fast path —
+the same correctly-rounded `⌊log2⌋` / mantissa-shift / `divmod` / round-half-to-even algorithm as the exact
+`Big` path, in fixed-width arithmetic, so it skips the per-operation `Big` allocations that dominated the
+mid-size tiers (it falls back to `Big` on any `u128` overflow or a subnormal result). That took `64b`
+`643 ns → 38 ns` — from `3.39×` behind to a `0.20×` win. The `256b` tier's coefficient exceeds `u128`, so it
+stays on the exact `Big` path (still the base-conversion / `Big`-`divmod` cost, `etude-bigint`'s to shave).
 
-| tier | etude | bigdecimal | ratio |
-|------|------:|-----------:|------:|
-| 64b   | 643.28 ns | 189.99 ns | 3.39 |
-| 256b  | 720.89 ns | 446.43 ns | 1.61 |
-| 1024b | 1.250 µs  | 3.680 µs  | **0.34** |
-| 2048b | 1.871 µs  | 13.73 µs  | **0.14** |
-| 4096b | 4.020 µs  | 53.81 µs  | **0.075** |
+| tier | etude (before) | etude (now) | bigdecimal | ratio |
+|------|---------------:|------------:|-----------:|------:|
+| 64b   | 643.28 ns | 38.24 ns  | 189.60 ns | **0.20** |
+| 256b  | 720.89 ns | 721.92 ns | 438.38 ns | 1.65 |
+| 1024b | 1.250 µs  | 1.253 µs  | 3.657 µs  | **0.34** |
+| 2048b | 1.871 µs  | 1.871 µs  | 13.73 µs  | **0.14** |
+| 4096b | 4.020 µs  | 4.020 µs  | 53.81 µs  | **0.075** |
 
 Small values (`|coefficient| < 2^53`, `|exp| ≤ 22`) — the common decimal-literal case — take a fast path:
 one correctly-rounded IEEE multiply/divide of two exactly-representable `f64`s (the coefficient and an
@@ -327,10 +333,12 @@ rejecting it, so there is no same-semantics comparison to run.
   1024b up as well (its 1024b tier crossed to a win — `0.73` — after `etude-bigint` #197 raised the
   `to_decimal` recursion threshold that `write_decimal` rides, and 2048b/4096b deepened to `0.47`/`0.61`).
   Small/mid values sit ~1.1–1.7× behind on the base-conversion cost itself.
-- **`to_f64` wins at scale and for small values** — from 1024b up the direct big-int-ratio method is
-  3×–13× faster than `bigdecimal` (its conversion grows super-linearly), and small decimal literals take a
-  single-IEEE-op fast path that is ~23× faster (5.9 ns vs 138 ns). The mid-range large tiers (64b/256b,
-  full-width coefficients that miss the fast path but are small enough for bigdecimal's) still trail.
+- **`to_f64` wins at every size except 256b** — from 1024b up the direct big-int-ratio method is
+  3×–13× faster than `bigdecimal` (its conversion grows super-linearly); small decimal literals take a
+  single-IEEE-op fast path ~23× faster (5.9 ns vs 138 ns); and a coefficient that fits `u128` (the `64b`
+  tier) now takes a native `u128` port of the exact algorithm — `643 → 38 ns`, `3.39× → 0.20×`. Only `256b`
+  (coefficient just over `u128`, small enough for `bigdecimal`'s own conversion) still trails, on the
+  `Big`-`divmod` cost.
 - **`neg`/`abs`** sit at parity from 256b up (both are an `O(limbs)` clone plus a sign flip); only at 64b
   does `bigdecimal`'s small-value representation edge ahead.
 
@@ -341,5 +349,6 @@ rejecting it, so there is no same-semantics comparison to run.
    sharpen at small limb counts.
 2. **`sub` / `mul` large tiers** — bottlenecked on the underlying `Big` subtract/multiply
    (`etude-bigint`'s to shave).
-3. **`to_f64` at 64b/256b** — full-width coefficients miss both the `< 2^53` fast path and the exact
-   method's efficiency at those sizes.
+3. **`to_f64` at 256b** — the coefficient just exceeds `u128`, so it misses the native fast path and pays
+   the exact `Big` `divmod`; a `u256` extension of the fast path (or a faster small-`Big` `divmod` in
+   `etude-bigint`) would close it. (The `64b` tier is now a `0.20×` win via the native `u128` path.)
