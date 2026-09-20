@@ -63,10 +63,29 @@ is the delimiter density — one `chunk_tail`/`position`/`skip_in_chunk` cycle p
 per token, ~13k tokens over the input. The takeaway for tokenizer authors: scan token runs with the
 bulk path; reserve `peek`/`bump` for single-byte decisions (delimiters, one-byte lookahead).
 
+## `refill` — the leaf-boundary cost in isolation (runnable: `cargo bench -p etude-span -- refill`)
+
+Every leaf boundary the cursor crosses costs a `refill` (advance the chunk iterator, credit the leaving
+leaf's length to the absolute offset, skip any empty leaves). To isolate it, skip whole leaves —
+`skip_in_chunk(chunk_tail().len())` lands exactly at each leaf end and triggers one `refill`, reading no
+bytes — over a fixed 64 KiB input at four leaf sizes:
+
+| refill/skip_leaves | 4 KiB × 16 | 1 KiB × 64 | 256 B × 256 | 64 B × 1024 |
+|--------------------|------------|------------|-------------|-------------|
+| total | 98 ns | 332 ns | 1.46 µs | 5.76 µs |
+| per refill | 6.1 ns | 5.2 ns | 5.7 ns | 5.6 ns |
+
+The per-refill cost is **flat at ~5–6 ns regardless of leaf size** — it is fixed per-leaf work, not a
+function of leaf content, so streaming a rope of `K` leaves costs ~5–6 ns × `K` before any byte is
+touched. This composes the `cursor/bulk` scan numbers: at 64 B leaves refill is ~5.8 µs of bulk's
+~16 µs (~36 % — a fragmented rope spends over a third of a bulk scan just crossing boundaries), while at
+4 KiB leaves it is 98 ns of ~5.8 µs (~2 %) and the per-leaf byte work dominates. The practical read: the
+cursor is cheap to advance, but very small leaves make refill a real fraction of a scan — another reason
+a rope's leaves want to be chunk-sized, not byte-sized.
+
 ## Next targets
 
 The `peek_bump` path is the tokenizer's actual inner loop, and it is ~10–30× slower than a bulk
 `chunk_tail` scan — a real optimization target worth investigating (can the per-byte `peek`/`bump`
 overhead be tightened, or can more tokenizer scanning route through the bulk path?). That is a
-library-code question for a follow-up. A subsequent bench pass: the `skip_in_chunk` boundary-refill
-cost in isolation.
+library-code question for a follow-up.

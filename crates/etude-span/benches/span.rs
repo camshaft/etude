@@ -206,5 +206,39 @@ fn bench_tokenize(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_scan, bench_tokenize);
+/// Isolate the leaf-boundary refill. Skipping a whole leaf (`skip_in_chunk(chunk_tail().len())`
+/// lands exactly at the leaf end) triggers one `refill`, and this walk reads no bytes — so its cost
+/// is the refill plus the skip bookkeeping, once per leaf. Over a fixed 64 KiB input at four leaf
+/// sizes, total time divided by leaf count backs out the per-refill cost; contrast with the scan
+/// benches, which pay this refill plus the per-byte work. `refill` fires more often as leaves shrink.
+fn bench_refill(c: &mut Criterion) {
+    const N: usize = 64 * 1024;
+    let data = vec![0xABu8; N];
+
+    for &leaf in &[64usize, 256, 1024, 4096] {
+        let rope = rope_chunked(&data, leaf);
+        let leaves = N.div_ceil(leaf);
+        let label = format!("{leaf}B_x{leaves}");
+
+        let mut g = group(c, "refill/skip_leaves");
+        g.bench_function(BenchmarkId::from_parameter(&label), |b| {
+            b.iter(|| {
+                let mut cur = Cursor::new(&rope);
+                let mut seen = 0u64;
+                loop {
+                    let tail = cur.chunk_tail();
+                    if tail.is_empty() {
+                        break;
+                    }
+                    cur.skip_in_chunk(tail.len());
+                    seen += 1;
+                }
+                black_box(seen)
+            })
+        });
+        g.finish();
+    }
+}
+
+criterion_group!(benches, bench_scan, bench_tokenize, bench_refill);
 criterion_main!(benches);
