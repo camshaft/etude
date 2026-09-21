@@ -25,6 +25,25 @@ use etude_bytevec::{ByteVec, Rope, Utf8};
 /// A UTF-8 string rope: a validated-UTF-8 view over the [`etude-bytevec`](etude_bytevec) byte rope.
 ///
 /// `Clone` is O(1) (a rope refcount bump). Equality and ordering are by byte content.
+///
+/// # Examples
+/// ```
+/// use etude_strrope::StrRope;
+///
+/// // Grows like a `String`, but clone is an O(1) structural share rather than a copy.
+/// let mut s = StrRope::from("hello");
+/// s.push_str(", world");
+/// assert_eq!(s, "hello, world");
+/// assert_eq!(s.len(), 12); // length in bytes, like `str::len`
+///
+/// let clone = s.clone();
+/// assert_eq!(clone, s); // equality is by content
+///
+/// // Split at a byte offset (must be a char boundary): `s` keeps `[0, at)`, the tail is returned.
+/// let tail = s.split_off(5);
+/// assert_eq!(s, "hello");
+/// assert_eq!(tail, ", world");
+/// ```
 #[derive(Clone, Default)]
 pub struct StrRope(Rope<Utf8>);
 
