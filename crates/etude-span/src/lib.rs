@@ -24,6 +24,18 @@ use etude_bytevec::ByteVec;
 ///
 /// A span carries no bytes; resolve it against the originating rope (e.g. [`ByteVec::slice`]) to read
 /// them. Resolving it against a different rope is meaningless.
+///
+/// # Examples
+/// ```
+/// use etude_span::Span;
+///
+/// // A half-open byte range [start, end) into some input.
+/// let s = Span::new(2, 7);
+/// assert_eq!((s.start(), s.end(), s.len()), (2, 7, 5));
+///
+/// // `range()` resolves it against the source bytes.
+/// assert_eq!(&b"the quick fox"[s.range()], b"e qui");
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
     start: usize,
@@ -75,6 +87,21 @@ impl Span {
 /// the whole input. A per-byte [`ByteVec::byte_at`] would instead be an O(log n) tree descent every
 /// byte (O(n log n) total, cache-hostile). The absolute byte offset is tracked only to stamp span
 /// endpoints, never to fetch a byte.
+///
+/// # Examples
+/// ```
+/// use etude_bytevec::ByteVec;
+/// use etude_span::Cursor;
+///
+/// let input = ByteVec::from("ab");
+/// let mut c = Cursor::new(&input);
+/// assert_eq!(c.peek(), Some(b'a')); // read without advancing
+/// c.bump();
+/// assert_eq!((c.peek(), c.offset()), (Some(b'b'), 1));
+/// c.bump();
+/// assert_eq!(c.peek(), None); // exhausted; offset is the input length
+/// assert_eq!(c.offset(), 2);
+/// ```
 pub struct Cursor<'a> {
     chunks: etude_bytevec::Chunks<'a>,
     /// The current leaf. Empty exactly when the cursor is exhausted (past the last byte).
