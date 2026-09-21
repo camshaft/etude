@@ -39,15 +39,21 @@ impl<S: Buffer + ?Sized> Buffer for Tracked<'_, S> {
     }
 
     #[inline(always)]
-    fn put_uninit_slice<F, Error>(&mut self, payload_len: usize, f: F) -> Result<bool, Error>
+    unsafe fn put_uninit_slice<F, Error>(
+        &mut self,
+        payload_len: usize,
+        f: F,
+    ) -> Result<Option<usize>, Error>
     where
-        F: FnOnce(&mut UninitSlice) -> Result<(), Error>,
+        F: FnOnce(&mut UninitSlice) -> Result<usize, Error>,
     {
-        let did_write = self.storage.put_uninit_slice(payload_len, f)?;
-        if did_write {
-            self.written += payload_len;
+        // SAFETY: forwards the caller's contract straight through to the underlying storage.
+        let committed = unsafe { self.storage.put_uninit_slice(payload_len, f)? };
+        // Only the reported bytes are committed, so count exactly those.
+        if let Some(n) = committed {
+            self.written += n;
         }
-        Ok(did_write)
+        Ok(committed)
     }
 
     #[inline]

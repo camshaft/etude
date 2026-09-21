@@ -29,27 +29,31 @@ relies on to absorb received buffers without a copy. The takeaway for callers: d
 chunk-holding sink (a `Bytes` queue, a rope) keeps the payload zero-copy; draining into a contiguous
 `Vec`/`BytesMut`/slice pays the memcpy that the contiguous representation requires.
 
-## `put_uninit_slice` — the zero-init write path (runnable: `cargo bench -p etude-buffer -- put_uninit`)
+## `put_uninit_slice` — the trusted-count write path (runnable: `cargo bench -p etude-buffer -- put_uninit`)
 
 `put_uninit_slice` writes directly into a destination's spare capacity through a closure, avoiding a
-staging copy. Before the closure runs it zero-initializes the exposed region — a soundness floor so a
-closure that under-fills can never expose stale/uninitialized heap. When the closure fills the *whole*
-region (the common case: a socket read that fills its buffer), that memset is immediately overwritten,
-so it is pure overhead. Contrasting `put_uninit_slice` (zero-init + full fill) against a plain
-`put_slice` of the same payload (a single copy), into a fresh `Vec<u8>` (aarch64, jemalloc, release):
+staging copy. It does _not_ zero-initialize the exposed region: the closure reports how many leading
+bytes it wrote and exactly that prefix is committed (clamped to the slice length so a commit can never
+run past the exposed region). That makes it an `unsafe` method — the caller owes that the closure
+initialized at least the prefix it reports, the soundness contract behind breaker #33 — in exchange for
+staying on the single-copy floor of a plain `put_slice`. Contrasting `put_uninit_slice` (fill + reported
+commit) against a plain `put_slice` of the same payload (a single copy), into a fresh `Vec<u8>`
+(aarch64, jemalloc, release, one run):
 
 | op | 64 B | 1400 B | 64 KiB |
 |----|------|--------|--------|
-| `put_uninit_slice` (zero-init + fill) | 13.3 ns | 122 ns | 2.00 µs |
-| `put_slice` (single copy) | 6.8 ns | 87 ns | 1.22 µs |
-| redundant zero-init overhead | ~2.0× | ~1.4× | ~1.65× |
+| `put_uninit_slice` (no zero-init, fill) | 7.0 ns | 65 ns | 1.17 µs |
+| `put_slice` (single copy) | 5.6 ns | 68 ns | 1.12 µs |
 
-The zero-init is a full extra pass over the region, so it roughly doubles a small write and adds ~65% to
-a 64 KiB one — material, not noise. This is a real optimization target: when the caller knows the
-closure fills the entire region (or reports how many bytes it wrote), the redundant memset over the
-written prefix can be skipped, keeping only the soundness floor over any *unwritten* tail. That is an API
-change on a trait `etude-bytevec` depends on (its `Builder::for_socket_read` routes through this), so it
-is being pursued as a coordinated follow-up rather than folded in here.
+With the redundant memset gone, `put_uninit_slice` lands on the `put_slice` baseline at 1400 B and 64 KiB
+(1.17 vs 1.12 µs at 64 KiB, within noise; the two overlap at 1400 B), leaving only a small fixed
+per-call overhead at 64 B (7.0 vs 5.6 ns) — confirming the earlier delta was the zero-init pass and
+nothing else. An earlier revision zero-initialized the region as a soundness floor for untrusted
+closures; that cost a full extra pass (the "zero-init + fill" path measured ~2.00 µs at 64 KiB, ~1.65× the
+copy). The floor is now a caller obligation (`unsafe`) plus the impl-side clamp for hard bounds, so no
+closure can expose memory past the slice it was handed. `etude-bytevec` exposes the same trade one level
+up as `Builder::for_socket_read` (a real socket `recv` returning its syscall byte count is the motivating
+honest closure).
 
 ## `IoSlice` vectored drain (runnable: `cargo bench -p etude-buffer -- vectored`)
 
@@ -112,7 +116,7 @@ uses to absorb a received buffer without a copy: take the trailing chunk from `p
 ## Next targets
 
 Coverage of the core reader/writer paths is in place: `copy_into` (copy vs handle-move), `put_uninit_slice`
-(zero-init cost), the `IoSlice` vectored drain, the `Chain` reader, and the `partial_copy_into`
+(trusted-count path vs the `put_slice` floor), the `IoSlice` vectored drain, the `Chain` reader, and the `partial_copy_into`
 trailing-chunk hand-off. The `slice::vectored_copy` scatter helper is crate-private and currently used
 only in tests, so it is not on a benchable production path; it becomes a target if a production caller
 appears.

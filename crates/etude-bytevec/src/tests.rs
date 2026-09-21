@@ -2515,10 +2515,14 @@ fn builder_differential_against_model() {
                         // (exercising flush_and_reserve and short reads), fills a prefix, and
                         // reports exactly what it filled.
                         let preferred = d.len() + usize::from(extra % 8);
-                        builder.for_socket_read(preferred, |slice| {
-                            slice[..d.len()].copy_from_slice(d);
-                            d.len()
-                        });
+                        // SAFETY: an honest callback — it initializes exactly the `d.len()` prefix
+                        // it copies and reports that count.
+                        unsafe {
+                            builder.for_socket_read(preferred, |slice| {
+                                slice[..d.len()].copy_from_slice(d);
+                                d.len()
+                            });
+                        }
                         model.extend_from_slice(d);
                     }
                     BuilderOp::ReadChunk(n) => {

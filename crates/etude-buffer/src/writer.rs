@@ -52,29 +52,45 @@ pub trait Buffer {
     fn put_slice(&mut self, bytes: &[u8]);
 
     /// Writes `payload_len` bytes directly into the destination's memory via `f`, avoiding a staging
-    /// copy.
+    /// copy — trusting the closure's reported byte count instead of zero-initializing the region.
     ///
-    /// The `payload_len`-byte slice handed to `f` is zero-initialized first, and all `payload_len`
-    /// bytes are committed on success — so a closure that fills fewer bytes (or none) yields zeros for
-    /// the remainder, never uninitialized/stale memory. `f` is expected to fill the whole slice; the
-    /// zero-init is a soundness floor, not a substitute for filling it.
+    /// The `payload_len`-byte slice handed to `f` is _not_ zero-initialized. `f` returns the number
+    /// of leading bytes it initialized; exactly that many (clamped to `payload_len`, so a commit can
+    /// never run past the exposed region) are committed as content, and any tail beyond it is left
+    /// untouched and never exposed. Skipping the zero-init keeps this on the single-copy floor of a
+    /// plain [`put_slice`](Buffer::put_slice) — a socket read returning its syscall byte count is the
+    /// motivating trusted-count case.
     ///
-    /// Returns `true` if the write happened. `false` means the destination cannot serve a slice of
-    /// that length (e.g. its next chunk is too small); fall back to a regular `put_*` call.
+    /// Returns `Ok(Some(n))` where `n` is the committed byte count, or `Ok(None)` if the destination
+    /// cannot serve a slice of that length (e.g. its next chunk is too small); fall back to a regular
+    /// `put_*` call.
+    ///
+    /// # Safety
+    /// The closure must initialize at least the first `n` bytes it reports (its return value). Those
+    /// bytes are committed through an unchecked advance, so reporting a count larger than the region
+    /// it actually initialized commits uninitialized/stale memory as content — a safe-code
+    /// information leak. Use this only where the reported count is trusted (breaker #33). The
+    /// impl-side clamp to `payload_len` bounds the commit to the exposed region, but the
+    /// reported ≤ initialized obligation is on the caller.
     ///
     /// # Errors
     /// Returns any error `f` produces while filling the slice.
     #[inline(always)]
-    fn put_uninit_slice<F, Error>(&mut self, payload_len: usize, f: F) -> Result<bool, Error>
+    unsafe fn put_uninit_slice<F, Error>(
+        &mut self,
+        payload_len: usize,
+        f: F,
+    ) -> Result<Option<usize>, Error>
     where
-        F: FnOnce(&mut UninitSlice) -> Result<(), Error>,
+        F: FnOnce(&mut UninitSlice) -> Result<usize, Error>,
     {
-        // we can specialize on an empty payload
-        ensure!(payload_len == 0, Ok(false));
+        // we can specialize on an empty payload; a non-empty request declines so the caller falls
+        // back to a regular `put_*`.
+        ensure!(payload_len == 0, Ok(None));
 
         f(UninitSlice::new(&mut []))?;
 
-        Ok(true)
+        Ok(Some(0))
     }
 
     /// Returns the additional number of bytes that can be written to the storage

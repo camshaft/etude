@@ -81,26 +81,31 @@ fn bench_copy_into(c: &mut Criterion) {
 }
 
 /// `put_uninit_slice` writes directly into the destination's spare capacity via a closure, avoiding a
-/// staging copy — but it zero-initializes the exposed region first (a soundness floor against exposing
-/// stale/uninitialized heap if the closure under-fills). When the closure fills the whole region (the
-/// common case — a socket read that fills its buffer), that memset is immediately overwritten. This
-/// measures the redundant-memset cost by contrasting `put_uninit_slice` (memset + fill) against a plain
-/// `put_slice` of the same payload (a single copy), at three sizes. The delta is the zero-init pass.
+/// staging copy. It does not zero-initialize the exposed region: the closure reports how many leading
+/// bytes it wrote and exactly that prefix is committed (a trusted-count contract — breaker #33). With
+/// the redundant memset gone, filling the whole region is a single copy, so this contrasts
+/// `put_uninit_slice` (fill + reported commit) against a plain `put_slice` of the same payload (a
+/// single copy) at three sizes: the two should now sit on top of each other (the former zero-init
+/// delta is gone).
 fn bench_put_uninit(c: &mut Criterion) {
     for &n in &[64usize, 1400, 65536] {
         let label = n.to_string();
         let src = vec![0xABu8; n];
 
-        // put_uninit_slice: zero-inits `n` bytes, then the closure fills all `n` (double write).
+        // put_uninit_slice: no zero-init; the closure fills all `n` and reports `n`, so a single
+        // write commits the payload — on the `put_slice` floor.
         let mut g = group(c, "put_uninit/uninit_fill");
         g.bench_function(BenchmarkId::new("vec", &label), |b| {
             b.iter_batched(
                 || Vec::<u8>::with_capacity(n),
                 |mut dst| {
-                    dst.put_uninit_slice::<_, Infallible>(n, |u: &mut UninitSlice| {
-                        u.copy_from_slice(&src);
-                        Ok(())
-                    })
+                    // SAFETY: the closure initializes all `n` bytes it reports.
+                    unsafe {
+                        dst.put_uninit_slice::<_, Infallible>(n, |u: &mut UninitSlice| {
+                            u.copy_from_slice(&src);
+                            Ok(n)
+                        })
+                    }
                     .unwrap();
                     black_box(dst)
                 },
