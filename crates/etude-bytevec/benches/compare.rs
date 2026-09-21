@@ -700,43 +700,49 @@ fn bench_copy_to_bytes_mut(c: &mut Criterion) {
     g.finish();
 }
 
-/// Socket-read hot path: `Builder::for_socket_read` routes through `put_uninit_slice`, which
-/// zero-inits (memsets) the `payload_len`-byte spare region before the read closure runs (the #173
-/// info-leak fix). This measures that memset's cost so the deferred follow-up that would reclaim it
-/// (report bytes-written and skip the zero-init) is only pursued if it is material:
-/// - `memset_only`: the closure reports 0 bytes read — a pure memset of `n` bytes plus routing, no
-///   copy, no growth (isolates the zero-init cost);
-/// - `memset_plus_recv`: the full path — zero-init then the closure copies `n` bytes (a recv);
-/// - `recv_copy_no_memset`: the same `n`-byte copy into a fresh `BytesMut` with no zero-init — what
-///   the reclaim follow-up would leave. The `memset_plus_recv` − `recv_copy_no_memset` delta is the
-///   memset's marginal cost on the hot path.
+/// Socket-read hot path: `Builder::for_socket_read` routes through the trusted-count
+/// `put_uninit_slice`, which does _not_ zero-init the spare region — it commits exactly the byte
+/// count the read closure reports (breaker #33). With the memset gone the fill is a single copy, so
+/// this confirms the path lands on the plain-copy floor:
+/// - `report_zero`: the closure reports 0 bytes read — pure routing, no copy, no growth (isolates
+///   the per-call overhead now that no memset remains);
+/// - `recv_fill`: the full path — the closure copies `n` bytes (a recv) and reports `n`;
+/// - `plain_copy`: the same `n`-byte copy into a fresh `BytesMut` (`bytes::BufMut::put_slice`) — the
+///   single-copy baseline. `recv_fill` should now sit on top of `plain_copy` (the former zero-init
+///   delta is gone).
 fn bench_socket_read(c: &mut Criterion) {
     let mut g = group(c, "socket_read");
     for &n in &[1500usize, 65536] {
         let label = format!("{n}");
         let src = vec![0xABu8; n];
 
-        g.bench_function(BenchmarkId::new("memset_only", &label), |b| {
+        g.bench_function(BenchmarkId::new("report_zero", &label), |b| {
             let mut bld = ByteVec::builder(n);
             b.iter(|| {
-                bld.for_socket_read(n, |_slice| 0);
+                // SAFETY: reporting 0 initializes nothing and commits nothing.
+                unsafe {
+                    bld.for_socket_read(n, |_slice| 0);
+                }
                 black_box(&bld);
             })
         });
-        g.bench_function(BenchmarkId::new("memset_plus_recv", &label), |b| {
+        g.bench_function(BenchmarkId::new("recv_fill", &label), |b| {
             b.iter_batched_ref(
                 || ByteVec::builder(n),
                 |bld| {
-                    bld.for_socket_read(n, |slice| {
-                        slice[0..n].copy_from_slice(&src);
-                        n
-                    });
+                    // SAFETY: the closure initializes all `n` bytes it reports.
+                    unsafe {
+                        bld.for_socket_read(n, |slice| {
+                            slice[0..n].copy_from_slice(&src);
+                            n
+                        });
+                    }
                     black_box(&*bld);
                 },
                 BatchSize::SmallInput,
             )
         });
-        g.bench_function(BenchmarkId::new("recv_copy_no_memset", &label), |b| {
+        g.bench_function(BenchmarkId::new("plain_copy", &label), |b| {
             b.iter_batched(
                 || BytesMut::with_capacity(n),
                 |mut bm| {

@@ -44,13 +44,18 @@ impl<S: Buffer + ?Sized> Buffer for WriteOnce<'_, S> {
     }
 
     #[inline(always)]
-    fn put_uninit_slice<F, Error>(&mut self, payload_len: usize, f: F) -> Result<bool, Error>
+    unsafe fn put_uninit_slice<F, Error>(
+        &mut self,
+        payload_len: usize,
+        f: F,
+    ) -> Result<Option<usize>, Error>
     where
-        F: FnOnce(&mut UninitSlice) -> Result<(), Error>,
+        F: FnOnce(&mut UninitSlice) -> Result<usize, Error>,
     {
-        let did_write = self.storage.put_uninit_slice(payload_len, f)?;
-        self.did_write |= did_write && payload_len > 0;
-        Ok(did_write)
+        // SAFETY: forwards the caller's contract straight through to the underlying storage.
+        let committed = unsafe { self.storage.put_uninit_slice(payload_len, f)? };
+        self.did_write |= matches!(committed, Some(n) if n > 0);
+        Ok(committed)
     }
 
     #[inline]
@@ -158,13 +163,15 @@ mod tests {
         {
             let mut writer = writer.write_once();
             assert!(writer.has_remaining_capacity());
-            let did_write = writer
-                .put_uninit_slice(5, |slice| {
+            // SAFETY: the closure initializes exactly the 5 bytes it reports.
+            let committed = unsafe {
+                writer.put_uninit_slice(5, |slice| {
                     slice.copy_from_slice(b"hello");
-                    <Result<(), core::convert::Infallible>>::Ok(())
+                    <Result<usize, core::convert::Infallible>>::Ok(5)
                 })
-                .unwrap();
-            assert!(did_write);
+            }
+            .unwrap();
+            assert_eq!(committed, Some(5));
             assert_eq!(writer.remaining_capacity(), 0);
             assert!(!writer.has_remaining_capacity());
         }

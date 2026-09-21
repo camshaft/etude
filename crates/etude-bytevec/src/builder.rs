@@ -318,40 +318,40 @@ impl Builder {
         self.chunks = prefix;
     }
 
-    /// Reserves buffer space for reading from a socket.
-    pub fn for_socket_read<F: FnOnce(&mut bytes::buf::UninitSlice) -> usize>(
+    /// Reserves buffer space for reading from a socket and commits exactly the bytes the callback
+    /// reports — without zero-initializing the reserved region first, trusting the callback's
+    /// returned length.
+    ///
+    /// The callback is handed an uninitialized slice of `preferred_read_size` bytes and returns how
+    /// many leading bytes it wrote; exactly that many (clamped to the slice length so a commit can
+    /// never run past it) are committed as rope content. Skipping the zero-init keeps this on the
+    /// single-copy floor of a plain write — a real socket `recv` returning its syscall byte count is
+    /// the motivating trusted-count case.
+    ///
+    /// # Safety
+    /// The callback must initialize at least the first `n` bytes it reports (its return value).
+    /// Those bytes are committed through an unchecked advance, so returning a count larger than the
+    /// region it actually initialized commits uninitialized/stale heap as rope content — a safe-code
+    /// information leak (breaker #33). The impl-side clamp to `preferred_read_size` bounds the commit
+    /// to the exposed slice, but the reported ≤ initialized obligation is on the caller.
+    pub unsafe fn for_socket_read<F: FnOnce(&mut bytes::buf::UninitSlice) -> usize>(
         &mut self,
         preferred_read_size: usize,
         f: F,
     ) {
-        if preferred_read_size > self.head.spare_capacity_mut().len() {
-            self.flush_and_reserve(preferred_read_size);
-        }
-
-        let reported = self
-            .head
-            .put_uninit_slice(preferred_read_size, |slice| {
-                let len = f(slice);
-                Err(len)
+        // SAFETY: the caller upholds that `f` initializes exactly the prefix it reports; the trait
+        // impl clamps that count to `preferred_read_size` so the commit never runs past the slice.
+        // `Infallible` closure never errors, and the `Builder` impl reserves `preferred_read_size`
+        // first so the write is never declined (`None`).
+        let committed = unsafe {
+            self.put_uninit_slice(preferred_read_size, |slice| {
+                Ok::<usize, core::convert::Infallible>(f(slice))
             })
-            .unwrap_err();
-
-        // The callback was handed a slice of exactly `preferred_read_size` uninitialized bytes, so it
-        // can only have initialized bytes within that slice. A reported length beyond it (a buggy or
-        // hostile socket read claiming more than the buffer it was given) must not reach the unsafe
-        // `advance_mut`, or uninitialized heap memory past the slice would be committed as rope content
-        // (a safe-code info-leak). Clamp to the slice length so the commit is always sound; debug builds
-        // additionally assert the contract to surface caller misuse early.
+        };
         debug_assert!(
-            reported <= preferred_read_size,
-            "for_socket_read callback reported {reported} bytes for a {preferred_read_size}-byte slice"
+            matches!(committed, Ok(Some(_))),
+            "for_socket_read: builder declined a reserved write"
         );
-        let len = reported.min(preferred_read_size);
-
-        unsafe {
-            use bytes::BufMut;
-            self.head.advance_mut(len);
-        }
     }
 
     // flushes and reserves at least the specified `min_len`
@@ -415,15 +415,20 @@ impl writer::Buffer for Builder {
         usize::MAX
     }
 
-    fn put_uninit_slice<F, Error>(&mut self, payload_len: usize, f: F) -> Result<bool, Error>
+    unsafe fn put_uninit_slice<F, Error>(
+        &mut self,
+        payload_len: usize,
+        f: F,
+    ) -> Result<Option<usize>, Error>
     where
-        F: FnOnce(&mut bytes::buf::UninitSlice) -> Result<(), Error>,
+        F: FnOnce(&mut bytes::buf::UninitSlice) -> Result<usize, Error>,
     {
         if payload_len > self.head.spare_capacity_mut().len() {
             self.flush_and_reserve(payload_len);
         }
 
-        self.head.put_uninit_slice(payload_len, f)
+        // SAFETY: forwards the caller's reported-write contract to the head `BytesMut`.
+        unsafe { self.head.put_uninit_slice(payload_len, f) }
     }
 
     fn has_remaining_capacity(&self) -> bool {
@@ -593,21 +598,26 @@ mod tests {
         assert_eq!(out, b"seed-tail");
     }
 
-    /// red reproducer (breaker-bytevec): `for_socket_read` is a safe fn that trusts the safe
-    /// callback's returned length and feeds it to `unsafe BytesMut::advance_mut`. A callback that
-    /// returns `len > preferred_read_size` (but within the head's spare capacity) commits
-    /// uninitialized heap memory as rope content — safe code exposing uninit bytes (observed: a
-    /// 3-byte write claiming 100 yields a 100-byte rope whose tail is stale allocator garbage).
-    /// A sound implementation must either clamp the commit to the provided slice's length or
-    /// panic on the contract violation — either passes this test; committing past the slice fails.
+    /// Bounds guard (breaker-bytevec #33): `for_socket_read` feeds the callback's returned length to
+    /// `unsafe BytesMut::advance_mut`. `for_socket_read` is now `unsafe` — the caller owes that the
+    /// callback initialized the prefix it reports — but the impl still clamps the commit to the
+    /// slice length so that even a within-capacity *over-report* (a callback claiming more than the
+    /// `preferred_read_size` slice it was handed) can never advance past that slice into
+    /// uninitialized heap (observed pre-clamp: a 3-byte write claiming 100 yielded a 100-byte rope
+    /// whose tail was stale allocator garbage). A sound implementation clamps to the slice length or
+    /// panics — either passes; committing past the slice fails.
     #[test]
     fn for_socket_read_never_commits_more_than_the_provided_slice() {
         let result = std::panic::catch_unwind(|| {
             let mut b = ByteVec::builder(1024);
-            b.for_socket_read(8, |slice| {
-                slice[0..3].copy_from_slice(b"abc");
-                100 // a buggy callback claims more than the 8-byte slice it was given
-            });
+            // SAFETY: the callback initializes the 3 bytes it wrote; the over-report is a within-
+            // capacity contract violation the impl clamps — the property under test.
+            unsafe {
+                b.for_socket_read(8, |slice| {
+                    slice[0..3].copy_from_slice(b"abc");
+                    100 // a buggy callback claims more than the 8-byte slice it was given
+                });
+            }
             b
         });
         // A panicking defense is acceptable (Err); a clamping defense must not commit past the

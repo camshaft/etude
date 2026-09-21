@@ -29,31 +29,33 @@ impl<T: bytes::BufMut> Buffer for BufMut<'_, T> {
     }
 
     #[inline]
-    fn put_uninit_slice<F, Error>(&mut self, payload_len: usize, f: F) -> Result<bool, Error>
+    unsafe fn put_uninit_slice<F, Error>(
+        &mut self,
+        payload_len: usize,
+        f: F,
+    ) -> Result<Option<usize>, Error>
     where
-        F: FnOnce(&mut UninitSlice) -> Result<(), Error>,
+        F: FnOnce(&mut UninitSlice) -> Result<usize, Error>,
     {
         let chunk = self.buf_mut.chunk_mut();
 
-        // make sure the current chunk is capable of reading the entire slice
-        ensure!(chunk.len() >= payload_len, Ok(false));
+        // make sure the current chunk is capable of serving the whole slice
+        ensure!(chunk.len() >= payload_len, Ok(None));
 
-        // Zero-initialize the exposed region before the safe closure runs: on `Ok(())` we commit
-        // `payload_len` bytes via the unsafe `advance_mut`, so a closure that fills fewer bytes (or
-        // none) must not leave uninitialized heap to be exposed as content. A short fill now yields
-        // zeros, not stale memory.
-        // SAFETY: `payload_len <= chunk.len()` (checked above), so the whole written region is in bounds.
+        // No zero-init: per this method's safety contract the closure initializes the prefix it
+        // reports. Clamp the reported count to the slice length so the unchecked `advance_mut` can
+        // never commit past the exposed region (a hard bounds violation), independent of caller
+        // trust; a within-slice over-report is the caller's documented responsibility.
+        let reported = f(&mut chunk[..payload_len])?;
+        let committed = reported.min(payload_len);
+
+        // SAFETY: `committed <= payload_len <= chunk.len()`, and the caller upholds that the closure
+        // initialized the reported prefix, so the committed region is initialized and in bounds.
         unsafe {
-            core::ptr::write_bytes(chunk.as_mut_ptr(), 0, payload_len);
+            self.buf_mut.advance_mut(committed);
         }
 
-        f(&mut chunk[..payload_len])?;
-
-        unsafe {
-            self.buf_mut.advance_mut(payload_len);
-        }
-
-        Ok(true)
+        Ok(Some(committed))
     }
 }
 
@@ -72,13 +74,13 @@ macro_rules! impl_buf_mut {
             }
 
             #[inline]
-            fn put_uninit_slice<F, Error>(
+            unsafe fn put_uninit_slice<F, Error>(
                 &mut self,
                 payload_len: usize,
                 f: F,
-            ) -> Result<bool, Error>
+            ) -> Result<Option<usize>, Error>
             where
-                F: FnOnce(&mut UninitSlice) -> Result<(), Error>,
+                F: FnOnce(&mut UninitSlice) -> Result<usize, Error>,
             {
                 use bytes::BufMut;
 
@@ -88,24 +90,22 @@ macro_rules! impl_buf_mut {
                 )?
 
                 let chunk = self.chunk_mut();
-                ensure!(chunk.len() >= payload_len, Ok(false));
+                ensure!(chunk.len() >= payload_len, Ok(None));
 
-                // Zero-initialize the exposed region before the safe closure runs: on `Ok(())` we
-                // commit `payload_len` bytes via the unsafe `advance_mut`, so a closure that fills
-                // fewer bytes (or none) must not leave uninitialized memory to be exposed as content.
-                // A short fill now yields zeros, not stale heap.
-                // SAFETY: `payload_len <= chunk.len()` (checked above), so the region is in bounds.
+                // No zero-init: per this method's safety contract the closure initializes the
+                // prefix it reports. Clamp the reported count to the slice length so the unchecked
+                // `advance_mut` can never commit past the exposed region (a hard bounds violation);
+                // a within-slice over-report is the caller's documented responsibility.
+                let reported = f(&mut chunk[..payload_len])?;
+                let committed = reported.min(payload_len);
+
+                // SAFETY: `committed <= payload_len <= chunk.len()`, and the caller upholds that the
+                // closure initialized the reported prefix, so the region is initialized and in bounds.
                 unsafe {
-                    core::ptr::write_bytes(chunk.as_mut_ptr(), 0, payload_len);
+                    self.advance_mut(committed);
                 }
 
-                f(&mut chunk[..payload_len])?;
-
-                unsafe {
-                    self.advance_mut(payload_len);
-                }
-
-                Ok(true)
+                Ok(Some(committed))
             }
         }
     };
@@ -120,30 +120,61 @@ impl_buf_mut!(&mut [core::mem::MaybeUninit<u8>]);
 mod tests {
     use crate::{reader::Buffer as _, writer::Buffer as _};
 
-    /// Red (breaker-byterope): `put_uninit_slice` commits `payload_len` bytes on `Ok(())` without
-    /// any guarantee the closure initialized them — the trait documents no initialization
-    /// requirement, yet the `BufMut` bridge (and the standard-type impls routed through it, like
-    /// `Vec<u8>`) run `advance_mut(payload_len)` on trust. A safe no-op closure therefore commits
-    /// stale heap as initialized content: an information leak in the same class as the
-    /// `for_socket_read` finding (#33), reachable from fully safe code. The buffer is pre-poisoned
-    /// so the stale bytes are deterministic rather than possibly-fresh zero pages; `cargo miri`
-    /// gives the definitive undefined-behavior verdict on the same sequence. Fix-shape-agnostic: a
-    /// conforming implementation may decline the write (`false`), zero-initialize before calling
-    /// the closure, or otherwise guarantee initialization — committing stale bytes fails.
+    /// `put_uninit_slice` commits exactly the count the closure reports (a partial fill), leaving
+    /// the untouched tail uncommitted — no zero-init, no over-commit. A closure that reports 0
+    /// commits nothing, so it can never expose stale heap: the trusted-count contract's answer to
+    /// the #33 info-leak class (an honest closure reports only what it wrote; the impl commits only
+    /// that). The buffer is pre-poisoned so any accidental over-commit would surface as 0xAB rather
+    /// than possibly-fresh zero pages.
     #[test]
-    fn put_uninit_slice_must_not_commit_stale_heap_on_noop_closure() {
+    fn put_uninit_slice_commits_exactly_the_reported_prefix() {
         // Poison the allocation, then reset len so the spare capacity holds stale 0xAB bytes.
         let mut v: Vec<u8> = vec![0xAB; 64];
         v.clear();
-        let did = v
-            .put_uninit_slice(32, |_slice| Ok::<(), core::convert::Infallible>(()))
-            .unwrap();
+        // SAFETY: the closure initializes exactly the 3 bytes it reports.
+        let committed = unsafe {
+            v.put_uninit_slice::<_, core::convert::Infallible>(32, |slice| {
+                slice[0..3].copy_from_slice(b"abc");
+                Ok(3)
+            })
+        }
+        .unwrap();
+        assert_eq!(committed, Some(3));
+        assert_eq!(&v[..], b"abc");
+
+        // A closure that reports 0 commits nothing — no stale heap is ever exposed.
+        let mut v: Vec<u8> = vec![0xAB; 64];
+        v.clear();
+        // SAFETY: reporting 0 initializes nothing and commits nothing.
+        let committed =
+            unsafe { v.put_uninit_slice::<_, core::convert::Infallible>(32, |_slice| Ok(0)) }
+                .unwrap();
+        assert_eq!(committed, Some(0));
         assert!(
-            !did || v.iter().all(|&b| b == 0),
-            "stale heap committed as initialized content: len={} first_bytes={:?}",
-            v.len(),
-            &v[..v.len().min(8)]
+            v.is_empty(),
+            "a 0-report committed stale heap: {:?}",
+            &v[..]
         );
+    }
+
+    /// A within-slice over-report must be clamped to the slice length, so the unchecked advance can
+    /// never commit past the region the closure was handed (a hard bounds violation, independent of
+    /// caller trust). Here the closure fills the whole 8-byte slice but claims 100; the commit must
+    /// be exactly 8.
+    #[test]
+    fn put_uninit_slice_clamps_over_report_to_the_slice() {
+        let mut v: Vec<u8> = Vec::with_capacity(16);
+        // SAFETY: the closure initializes all 8 bytes; the over-report is clamped by the impl.
+        let committed = unsafe {
+            v.put_uninit_slice::<_, core::convert::Infallible>(8, |slice| {
+                slice.copy_from_slice(b"01234567");
+                Ok(100)
+            })
+        }
+        .unwrap();
+        assert_eq!(committed, Some(8));
+        assert_eq!(v.len(), 8);
+        assert_eq!(&v[..], b"01234567");
     }
 
     #[test]

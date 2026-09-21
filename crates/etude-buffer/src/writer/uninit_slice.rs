@@ -23,19 +23,26 @@ impl Buffer for &mut UninitSlice {
     }
 
     #[inline]
-    fn put_uninit_slice<F, Error>(&mut self, payload_len: usize, f: F) -> Result<bool, Error>
+    unsafe fn put_uninit_slice<F, Error>(
+        &mut self,
+        payload_len: usize,
+        f: F,
+    ) -> Result<Option<usize>, Error>
     where
-        F: FnOnce(&mut UninitSlice) -> Result<(), Error>,
+        F: FnOnce(&mut UninitSlice) -> Result<usize, Error>,
     {
-        ensure!(self.len() >= payload_len, Ok(false));
+        ensure!(self.len() >= payload_len, Ok(None));
 
-        f(&mut self[..payload_len])?;
+        // Clamp the reported count to the slice length so the cursor never advances past the
+        // exposed region; a within-slice over-report is the caller's documented responsibility.
+        let reported = f(&mut self[..payload_len])?;
+        let committed = reported.min(payload_len);
 
         let empty = UninitSlice::new(&mut []);
         let next = core::mem::replace(self, empty);
-        *self = &mut next[payload_len..];
+        *self = &mut next[committed..];
 
-        Ok(true)
+        Ok(Some(committed))
     }
 
     #[inline]
@@ -62,13 +69,15 @@ mod tests {
         {
             let mut writer = UninitSlice::new(&mut storage[..]);
             assert_eq!(writer.remaining_capacity(), 8);
-            let did_write = writer
-                .put_uninit_slice(5, |slice| {
+            // SAFETY: the closure initializes exactly the 5 bytes it reports.
+            let committed = unsafe {
+                writer.put_uninit_slice(5, |slice| {
                     slice.copy_from_slice(b"hello");
-                    <Result<(), core::convert::Infallible>>::Ok(())
+                    <Result<usize, core::convert::Infallible>>::Ok(5)
                 })
-                .unwrap();
-            assert!(did_write);
+            }
+            .unwrap();
+            assert_eq!(committed, Some(5));
             assert_eq!(writer.remaining_capacity(), 3);
         }
     }
