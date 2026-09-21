@@ -55,6 +55,29 @@ use etude_bigint::Big;
 ///
 /// The internal `{ coeff, exp }` representation is private and not part of the stable API. Construct
 /// values through the constructors and inspect them through the accessors.
+///
+/// # Examples
+/// ```
+/// use etude_decimal::{Decimal, RoundingMode};
+/// use core::str::FromStr;
+///
+/// // Method-form arithmetic (no operator overloads); equality is by exact numeric value — so
+/// // 0.1 + 0.2 is exactly 0.3, with none of the binary-float rounding drift.
+/// let sum = Decimal::from_str("0.1").unwrap().add(&Decimal::from_str("0.2").unwrap());
+/// assert_eq!(sum, Decimal::from_str("0.3").unwrap());
+///
+/// // Trailing zeros are not significant to the value: canonical form strips them, so 1.50 and 1.5
+/// // are the same decimal and render identically.
+/// let scaled = Decimal::from_str("1.50").unwrap();
+/// assert_eq!(scaled, Decimal::from_str("1.5").unwrap());
+/// assert_eq!(scaled.to_string(), "1.5");
+///
+/// // Exact division returns `None` for a non-terminating quotient; `div_round` always yields a value.
+/// let (one, three) = (Decimal::from_i64(1), Decimal::from_i64(3));
+/// assert!(one.div(&three).is_none()); // 1/3 does not terminate in base 10
+/// let third = one.div_round(&three, 4, RoundingMode::HalfEven).unwrap();
+/// assert_eq!(third.to_string(), "0.3333");
+/// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Decimal {
     /// The signed coefficient (significand); carries the sign of the whole value. Canonical: not
