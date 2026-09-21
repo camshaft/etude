@@ -36,6 +36,28 @@ use etude_bigint::Big;
 ///
 /// The internal `{ num, den }` representation is private and not part of the stable API. Construct values
 /// through the constructors and inspect them through the accessors.
+///
+/// # Examples
+/// ```
+/// use etude_rational::Rational;
+/// use etude_bigint::Big;
+///
+/// // Method-form arithmetic (no operator overloads); equality is by mathematical value.
+/// let half = Rational::from_ratio_i64(1, 2).unwrap();
+/// let third = Rational::from_ratio_i64(1, 3).unwrap();
+/// assert_eq!(half.add(&third), Rational::from_ratio_i64(5, 6).unwrap()); // 1/2 + 1/3 = 5/6
+///
+/// // Values are kept in lowest terms, so equal fractions are equal and share identical fields:
+/// // 2/4 is the same value as 1/2.
+/// let reduced = Rational::from_ratio_i64(2, 4).unwrap();
+/// assert_eq!(reduced, half);
+/// assert_eq!(reduced.numer(), &Big::from_i64(1));
+/// assert_eq!(reduced.denom(), &Big::from_i64(2));
+///
+/// // Division is fallible only on a zero divisor; the sign lives on the numerator.
+/// assert!(Rational::one().div(&Rational::zero()).is_none());
+/// assert!(Rational::from_ratio_i64(-1, 2).unwrap().is_negative());
+/// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Rational {
     /// Numerator; carries the sign of the whole value. Canonical: `gcd(|num|, den) == 1`.
