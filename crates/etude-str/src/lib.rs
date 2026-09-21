@@ -22,6 +22,23 @@ use std::str::Utf8Error;
 
 /// A `Bytes`-backed UTF-8 string. `Clone` is an O(1) refcount bump. Deref/Borrow/AsRef to `str` so it
 /// works anywhere a `&str` does; equality and ordering are by string content.
+///
+/// # Examples
+/// ```
+/// use etude_str::Str;
+///
+/// let name = Str::from("cadenza");
+/// assert_eq!(name.as_str(), "cadenza");
+/// assert_eq!(name.len(), 7);
+///
+/// // Deref<str>: the `str` API is available directly.
+/// assert!(name.starts_with("cad"));
+///
+/// // Cloning is a refcount bump on the same allocation, not a copy; equality is by content.
+/// let alias = name.clone();
+/// assert_eq!(name, alias);
+/// assert_eq!(name, "cadenza");
+/// ```
 #[derive(Clone, Default)]
 pub struct Str(Bytes);
 
