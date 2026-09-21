@@ -29,6 +29,25 @@ use core::cmp::Ordering;
 /// and any future small-value inlining may change without notice. Construct values through the
 /// constructors ([`Big::zero`], [`Big::from_i64`], the `from_*_bytes` parsers) and inspect them through
 /// the accessors ([`Big::is_zero`], [`Big::is_negative`], [`Big::cmp`], the `to_*` conversions).
+///
+/// # Examples
+/// ```
+/// use etude_bigint::Big;
+///
+/// // Arithmetic is method-form (no operator overloads); equality is by numeric value.
+/// let sum = Big::from_i64(2).add(&Big::from_i64(3));
+/// assert_eq!(sum, Big::from_i64(5));
+/// assert_eq!(sum.to_decimal_string(), "5");
+///
+/// // Arbitrary precision: this product overflows i128, but Big holds it exactly.
+/// let ten_18 = Big::from_i128(1_000_000_000_000_000_000); // 10^18
+/// let ten_36 = ten_18.mul(&ten_18); // 10^36
+/// assert_eq!(ten_36.to_decimal_string().len(), 37); // "1" followed by 36 zeros
+///
+/// // Sign helpers.
+/// assert!(Big::from_i64(-7).is_negative());
+/// assert_eq!(Big::from_i64(-7).abs(), Big::from_i64(7));
+/// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Big {
     /// Sign: `true` = negative. Always `false` when `mag` is empty (zero is non-negative, canonical).
