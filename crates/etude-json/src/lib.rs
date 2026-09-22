@@ -20,8 +20,11 @@
 //! A [`TokenKind::String`] token carries the span of its raw content (between the quotes) and a flag
 //! for whether that content contains escape sequences. A caller can:
 //! - take the raw content span as a zero-copy rope slice when [`Token::string_has_escapes`] is
-//!   `false` (the common case), or
-//! - call [`Token::decode_string`] to materialize the unescaped `String` when escapes are present.
+//!   `false` (the common case),
+//! - call [`Token::decode_str_rope`] for the string value as a [`StrRope`] over the input's chunks —
+//!   a zero-copy borrow when there are no escapes, a single built leaf when there are (the
+//!   copy-avoiding string value), or
+//! - call [`Token::decode_string`] to materialize a flat unescaped `String`.
 //!
 //! # Strictness
 //! By default ([`Strictness::Strict`], via [`Tokenizer::new`]) the tokenizer enforces full JSON
@@ -44,6 +47,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use etude_bytevec::ByteVec;
 use etude_span::Cursor;
+use etude_strrope::StrRope;
 
 /// A half-open byte range into the input rope, re-exported from [`etude_span`]. A [`Token`]'s
 /// [`Token::span`] is resolved against the originating rope (e.g. [`ByteVec::slice`]) to read bytes.
@@ -174,6 +178,36 @@ impl Token {
             Payload::Str { content, .. } => Some(decode_content(input, content)),
             _ => None,
         }
+    }
+
+    /// Materialize the content of a [`TokenKind::String`] token as a [`StrRope`] — a UTF-8 string
+    /// rope over the input's chunks; `None` for any other kind. This is the copy-avoiding string
+    /// value: prefer it over [`Token::decode_string`], which allocates a flat `String`.
+    ///
+    /// - No escapes (the common case): the returned `StrRope` is a zero-copy structural-share of the
+    ///   input rope's chunks (via [`StrRope::from_utf8`] over a [`ByteVec::slice`] of the content
+    ///   span) — no bytes are copied.
+    /// - Escapes present: the unescaped content is built into a fresh `StrRope` (`\n`, `\t`, `\uXXXX`
+    ///   with surrogate-pair joining, …), pushing whole runs of ordinary bytes at a time.
+    ///
+    /// `input` must be the rope this token was tokenized from. The content was validated during
+    /// tokenization, so decoding is infallible.
+    pub fn decode_str_rope(&self, input: &ByteVec) -> Option<StrRope> {
+        let info = self.string?;
+        if !info.has_escapes {
+            // Zero-copy borrow: a rope slice is O(1) structural-share, and `from_utf8` reuses the
+            // allocation (validation only). Valid JSON content is valid UTF-8, so this succeeds; the
+            // rare error path falls through to the escape decoder (which is lossy-tolerant).
+            if let Ok(rope) = StrRope::from_utf8(input.slice(info.content.range())) {
+                return Some(rope);
+            }
+        }
+        // Escapes present: decode the unescaped content into one contiguous buffer (the bulk-copy
+        // path), then wrap it as a single rope leaf. Appending each run/escape to the rope separately
+        // instead would allocate a leaf per piece — pathological for escape-dense strings. (Moving the
+        // buffer in via `from_utf8` to skip the wrap's copy was measured slower here: its validation
+        // scan plus a guard scan cost more than the single copy on many short strings.)
+        Some(StrRope::from(decode_content(input, info.content)))
     }
 
     /// For a [`TokenKind::Number`] token, whether the literal is an integer — no fraction and no
@@ -799,8 +833,9 @@ fn decode_content(input: &ByteVec, content: Span) -> String {
         }
         pos += 2;
     }
-    // The content was validated (well-formed escapes) during tokenization; raw bytes on the paths that
-    // matter are valid UTF-8. `from_utf8_lossy` keeps decoding infallible for any residual bad byte.
+    // The content was validated (well-formed escapes) during tokenization; raw bytes on the paths
+    // that matter are valid UTF-8. `from_utf8_lossy` keeps decoding infallible for any residual bad
+    // byte.
     match String::from_utf8(out) {
         Ok(s) => s,
         Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
