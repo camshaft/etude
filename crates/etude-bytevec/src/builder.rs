@@ -11,6 +11,19 @@ use etude_buffer::{reader, writer};
 
 const DEFAULT_CAPACITY: usize = 1 << 17;
 
+/// The signature of a [`Builder`] freeze hook.
+///
+/// A freeze hook converts a completed [`BytesMut`] chunk — the builder's head buffer, or a
+/// [`BytesMut`] handed to it — into the immutable [`Bytes`] appended to the [`ByteVec`]. The
+/// default is [`BytesMut::freeze`], which reuses the buffer in place with no copy.
+///
+/// Overriding it lets a caller decide *how* a chunk freezes without the builder having to know
+/// about any particular policy. The motivating case is secret hygiene: a hook can wrap the
+/// buffer in a zeroize-on-drop owner and produce the chunk via [`Bytes::from_owner`] instead of
+/// [`BytesMut::freeze`], so the backing allocation is wiped when the last chunk referencing it
+/// drops. See [`Builder::with_freeze`].
+pub type FreezeHook = fn(BytesMut) -> Bytes;
+
 /// A builder for efficiently constructing a [`ByteVec`] by buffering writes.
 ///
 /// The builder maintains a head buffer for direct writes and a rope of completed chunks. This allows
@@ -40,6 +53,9 @@ pub struct Builder {
     /// larger chunks are held by reference (zero-copy). `0` means never copy — reference
     /// everything.
     inline_threshold: usize,
+    /// How a completed [`BytesMut`] chunk becomes the immutable [`Bytes`] stored in the rope.
+    /// Defaults to [`BytesMut::freeze`]; overridden via [`Builder::with_freeze`].
+    freeze: FreezeHook,
 }
 
 impl Default for Builder {
@@ -70,6 +86,7 @@ impl Builder {
             head: BytesMut::new(),
             capacity,
             inline_threshold: 0,
+            freeze: BytesMut::freeze,
         }
     }
 
@@ -97,6 +114,68 @@ impl Builder {
     /// Returns the current inline threshold. See [`Builder::with_inline_threshold`].
     pub fn inline_threshold(&self) -> usize {
         self.inline_threshold
+    }
+
+    /// Sets the freeze hook: how each completed [`BytesMut`] chunk becomes the immutable
+    /// [`Bytes`] stored in the rope.
+    ///
+    /// The hook is invoked at every point where the builder turns a [`BytesMut`] into a chunk:
+    /// flushing the head buffer (on capacity overflow, [`Builder::split`], [`Builder::split_to`],
+    /// [`Builder::append`]/[`Builder::extend`], and [`Builder::finish`]) and freezing a
+    /// [`BytesMut`] handed to [`put_bytes_mut`](writer::Buffer::put_bytes_mut). It is *not*
+    /// invoked for chunks supplied already-frozen as [`Bytes`].
+    ///
+    /// The default is [`BytesMut::freeze`], which converts the buffer in place with no copy.
+    /// Overriding it keeps the builder generic while letting the caller choose the freeze policy.
+    ///
+    /// # Examples
+    ///
+    /// Wipe secret-carrying chunks when they drop by wrapping the buffer in a zeroize-on-drop
+    /// owner and producing the chunk via [`Bytes::from_owner`] instead of [`BytesMut::freeze`].
+    /// The builder never sees the secret policy — it just calls the hook:
+    ///
+    /// ```
+    /// use etude_bytevec::ByteVec;
+    /// use etude_buffer::writer::Buffer;
+    /// use bytes::{Bytes, BytesMut};
+    ///
+    /// // An owner that zeroes its backing buffer when the last chunk referencing it drops.
+    /// struct ZeroizeOnDrop(BytesMut);
+    /// impl AsRef<[u8]> for ZeroizeOnDrop {
+    ///     fn as_ref(&self) -> &[u8] {
+    ///         &self.0
+    ///     }
+    /// }
+    /// impl Drop for ZeroizeOnDrop {
+    ///     fn drop(&mut self) {
+    ///         self.0.fill(0);
+    ///     }
+    /// }
+    ///
+    /// fn zeroizing_freeze(buf: BytesMut) -> Bytes {
+    ///     Bytes::from_owner(ZeroizeOnDrop(buf))
+    /// }
+    ///
+    /// let mut builder = ByteVec::builder(1024).with_freeze(zeroizing_freeze);
+    /// builder.put_slice(b"secret");
+    /// let secret = builder.finish();
+    /// assert_eq!(secret, b"secret");
+    /// ```
+    pub fn with_freeze(mut self, freeze: FreezeHook) -> Self {
+        self.freeze = freeze;
+        self
+    }
+
+    /// Returns the current freeze hook. See [`Builder::with_freeze`].
+    pub fn freeze_hook(&self) -> FreezeHook {
+        self.freeze
+    }
+
+    /// Converts a completed [`BytesMut`] chunk into immutable [`Bytes`] via the configured
+    /// freeze hook (see [`Builder::with_freeze`]).
+    #[inline]
+    fn freeze_chunk(&self, buf: BytesMut) -> Bytes {
+        (self.freeze)(buf)
     }
 
     /// Returns the total number of bytes in the builder.
@@ -251,8 +330,9 @@ impl Builder {
 
         // check if we need to move some of the head into the chunks
         if let Some(remaining) = at.checked_sub(self.chunks.len()).filter(|v| *v > 0) {
-            self.chunks
-                .push_back(self.head.split_to(remaining).freeze());
+            let buf = self.head.split_to(remaining);
+            let chunk = self.freeze_chunk(buf);
+            self.chunks.push_back(chunk);
         }
 
         self.chunks.split_to(at)
@@ -277,9 +357,10 @@ impl Builder {
     /// assert_eq!(result, b"hello world");
     /// ```
     pub fn finish(self) -> ByteVec {
+        let freeze = self.freeze;
         let mut chunks = self.chunks;
         if !self.head.is_empty() {
-            chunks.push_back(self.head.freeze());
+            chunks.push_back(freeze(self.head));
         }
         chunks
     }
@@ -359,14 +440,17 @@ impl Builder {
         let capacity = self.capacity.max(min_len);
         let head = core::mem::replace(&mut self.head, BytesMut::with_capacity(capacity));
         if !head.is_empty() {
-            self.chunks.push_back(head.freeze());
+            let chunk = self.freeze_chunk(head);
+            self.chunks.push_back(chunk);
         }
     }
 
     // flushes the current buffer, if non-empty
     fn flush(&mut self) {
         if !self.head.is_empty() {
-            self.chunks.push_back(self.head.split().freeze());
+            let buf = self.head.split();
+            let chunk = self.freeze_chunk(buf);
+            self.chunks.push_back(chunk);
         }
     }
 }
@@ -378,6 +462,7 @@ impl From<ByteVec> for Builder {
             head: BytesMut::new(),
             capacity: DEFAULT_CAPACITY,
             inline_threshold: 0,
+            freeze: BytesMut::freeze,
         }
     }
 }
@@ -453,7 +538,8 @@ impl writer::Buffer for Builder {
             return;
         }
         self.flush();
-        self.chunks.push_back(bytes.freeze());
+        let chunk = self.freeze_chunk(bytes);
+        self.chunks.push_back(chunk);
     }
 }
 
@@ -626,5 +712,107 @@ mod tests {
         let mut b = ByteVec::builder(1024);
         b.put_slice(b"abc");
         assert_eq!(b.split_to(4), Err(ByteVecError::OutOfBounds(4)));
+    }
+
+    // The freeze hook is exercised through a module-global counter. Only this test references
+    // `FREEZE_CALLS`, so there is no cross-test race even under parallel execution.
+    static FREEZE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_freeze(buf: BytesMut) -> Bytes {
+        FREEZE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        buf.freeze()
+    }
+
+    #[test]
+    fn default_freeze_hook_is_bytes_mut_freeze() {
+        // A builder with no override still produces correct content via the default hook.
+        let mut b = ByteVec::builder(1024);
+        b.put_slice(b"plain");
+        assert_eq!(b.finish(), b"plain");
+    }
+
+    #[test]
+    fn custom_freeze_hook_runs_at_every_chunk_boundary() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        // Small capacity so a second head write overflows and flushes the first.
+        let mut b = ByteVec::builder(4).with_freeze(counting_freeze);
+
+        // The getter returns a working hook (this invocation is not part of the count below).
+        assert_eq!(
+            b.freeze_hook()(BytesMut::from(&b"ok"[..])),
+            Bytes::from(&b"ok"[..])
+        );
+
+        // Reset the counter after the getter check; count only the builder-driven freezes.
+        FREEZE_CALLS.store(0, SeqCst);
+
+        b.put_slice(b"abcd"); // fills the 4-byte head
+        b.put_slice(b"ef"); // overflow -> flush_and_reserve freezes "abcd"           (call 1)
+        let front = b.split_to(5).unwrap(); // freezes head prefix "e" to reach index 5 (call 2)
+        assert_eq!(front, b"abcde");
+        b.put_bytes_mut(BytesMut::from(&b"XY"[..])); // flush freezes head "f" (call 3), then
+        //                                              freezes the "XY" BytesMut chunk        (call 4)
+        b.put_slice(b"gh"); // buffered in the (now empty) head
+        let out = b.finish(); // finish freezes the trailing head "gh"                (call 5)
+        assert_eq!(out, b"fXYgh");
+
+        assert_eq!(
+            FREEZE_CALLS.load(SeqCst),
+            5,
+            "the freeze hook must run for every BytesMut the builder turns into a chunk"
+        );
+    }
+
+    // Owner-drop tracking for the `Bytes::from_owner` zeroize-style hook. Only this test and its
+    // owner reference `OWNERS_DROPPED`.
+    static OWNERS_DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    struct TrackedZeroize(BytesMut);
+    impl AsRef<[u8]> for TrackedZeroize {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl Drop for TrackedZeroize {
+        fn drop(&mut self) {
+            self.0.fill(0);
+            OWNERS_DROPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn zeroizing_freeze(buf: BytesMut) -> Bytes {
+        Bytes::from_owner(TrackedZeroize(buf))
+    }
+
+    #[test]
+    fn from_owner_freeze_hook_preserves_content_and_drops_owner() {
+        use std::sync::atomic::Ordering::SeqCst;
+        OWNERS_DROPPED.store(0, SeqCst);
+
+        let secret = {
+            let mut b = ByteVec::builder(1024).with_freeze(zeroizing_freeze);
+            b.put_slice(b"secret-key");
+            let out = b.finish();
+            // Content is identical to a plain freeze — the owner is transparent to readers.
+            assert_eq!(out, b"secret-key");
+            assert_eq!(
+                OWNERS_DROPPED.load(SeqCst),
+                0,
+                "owner still alive while held"
+            );
+            out
+        };
+        // The chunk still holds the owner alive here.
+        assert_eq!(secret, b"secret-key");
+        assert_eq!(OWNERS_DROPPED.load(SeqCst), 0);
+
+        drop(secret);
+        // Dropping the last reference runs the zeroize-on-drop owner exactly once.
+        assert_eq!(
+            OWNERS_DROPPED.load(SeqCst),
+            1,
+            "the zeroize-on-drop owner must run when the last chunk drops"
+        );
     }
 }
