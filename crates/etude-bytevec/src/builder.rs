@@ -902,4 +902,34 @@ mod tests {
         assert_eq!(out, b"abcd");
         assert_eq!(out.chunks().len(), 1);
     }
+
+    #[test]
+    fn with_behavior_applies_to_already_buffered_content() {
+        // Pins the consumer's exact seal pattern: `builder(cap).<writes>.with_behavior(B).finish()`.
+        // Switching the behavior AFTER buffering must (a) keep the buffered bytes and (b) apply the
+        // new behavior's freeze to that already-buffered content on finish — otherwise a secret
+        // written before `with_behavior` would freeze under the default (un-wiped) behavior.
+        use std::sync::atomic::Ordering::SeqCst;
+        FREEZE_CALLS.store(0, SeqCst);
+
+        let mut b = ByteVec::builder(1024);
+        b.put_slice(b"secret"); // buffered under the default behavior, not yet frozen
+        let mut b = b.with_behavior(CountingBehavior);
+        b.put_slice(b"-more");
+        let out = b.finish(); // the CountingBehavior freezes the whole buffered head
+
+        assert_eq!(out, b"secret-more");
+        assert_eq!(
+            FREEZE_CALLS.load(SeqCst),
+            1,
+            "the switched-in behavior must freeze the content buffered before with_behavior"
+        );
+    }
+
+    #[test]
+    fn default_behavior_is_zero_sized() {
+        // The operator's requirement: the default behavior is a ZST, so the parameterized builder
+        // costs nothing over the plain one for the common case.
+        assert_eq!(core::mem::size_of::<DefaultBehavior>(), 0);
+    }
 }
