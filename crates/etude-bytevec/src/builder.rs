@@ -5,51 +5,28 @@
 //! and folding completed chunks into the rope.
 
 use super::{ByteVec, ByteVecError};
+use alloc::boxed::Box;
 use bytes::{Bytes, BytesMut};
 use etude_buffer::writer::Buffer as _;
 use etude_buffer::{reader, writer};
 
 const DEFAULT_CAPACITY: usize = 1 << 17;
 
-/// The policy a [`Builder`] runs on: how it sizes its head buffer, when it inlines small chunks, and
-/// how a completed chunk buffer becomes immutable [`Bytes`].
+/// How a completed chunk buffer becomes the immutable [`Bytes`] stored in the rope.
 ///
-/// A [`Builder`] is *parameterized* over this behavior trait, so a caller can control every builder
-/// knob by supplying one `Behavior` impl — without reimplementing the builder. Every method has a
-/// default matching the plain builder, so an impl overrides only the knobs it cares about, and the
-/// zero-sized [`DefaultBehavior`] (all defaults) leaves existing callers unchanged.
+/// A [`Builder`] runs the standard behavior ([`BytesMut::freeze`] — reuse the buffer in place, no
+/// copy) by default. A caller can override *just the freeze step* for the narrow case that needs it,
+/// via [`Builder::with_behavior`], without the builder knowing about any particular policy.
 ///
-/// The motivating override is [`Behavior::freeze`] for secret hygiene: wrap the completed buffer in
-/// a zeroize-on-drop owner and produce the chunk via [`Bytes::from_owner`] instead of
-/// [`BytesMut::freeze`], so the backing allocation is wiped when the last chunk drops.
-pub trait Behavior {
-    /// The head-buffer capacity a builder uses when one is not given explicitly (e.g. via
-    /// [`Builder::default`] or [`Builder::from_behavior`]). Defaults to 128 KiB.
-    fn default_capacity(&self) -> usize {
-        DEFAULT_CAPACITY
-    }
-
-    /// Chunks with `len <= inline_threshold()` handed to `put_bytes`/`put_bytes_mut` are copied into
-    /// the contiguous head buffer; larger chunks are held by reference (zero-copy). Defaults to `0`
-    /// (reference everything). A builder created from this behavior starts at this value;
-    /// [`Builder::with_inline_threshold`] can still override it per instance.
-    fn inline_threshold(&self) -> usize {
-        0
-    }
-
-    /// Converts a completed chunk buffer into the immutable [`Bytes`] stored in the rope. Defaults
-    /// to [`BytesMut::freeze`] — reuse the buffer in place, no copy.
-    fn freeze(&self, buf: BytesMut) -> Bytes {
-        buf.freeze()
-    }
+/// The motivating override is secret hygiene: wrap the completed buffer in a zeroize-on-drop owner
+/// and produce the chunk via [`Bytes::from_owner`] instead of [`BytesMut::freeze`], so the backing
+/// allocation is wiped when the last chunk referencing it drops. That case is uncommon, so the
+/// behavior is a *runtime* opt-in (a `dyn Behavior` the builder holds) rather than a type parameter
+/// — the default path allocates nothing and pays nothing.
+pub trait Behavior: core::fmt::Debug {
+    /// Converts a completed chunk buffer into the immutable [`Bytes`] stored in the rope.
+    fn freeze(&self, buf: BytesMut) -> Bytes;
 }
-
-/// The default [`Behavior`]: 128 KiB capacity, no inline threshold, and [`BytesMut::freeze`] — a
-/// zero-sized type, so `Builder<DefaultBehavior>` costs and behaves exactly as the plain builder.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultBehavior;
-
-impl Behavior for DefaultBehavior {}
 
 /// A builder for efficiently constructing a [`ByteVec`] by buffering writes.
 ///
@@ -57,9 +34,8 @@ impl Behavior for DefaultBehavior {}
 /// for efficient buffering of writes while preserving the chunked, structurally-shared nature of
 /// [`ByteVec`].
 ///
-/// The type parameter `B` is the [`Behavior`] — the builder's capacity/threshold/freeze policy. It
-/// defaults to [`DefaultBehavior`], so `Builder` (unparameterized) behaves exactly as before; use
-/// [`Builder::with_behavior`] or [`Builder::from_behavior`] to select another.
+/// By default the builder runs the standard freeze behavior; [`Builder::with_behavior`] installs a
+/// runtime [`Behavior`] override (e.g. zeroize-on-drop) for the narrow case that needs it.
 ///
 /// # Examples
 ///
@@ -76,28 +52,27 @@ impl Behavior for DefaultBehavior {}
 /// assert_eq!(byte_rope, b"hello world");
 /// ```
 #[derive(Debug)]
-pub struct Builder<B = DefaultBehavior> {
+pub struct Builder {
     chunks: ByteVec,
     head: BytesMut,
     capacity: usize,
     /// Chunks with `len <= inline_threshold` are copied into the contiguous head buffer;
     /// larger chunks are held by reference (zero-copy). `0` means never copy — reference
-    /// everything. Initialized from [`Behavior::inline_threshold`]; overridable per instance via
-    /// [`Builder::with_inline_threshold`].
+    /// everything. Overridable per instance via [`Builder::with_inline_threshold`].
     inline_threshold: usize,
-    /// The [`Behavior`] policy — capacity/threshold defaults and how a completed [`BytesMut`] chunk
-    /// becomes immutable [`Bytes`]. Defaults to [`DefaultBehavior`]; selected via
-    /// [`Builder::with_behavior`]/[`Builder::from_behavior`].
-    behavior: B,
+    /// The freeze-behavior override. `None` is the standard behavior ([`BytesMut::freeze`], no
+    /// allocation on the common path); `Some` holds a runtime [`Behavior`] installed via
+    /// [`Builder::with_behavior`] (e.g. zeroize-on-drop).
+    behavior: Option<Box<dyn Behavior>>,
 }
 
-impl Default for Builder<DefaultBehavior> {
+impl Default for Builder {
     fn default() -> Self {
-        Self::from_behavior(DefaultBehavior)
+        Self::new(DEFAULT_CAPACITY)
     }
 }
 
-impl Builder<DefaultBehavior> {
+impl Builder {
     /// The head-buffer capacity used by [`Builder::default`] (128 KiB).
     pub const DEFAULT_CAPACITY: usize = DEFAULT_CAPACITY;
 
@@ -106,7 +81,8 @@ impl Builder<DefaultBehavior> {
     /// The capacity determines the size of the internal buffer used for direct writes.
     /// When this buffer is full, it will be flushed to the rope of chunks.
     ///
-    /// The builder uses the [`DefaultBehavior`]; call [`Builder::with_behavior`] to select another.
+    /// The builder runs the standard freeze behavior; call [`Builder::with_behavior`] to install an
+    /// override.
     ///
     /// # Examples
     ///
@@ -120,28 +96,11 @@ impl Builder<DefaultBehavior> {
             chunks: ByteVec::new(),
             head: BytesMut::new(),
             capacity,
-            inline_threshold: DefaultBehavior.inline_threshold(),
-            behavior: DefaultBehavior,
+            inline_threshold: 0,
+            behavior: None,
         }
     }
-}
 
-impl<B: Behavior> Builder<B> {
-    /// Creates a [`Builder`] driven by the given [`Behavior`], taking its head-buffer capacity and
-    /// inline threshold from the behavior's [`default_capacity`](Behavior::default_capacity) and
-    /// [`inline_threshold`](Behavior::inline_threshold).
-    ///
-    /// This is the "control the builder with one impl" entry point — the behavior supplies every
-    /// knob. Use [`ByteVec::builder`] instead to pin an explicit capacity with the default behavior.
-    pub fn from_behavior(behavior: B) -> Self {
-        Builder {
-            chunks: ByteVec::new(),
-            head: BytesMut::new(),
-            capacity: behavior.default_capacity(),
-            inline_threshold: behavior.inline_threshold(),
-            behavior,
-        }
-    }
     /// Sets the inline threshold: chunks with `len <= threshold` handed to `put_bytes`
     /// are copied into the contiguous head buffer, while larger chunks are held by
     /// reference (zero-copy).
@@ -168,25 +127,25 @@ impl<B: Behavior> Builder<B> {
         self.inline_threshold
     }
 
-    /// Selects the [`Behavior`]: the builder's capacity/threshold/freeze policy, returning a builder
-    /// parameterized over the new behavior (the buffered contents and current capacity/threshold are
-    /// carried over — only the freeze behavior and future policy queries change).
+    /// Installs a runtime [`Behavior`] that overrides how each completed chunk buffer becomes
+    /// immutable [`Bytes`]. Without this, the builder runs the standard [`BytesMut::freeze`].
     ///
     /// The behavior's [`freeze`](Behavior::freeze) is applied at every point the builder turns a
     /// [`BytesMut`] into a chunk: flushing the head buffer (on capacity overflow, [`Builder::split`],
-    /// [`Builder::split_to`], [`Builder::append`]/[`Builder::extend`], and [`Builder::finish`]) and
-    /// freezing a [`BytesMut`] handed to [`put_bytes_mut`](writer::Buffer::put_bytes_mut). It is
-    /// *not* applied to chunks supplied already-frozen as [`Bytes`]. To also adopt the behavior's
-    /// default capacity and threshold, construct with [`Builder::from_behavior`] instead.
+    /// [`Builder::split_to`], [`Builder::append`]/[`Builder::extend`], [`Builder::write_with_len_prefix`],
+    /// and [`Builder::finish`]) and freezing a [`BytesMut`] handed to
+    /// [`put_bytes_mut`](writer::Buffer::put_bytes_mut). It is *not* applied to chunks supplied
+    /// already-frozen as [`Bytes`].
     ///
-    /// The default is [`DefaultBehavior`] ([`BytesMut::freeze`], in place, no copy). Parameterizing
-    /// over a trait keeps the builder generic while letting the caller add new behaviors.
+    /// This is a *runtime* opt-in (the behavior is boxed and held by the builder), so the common
+    /// path — no override — allocates nothing and calls [`BytesMut::freeze`] directly. The
+    /// motivating override is the uncommon secret-hygiene case below.
     ///
     /// # Examples
     ///
-    /// Wipe secret-carrying chunks when they drop by providing a [`Behavior`] impl that wraps the
-    /// buffer in a zeroize-on-drop owner and produces the chunk via [`Bytes::from_owner`] instead
-    /// of [`BytesMut::freeze`]. The builder never sees the secret policy — it just calls the trait:
+    /// Wipe secret-carrying chunks when they drop by installing a [`Behavior`] that wraps the buffer
+    /// in a zeroize-on-drop owner and produces the chunk via [`Bytes::from_owner`] instead of
+    /// [`BytesMut::freeze`]. The builder never sees the secret policy — it just calls the trait:
     ///
     /// ```
     /// use etude_bytevec::{ByteVec, Behavior};
@@ -206,7 +165,7 @@ impl<B: Behavior> Builder<B> {
     ///     }
     /// }
     ///
-    /// // A behavior that only overrides `freeze` (capacity/threshold keep their defaults).
+    /// #[derive(Debug)]
     /// struct Zeroizing;
     /// impl Behavior for Zeroizing {
     ///     fn freeze(&self, buf: BytesMut) -> Bytes {
@@ -219,21 +178,19 @@ impl<B: Behavior> Builder<B> {
     /// let secret = builder.finish();
     /// assert_eq!(secret, b"secret");
     /// ```
-    pub fn with_behavior<B2: Behavior>(self, behavior: B2) -> Builder<B2> {
-        Builder {
-            chunks: self.chunks,
-            head: self.head,
-            capacity: self.capacity,
-            inline_threshold: self.inline_threshold,
-            behavior,
-        }
+    pub fn with_behavior<B: Behavior + 'static>(mut self, behavior: B) -> Self {
+        self.behavior = Some(Box::new(behavior));
+        self
     }
 
-    /// Converts a completed [`BytesMut`] chunk into immutable [`Bytes`] via the configured
-    /// [`Behavior`] (see [`Builder::with_behavior`]).
+    /// Converts a completed [`BytesMut`] chunk into immutable [`Bytes`] via the installed
+    /// [`Behavior`] override, or the standard [`BytesMut::freeze`] when none is set.
     #[inline]
     fn freeze_chunk(&self, buf: BytesMut) -> Bytes {
-        self.behavior.freeze(buf)
+        match &self.behavior {
+            Some(behavior) => behavior.freeze(buf),
+            None => buf.freeze(),
+        }
     }
 
     /// Returns the total number of bytes in the builder.
@@ -422,7 +379,11 @@ impl<B: Behavior> Builder<B> {
             ..
         } = self;
         if !head.is_empty() {
-            chunks.push_back(behavior.freeze(head));
+            let chunk = match &behavior {
+                Some(behavior) => behavior.freeze(head),
+                None => head.freeze(),
+            };
+            chunks.push_back(chunk);
         }
         chunks
     }
@@ -517,25 +478,25 @@ impl<B: Behavior> Builder<B> {
     }
 }
 
-impl From<ByteVec> for Builder<DefaultBehavior> {
+impl From<ByteVec> for Builder {
     fn from(chunks: ByteVec) -> Self {
         Builder {
             chunks,
             head: BytesMut::new(),
             capacity: DEFAULT_CAPACITY,
-            inline_threshold: DefaultBehavior.inline_threshold(),
-            behavior: DefaultBehavior,
+            inline_threshold: 0,
+            behavior: None,
         }
     }
 }
 
-impl<B: Behavior> From<Builder<B>> for ByteVec {
-    fn from(writer: Builder<B>) -> Self {
+impl From<Builder> for ByteVec {
+    fn from(writer: Builder) -> Self {
         writer.finish()
     }
 }
 
-impl<B: Behavior> writer::Buffer for Builder<B> {
+impl writer::Buffer for Builder {
     // Always accept `Bytes`/`BytesMut`; the `inline_threshold` decides at runtime whether a
     // given chunk is copied into the head buffer or held by reference.
     const SPECIALIZES_BYTES: bool = true;
@@ -605,7 +566,7 @@ impl<B: Behavior> writer::Buffer for Builder<B> {
     }
 }
 
-impl<B: Behavior> reader::Buffer for Builder<B> {
+impl reader::Buffer for Builder {
     type Error = core::convert::Infallible;
 
     fn buffered_len(&self) -> usize {
@@ -879,31 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn from_behavior_takes_capacity_and_threshold_from_the_behavior() {
-        // A behavior can define every builder knob; `from_behavior` adopts capacity + threshold.
-        #[derive(Debug)]
-        struct BigInline;
-        impl Behavior for BigInline {
-            fn default_capacity(&self) -> usize {
-                4096
-            }
-            fn inline_threshold(&self) -> usize {
-                8
-            }
-        }
-
-        let mut b = Builder::from_behavior(BigInline);
-        // The inline threshold came from the behavior.
-        assert_eq!(b.inline_threshold(), 8);
-        // Chunks <= 8 bytes are copied into the single head buffer rather than referenced.
-        b.put_bytes(Bytes::from_static(b"ab"));
-        b.put_bytes(Bytes::from_static(b"cd"));
-        let out = b.finish();
-        assert_eq!(out, b"abcd");
-        assert_eq!(out.chunks().len(), 1);
-    }
-
-    #[test]
     fn with_behavior_applies_to_already_buffered_content() {
         // Pins the consumer's exact seal pattern: `builder(cap).<writes>.with_behavior(B).finish()`.
         // Switching the behavior AFTER buffering must (a) keep the buffered bytes and (b) apply the
@@ -927,9 +863,12 @@ mod tests {
     }
 
     #[test]
-    fn default_behavior_is_zero_sized() {
-        // The operator's requirement: the default behavior is a ZST, so the parameterized builder
-        // costs nothing over the plain one for the common case.
-        assert_eq!(core::mem::size_of::<DefaultBehavior>(), 0);
+    fn default_builder_has_no_behavior_override() {
+        // The common path installs no behavior (None) — no allocation, standard freeze — and a
+        // builder with no override produces correct content.
+        let mut b = ByteVec::builder(1024);
+        assert!(b.behavior.is_none());
+        b.put_slice(b"plain");
+        assert_eq!(b.finish(), b"plain");
     }
 }
