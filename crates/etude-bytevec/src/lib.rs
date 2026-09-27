@@ -34,7 +34,7 @@ mod tree;
 use tree::Tree;
 
 pub mod builder;
-pub use builder::{Behavior, Builder};
+pub use builder::{Behavior, Builder, DefaultBehavior};
 
 pub mod tagged;
 pub use tagged::Tagged;
