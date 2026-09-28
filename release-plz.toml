@@ -1,0 +1,25 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# release-plz configuration (https://release-plz.dev/docs/config).
+#
+# Scope here is RELEASE-PREP ONLY: open a reviewable "release" PR that bumps versions (smallest
+# correct semver step, from Conventional Commits) and regenerates changelogs. Publishing to crates.io
+# and tagging are OWNED BY release.yml (OIDC Trusted Publishing on a pushed `vX.Y.Z` tag), so every
+# publish/tag/git-release action is DISABLED here to keep exactly one publisher.
+
+[workspace]
+# Do NOT publish to crates.io from release-plz — release.yml is the sole publisher (OIDC).
+publish = false
+# Do NOT create git tags or GitHub Releases here — a tag pushed by this workflow's GITHUB_TOKEN would
+# not trigger release.yml's `on: push: tags` publish. Tagging is the deliberate human cut-the-release
+# step (see release-plz.yml header).
+git_tag_enable = false
+git_release_enable = false
+# Keep the release PR focused on version bumps + changelogs; don't run `cargo update` as part of it
+# (etude does not commit a Cargo.lock).
+dependencies_update = false
+# Regenerate CHANGELOG.md for each crate in the release PR.
+changelog_update = true
+# All crates share one version line in the release PR only when they actually change; release-plz
+# still versions each crate independently by default, which matches etude's per-crate semver.
