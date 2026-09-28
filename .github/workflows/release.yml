@@ -1,0 +1,163 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: release
+
+# Publish the workspace crates to crates.io when a version tag is pushed.
+#
+# AUTH — crates.io TRUSTED PUBLISHING via GitHub OIDC (operator directive 2026-09-19): NO long-lived
+# CARGO_REGISTRY_TOKEN secret. The publish job requests an OIDC id-token and the
+# `rust-lang/crates-io-auth-action` exchanges it for a short-lived, scoped crates.io token — nothing to
+# store or rotate. One-time operator setup: register each crate's Trusted Publisher on crates.io
+# (Owner → Settings → Trusted Publishing) as repo `camshaft/etude`, workflow `release.yml` — no token
+# to paste. Until a crate's publisher is registered, its publish step fails auth; the job is idempotent
+# so a re-run after registration completes cleanly.
+#
+# GATE — CI here is CRON-ONLY (see ci.yml), so it does NOT run on a tag push. This workflow therefore
+# runs its OWN green gate (fmt + clippy + wasm + test) and only publishes if it passes, so a tag can
+# never publish a red tree.
+on:
+  push:
+    tags:
+      - "v*"
+  # A manual run exercises the GATE only (the publish job is tag-gated), so the pipeline can be smoke
+  # tested without cutting a tag or touching the registry.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # Green gate before any publish. Mirrors ci.yml's checks (fmt / clippy / wasm-lib / test) in one job
+  # so a tag build is self-gating even though the scheduled CI does not run on tags.
+  gate:
+    name: gate (fmt + clippy + wasm + test)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown,wasm32-wasip1
+      - uses: camshaft/rust-cache@v1
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # Every shipping crate must compile to wasm (the crates run as Cadenza wasm guests). Lib targets
+      # only — dev-only benches/tests (criterion, jemalloc, bolero) need not build for wasm.
+      - name: wasm (default features)
+        run: cargo check --workspace --lib --target wasm32-unknown-unknown
+      - name: wasm (no default features)
+        run: cargo check --workspace --lib --no-default-features --target wasm32-unknown-unknown
+      - name: wasm (wasip1)
+        run: cargo check --workspace --lib --target wasm32-wasip1
+      - name: test (all features)
+        run: cargo test --workspace --all-features
+      - name: test (default features)
+        run: cargo test --workspace
+
+  publish:
+    name: publish to crates.io
+    needs: gate
+    # Only a real tag push publishes; a manual dispatch stops after the gate.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for crates.io Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: camshaft/rust-cache@v1
+
+      # Exchange the GitHub OIDC id-token for a short-lived crates.io token (Trusted Publishing).
+      # Exposes it as CARGO_REGISTRY_TOKEN for the publish step below. No stored secret.
+      - name: crates.io auth (Trusted Publishing / OIDC)
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      # Publish every workspace crate in DEPENDENCY ORDER, computed dynamically from `cargo metadata`
+      # (topologically sorted by intra-workspace normal/build deps) so a newly added crate is picked up
+      # automatically in the right place — no hand-maintained list to fall out of date. Idempotent: a
+      # crate whose current version is already on the crates.io sparse index is skipped, so the job
+      # re-runs safely (a partial earlier run, or a crate registered/published later). `cargo publish`
+      # blocks until each version is live on the index before returning, so the next crate resolves it.
+      - name: publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # Workspace members only (`--no-deps`): emit "<dep> <crate>" edges for intra-workspace,
+          # non-dev dependencies (dev-deps don't gate publish — the verify build skips them), then
+          # `tsort` yields a dependency-first total order. Members with no edges are appended after.
+          cargo metadata --no-deps --format-version 1 > /tmp/meta.json
+          mapfile -t MEMBERS < <(jq -r '.packages[].name' /tmp/meta.json | sort)
+          jq -r '
+            (.packages | map(.name)) as $members
+            | .packages[]
+            | .name as $crate
+            | .dependencies[]
+            | select(.kind != "dev")
+            | select(.name as $d | $members | index($d))
+            | "\(.name) \($crate)"
+          ' /tmp/meta.json | sort -u > /tmp/edges.txt
+
+          ORDER="$(tsort /tmp/edges.txt)"
+          # Append any member absent from the tsort output (crates with no in-workspace edges).
+          for m in "${MEMBERS[@]}"; do
+            grep -qxF "$m" <<<"$ORDER" || ORDER="$ORDER"$'\n'"$m"
+          done
+          echo "Publish order:"; echo "$ORDER" | sed '/^$/d' | nl
+
+          # Map crate -> version and crate -> publishable? from the same metadata.
+          published_version() {
+            local crate="$1"
+            jq -r --arg c "$crate" '.packages[] | select(.name==$c) | .version' /tmp/meta.json
+          }
+          is_publishable() {
+            # `.publish == null` → any registry; `.publish == []` → publish disabled; a list → allowed set.
+            local crate="$1"
+            jq -e --arg c "$crate" '
+              .packages[] | select(.name==$c)
+              | (.publish == null) or (.publish | index("crates-io") != null)
+            ' /tmp/meta.json >/dev/null 2>&1
+          }
+          already_on_cratesio() {
+            local crate="$1" version="$2"
+            # crates.io sparse index path for a 5+ char name: {c0c1}/{c2c3}/{name}. All etude crate
+            # names are >4 chars. The file lists one JSON object per published version.
+            local url="https://index.crates.io/${crate:0:2}/${crate:2:2}/${crate}"
+            curl -fsSL -A "etude-release-ci" "$url" 2>/dev/null \
+              | jq -re --arg v "$version" 'select(.vers == $v) | .vers' >/dev/null 2>&1
+          }
+
+          while IFS= read -r crate; do
+            [ -n "$crate" ] || continue
+            if ! is_publishable "$crate"; then
+              echo "$crate: publish disabled in Cargo.toml; skipping."
+              continue
+            fi
+            version="$(published_version "$crate")"
+            if already_on_cratesio "$crate" "$version"; then
+              echo "$crate $version already on crates.io; skipping."
+            else
+              echo "Publishing $crate $version ..."
+              # No --locked: etude is a pure-library workspace and does not commit Cargo.lock, so the
+              # publish job's fresh checkout has none to honor; cargo resolves for the verify build.
+              cargo publish -p "$crate"
+            fi
+          done <<<"$ORDER"
