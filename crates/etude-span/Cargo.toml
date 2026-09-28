@@ -9,6 +9,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["span", "cursor", "tokenizer", "bytes", "scanning"]
+categories = ["parsing", "no-std", "data-structures"]
 
 [features]
 default = ["std"]

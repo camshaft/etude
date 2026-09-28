@@ -9,6 +9,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["decimal", "arbitrary-precision", "bignum", "math", "no-std"]
+categories = ["mathematics", "no-std", "data-structures"]
 
 [dependencies]
 etude-bigint = { version = "0.1", path = "../etude-bigint" }

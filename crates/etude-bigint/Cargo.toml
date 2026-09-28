@@ -9,6 +9,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["bigint", "bignum", "arbitrary-precision", "no-std", "math"]
+categories = ["mathematics", "no-std", "data-structures"]
 
 [features]
 # Force the u32-half-synthesized widening multiply (the wasm/32-bit path) on any target, so the
