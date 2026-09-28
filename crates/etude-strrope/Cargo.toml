@@ -9,6 +9,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["rope", "string", "utf8", "text", "persistent"]
+categories = ["data-structures", "text-processing", "no-std"]
 
 [dependencies]
 # StrRope is a newtype over `etude_bytevec::Rope<Utf8>` — the byte rope with a zero-size UTF-8 kind marker.

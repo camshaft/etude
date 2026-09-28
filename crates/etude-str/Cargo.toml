@@ -9,6 +9,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["string", "bytes", "utf8", "str", "shared"]
+categories = ["data-structures", "text-processing", "no-std"]
 
 [features]
 # OPTIONAL serde support: `Str` (de)serializes as a plain string. OFF by default so the default build
