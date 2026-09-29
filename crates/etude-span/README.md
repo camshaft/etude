@@ -1,4 +1,5 @@
 # etude-span
+[![crates.io](https://img.shields.io/crates/v/etude-span.svg)](https://crates.io/crates/etude-span) [![docs.rs](https://docs.rs/etude-span/badge.svg)](https://docs.rs/etude-span)
 
 > Byte-scanning primitives for copy-avoiding tokenizers over the etude byte-rope: a `Span`
 > (byte range) and a chunk-streaming `Cursor`.

@@ -1,4 +1,5 @@
 # etude-json
+[![crates.io](https://img.shields.io/crates/v/etude-json.svg)](https://crates.io/crates/etude-json) [![docs.rs](https://docs.rs/etude-json/badge.svg)](https://docs.rs/etude-json)
 
 > Copy-avoiding JSON over the etude byte-rope: a tokenizer whose tokens reference spans of the
 > input rope rather than copying bytes.

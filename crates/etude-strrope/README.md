@@ -1,4 +1,5 @@
 # etude-strrope
+[![crates.io](https://img.shields.io/crates/v/etude-strrope.svg)](https://crates.io/crates/etude-strrope) [![docs.rs](https://docs.rs/etude-strrope/badge.svg)](https://docs.rs/etude-strrope)
 
 > A UTF-8 string rope: a validated-UTF-8 view over the `etude-bytevec` byte rope.
 

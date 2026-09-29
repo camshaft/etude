@@ -1,4 +1,5 @@
 # etude-decimal
+[![crates.io](https://img.shields.io/crates/v/etude-decimal.svg)](https://crates.io/crates/etude-decimal) [![docs.rs](https://docs.rs/etude-decimal/badge.svg)](https://docs.rs/etude-decimal)
 
 > Exact base-10 arbitrary-precision decimal numbers (`coeff * 10^exp`) over `etude-bigint`.
 

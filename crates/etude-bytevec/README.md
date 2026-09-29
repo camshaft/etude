@@ -1,4 +1,5 @@
 # etude-bytevec
+[![crates.io](https://img.shields.io/crates/v/etude-bytevec.svg)](https://crates.io/crates/etude-bytevec) [![docs.rs](https://docs.rs/etude-bytevec/badge.svg)](https://docs.rs/etude-bytevec)
 
 > A chunked byte buffer backed by a relaxed-radix (RRB) rope: O(log₃₂) offset lookup,
 > structural sharing, zero-copy slice/concat.

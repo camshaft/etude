@@ -1,4 +1,5 @@
 # etude-rational
+[![crates.io](https://img.shields.io/crates/v/etude-rational.svg)](https://crates.io/crates/etude-rational) [![docs.rs](https://docs.rs/etude-rational/badge.svg)](https://docs.rs/etude-rational)
 
 > Exact rational numbers: a normalized (reduced, positive-denominator) `num/den` pair over
 > `etude-bigint`'s arbitrary-precision integers.

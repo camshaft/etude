@@ -1,4 +1,5 @@
 # etude-buffer
+[![crates.io](https://img.shields.io/crates/v/etude-buffer.svg)](https://crates.io/crates/etude-buffer) [![docs.rs](https://docs.rs/etude-buffer/badge.svg)](https://docs.rs/etude-buffer)
 
 > Copy-avoiding byte reader/writer buffer traits.
 
