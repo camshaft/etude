@@ -9,6 +9,33 @@ fn chunk(s: &[u8]) -> Bytes {
     Bytes::copy_from_slice(s)
 }
 
+#[test]
+fn binary_insert_at_offsets_matches_model() {
+    // Insert a binary chunk at every byte offset of a multi-chunk rope and compare to a Vec<u8>
+    // model — covers prepend (at=0), middle, and append (at=len).
+    let base: &[u8] = b"the quick brown fox";
+    for at in 0..=base.len() {
+        let mut rope = ByteVec::new();
+        rope.push_back(chunk(&base[..5]));
+        rope.push_back(chunk(&base[5..12]));
+        rope.push_back(chunk(&base[12..]));
+        rope.insert(at, chunk(b"<INS>")).unwrap();
+
+        let mut model = base[..at].to_vec();
+        model.extend_from_slice(b"<INS>");
+        model.extend_from_slice(&base[at..]);
+
+        assert_eq!(&rope.copy_to_bytes()[..], &model[..], "insert at {at}");
+    }
+    // Out-of-bounds offset errors and leaves the rope unchanged.
+    let mut rope = ByteVec::from(chunk(b"abc"));
+    assert!(matches!(
+        rope.insert(4, chunk(b"x")),
+        Err(ByteVecError::OutOfBounds(4))
+    ));
+    assert_eq!(&rope.copy_to_bytes()[..], b"abc");
+}
+
 /// One step of a reader-drain script for the borrowed-vs-owning parity checks. Decoded from raw
 /// fuzz/fixture bytes (two bytes per step: op selector + arg) so the exact same sequence drives both
 /// a borrowed [`Reader`] and an owned clone.
