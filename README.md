@@ -1,15 +1,45 @@
 # etude
 
-A workspace of small, focused crates for moving bytes around — copy-avoiding
-buffer traits and the containers built on them.
+A workspace of small, focused crates: copy-avoiding byte buffers and the text,
+scanning, and JSON layers built on them, plus an exact arbitrary-precision numeric
+tower (integers, rationals, decimals).
 
 ## Crates
 
+### Bytes & buffers
+
 | Crate | Description |
 |-------|-------------|
-| [`etude-ensure`](crates/etude-ensure)   | Dependency-free `ensure!` / `assume!` control-flow macros. |
-| [`etude-buffer`](crates/etude-buffer)   | Copy-avoiding `reader` / `writer` buffer traits, a family of storage adapters, and a stream-data testing model. Offsets are plain `u64`. |
-| [`etude-bytevec`](crates/etude-bytevec) | `ByteVec`: a chunked, reference-counted byte buffer built on `etude-buffer`. |
+| [`etude-buffer`](crates/etude-buffer)   | Copy-avoiding `reader` / `writer` buffer traits, a family of storage adapters, and a stream-data testing model. |
+| [`etude-bytevec`](crates/etude-bytevec) | A chunked byte buffer backed by a relaxed-radix (RRB) rope: O(log₃₂) offset lookup, structural sharing, zero-copy slice/concat. |
+
+### Text
+
+| Crate | Description |
+|-------|-------------|
+| [`etude-str`](crates/etude-str)         | A cheaply-clonable, `Bytes`-backed UTF-8 string (O(1) clone). |
+| [`etude-strrope`](crates/etude-strrope) | A UTF-8 string rope: a validated-UTF-8 view over the `etude-bytevec` byte rope. |
+
+### Scanning & parsing
+
+| Crate | Description |
+|-------|-------------|
+| [`etude-span`](crates/etude-span) | Byte-scanning primitives for copy-avoiding tokenizers: a `Span` (byte range) and a chunk-streaming `Cursor`. |
+| [`etude-json`](crates/etude-json) | Copy-avoiding JSON: a tokenizer whose tokens reference spans of the input rope rather than copying bytes. |
+
+### Numeric (exact, arbitrary-precision)
+
+| Crate | Description |
+|-------|-------------|
+| [`etude-bigint`](crates/etude-bigint)     | Arbitrary-precision signed integers with a canonical sign-magnitude form. |
+| [`etude-rational`](crates/etude-rational) | Exact rational numbers: a normalized (reduced, positive-denominator) `num/den` pair over `etude-bigint`. |
+| [`etude-decimal`](crates/etude-decimal)   | Exact base-10 decimals (`coeff × 10^exp`) over `etude-bigint`. |
+
+### Utilities
+
+| Crate | Description |
+|-------|-------------|
+| [`etude-ensure`](crates/etude-ensure) | Dependency-free `ensure!` / `assume!` control-flow macros. |
 
 ## Example
 
