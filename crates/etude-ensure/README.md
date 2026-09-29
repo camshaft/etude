@@ -1,4 +1,5 @@
 # etude-ensure
+[![crates.io](https://img.shields.io/crates/v/etude-ensure.svg)](https://crates.io/crates/etude-ensure) [![docs.rs](https://docs.rs/etude-ensure/badge.svg)](https://docs.rs/etude-ensure)
 
 > Small, dependency-free control-flow macros (`ensure!` / `assume!`).
 

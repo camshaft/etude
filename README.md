@@ -1,4 +1,5 @@
 # etude
+[![CI](https://github.com/camshaft/etude/actions/workflows/ci.yml/badge.svg)](https://github.com/camshaft/etude/actions/workflows/ci.yml) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 A workspace of small, focused crates: copy-avoiding byte buffers and the text,
 scanning, and JSON layers built on them, plus an exact arbitrary-precision numeric

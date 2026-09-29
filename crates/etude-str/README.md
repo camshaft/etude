@@ -1,4 +1,5 @@
 # etude-str
+[![crates.io](https://img.shields.io/crates/v/etude-str.svg)](https://crates.io/crates/etude-str) [![docs.rs](https://docs.rs/etude-str/badge.svg)](https://docs.rs/etude-str)
 
 > A cheaply-clonable, `Bytes`-backed UTF-8 string.
 

@@ -1,4 +1,5 @@
 # etude-bigint
+[![crates.io](https://img.shields.io/crates/v/etude-bigint.svg)](https://crates.io/crates/etude-bigint) [![docs.rs](https://docs.rs/etude-bigint/badge.svg)](https://docs.rs/etude-bigint)
 
 > Arbitrary-precision signed integers: a small `no_std` limb library with a canonical
 > sign-magnitude form.
