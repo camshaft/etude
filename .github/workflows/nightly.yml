@@ -19,7 +19,14 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # The buffer adapters use `unsafe`; check the whole workspace under Miri.
+  # Miri detects undefined behavior in `unsafe` code, so it is scoped to the four crates that
+  # contain `unsafe` — etude-buffer, etude-bytevec, etude-str, etude-strrope (the byte/text
+  # adapters over `bytes`/raw pointers). The other six workspace crates (bigint, decimal,
+  # rational, ensure, json, span) are pure safe core/alloc code with no `unsafe`, so Miri yields
+  # no UB signal for them while their deterministic suites are slow enough under the interpreter
+  # that a whole-workspace run overran the cap below without ever going green. Scoping keeps full
+  # UB coverage of the actual unsafe surface (each of the four crates exercises its own unsafe
+  # paths plus the `bytes` unsafe it wraps) and lands the run comfortably under the cap.
   miri:
     runs-on: ubuntu-latest
     # Deterministic tests only (the bolero fuzz loops are `#[cfg_attr(miri, ignore)]` — pathologically
@@ -36,4 +43,4 @@ jobs:
         with:
           components: miri
       - uses: camshaft/rust-cache@v1
-      - run: cargo miri test --workspace --all-features
+      - run: cargo miri test -p etude-buffer -p etude-bytevec -p etude-str -p etude-strrope --all-features
