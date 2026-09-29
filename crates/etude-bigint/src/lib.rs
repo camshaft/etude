@@ -323,8 +323,9 @@ impl Big {
     // ─── signed arithmetic ────────────────────────────────────────────────────────────────────
 
     /// Signed comparison. Consistent with the value order (`-1 < 0 < 1`).
-    // Kept as an inherent method to mirror the source surface; a `Big` is always canonical, so this is
-    // consistent with the derived `Eq`, but `Ord`/`PartialOrd` are intentionally not implemented here.
+    // Kept as an inherent method to mirror the source surface and give an allocation-free call site; a
+    // `Big` is always canonical, so this is consistent with the derived `Eq`. `Ord`/`PartialOrd` (below the
+    // `impl` block) delegate to it, so the trait order and this inherent order are the same total order.
     #[allow(clippy::should_implement_trait)]
     pub fn cmp(&self, other: &Big) -> Ordering {
         match (self.neg, other.neg) {
@@ -1085,6 +1086,23 @@ impl Big {
         let mut b = Big { neg, mag };
         b.normalize();
         b
+    }
+}
+
+// `Big` is a canonical, totally-ordered value: [`Big::cmp`] is a total order consistent with the derived
+// `Eq` (equal values compare `Equal`; distinct values differ), so `Ord`/`PartialOrd` are well-defined. They
+// delegate to the inherent [`Big::cmp`], which lets a `Big` be a `BTreeMap`/`BTreeSet` key or be sorted.
+impl Ord for Big {
+    fn cmp(&self, other: &Big) -> Ordering {
+        // Fully qualified so it resolves to the INHERENT signed three-way compare, not this trait method
+        // (which would recurse).
+        Big::cmp(self, other)
+    }
+}
+
+impl PartialOrd for Big {
+    fn partial_cmp(&self, other: &Big) -> Option<Ordering> {
+        Some(Ord::cmp(self, other))
     }
 }
 
