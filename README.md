@@ -42,6 +42,24 @@ tower (integers, rationals, decimals).
 |-------|-------------|
 | [`etude-ensure`](crates/etude-ensure) | Dependency-free `ensure!` / `assume!` control-flow macros. |
 
+## no_std
+
+Every crate is `no_std`-compatible (they build for `wasm32-unknown-unknown`, e.g. to run
+as WebAssembly guests).
+
+- The numeric and macro crates — `etude-bigint`, `etude-rational`, `etude-decimal`,
+  `etude-ensure` — are `no_std` unconditionally (they use only `core` + `alloc`).
+- The byte, text, and parsing crates — `etude-buffer`, `etude-bytevec`, `etude-str`,
+  `etude-strrope`, `etude-span`, `etude-json` — carry a `std` feature that is **on by
+  default** (it enables `std` on their byte-buffer dependencies). Depend on them with
+  `default-features = false` for a `no_std` build:
+
+  ```toml
+  etude-strrope = { version = "0.1", default-features = false }
+  etude-str     = { version = "0.1", default-features = false }
+  etude-bytevec = { version = "0.1", default-features = false }
+  ```
+
 ## Example
 
 ```rust
