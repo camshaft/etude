@@ -456,7 +456,7 @@ impl Default for Repr {
 /// Surface specific to the unvalidated byte rope ([`ByteVec`]): the [`Builder`] entry point and
 /// ownership [`tag`](ByteVec::tag)ging, both of which name `ByteVec` concretely.
 impl ByteVec {
-    /// Creates a [`Builder`] for efficiently constructing a rope by buffering writes into a head
+    /// Creates a [`Builder`] for constructing a rope by buffering writes into a head
     /// buffer of the given chunk capacity.
     #[inline]
     pub fn builder(chunk_capacity: usize) -> builder::Builder {

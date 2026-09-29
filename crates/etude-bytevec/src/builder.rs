@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A [`Builder`] for efficiently constructing a [`ByteVec`] by buffering writes into a head buffer
+//! A [`Builder`] for constructing a [`ByteVec`] by buffering writes into a head buffer
 //! and folding completed chunks into the rope.
 
 use super::{ByteVec, ByteVecError};
@@ -51,11 +51,11 @@ pub struct DefaultBehavior;
 
 impl Behavior for DefaultBehavior {}
 
-/// A builder for efficiently constructing a [`ByteVec`] by buffering writes.
+/// A builder for constructing a [`ByteVec`] by buffering writes.
 ///
-/// The builder maintains a head buffer for direct writes and a rope of completed chunks. This allows
-/// for efficient buffering of writes while preserving the chunked, structurally-shared nature of
-/// [`ByteVec`].
+/// The builder maintains a head buffer for direct writes and a rope of completed chunks. Filling the
+/// head buffer before sealing it into a chunk amortizes per-write allocation, while preserving the
+/// chunked, structurally-shared nature of [`ByteVec`].
 ///
 /// The type parameter `B` is the [`Behavior`] — the builder's capacity/threshold/freeze policy. It
 /// defaults to [`DefaultBehavior`], so `Builder` (unparameterized) behaves exactly as before; use
