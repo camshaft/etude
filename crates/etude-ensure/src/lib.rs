@@ -11,6 +11,7 @@
 //! used anywhere bytes are being pushed around.
 
 #![no_std]
+#![deny(missing_docs)]
 
 /// Returns (or `break`s / `continue`s) early unless a condition holds.
 ///
