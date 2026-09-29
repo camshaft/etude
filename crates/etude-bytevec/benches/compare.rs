@@ -1434,8 +1434,56 @@ fn bench_assemble(c: &mut Criterion) {
     g.finish();
 }
 
+/// Constructing a *tiny* single-leaf buffer (≤ 24 B) — the workload the inline small-buffer tier
+/// (task 184) targets. `Repr::Small.head` is a heap `Bytes` even for a few bytes, so every tiny
+/// `ByteVec` costs one allocation today. This group establishes the baseline that decision needs:
+///
+/// - `rope_copy_from_slice` is that construct cost; `bytes_copy_from_slice` is the bare `Bytes`
+///   allocation it wraps (so the gap is `ByteVec`'s per-construct overhead above raw `Bytes`);
+///   `stack_array` is the zero-alloc floor an inline tier would approach.
+/// - `construct_read_drop` vs `construct_extract_bytes` frames the design tension: an inline leaf
+///   wins for construct/read/drop (no heap, no `Bytes` handed out), but a rope that hands a `Bytes`
+///   *out* is a zero-copy refcount clone of the head chunk *today* — an inline leaf would have to
+///   copy the bytes into a fresh allocation to materialize that `Bytes`, so `extract` is where an
+///   inline tier pays back part of the construct win. These numbers are the "before".
+fn bench_small_buffer(c: &mut Criterion) {
+    let src: [u8; 24] = *b"the quick brown fox jump";
+    for &n in &[4usize, 8, 16, 24] {
+        let s = &src[..n];
+        let label = n.to_string();
+        let mut g = group(c, "small_buffer");
+        g.bench_function(BenchmarkId::new("rope_copy_from_slice", &label), |b| {
+            b.iter(|| black_box(ByteVec::copy_from_slice(black_box(s))))
+        });
+        g.bench_function(BenchmarkId::new("bytes_copy_from_slice", &label), |b| {
+            b.iter(|| black_box(Bytes::copy_from_slice(black_box(s))))
+        });
+        g.bench_function(BenchmarkId::new("stack_array", &label), |b| {
+            b.iter(|| {
+                let mut buf = [0u8; 24];
+                buf[..n].copy_from_slice(black_box(s));
+                black_box(buf)
+            })
+        });
+        g.bench_function(BenchmarkId::new("construct_read_drop", &label), |b| {
+            b.iter(|| {
+                let r = ByteVec::copy_from_slice(black_box(s));
+                black_box(r.byte_at(0))
+            })
+        });
+        g.bench_function(BenchmarkId::new("construct_extract_bytes", &label), |b| {
+            b.iter(|| {
+                let r = ByteVec::copy_from_slice(black_box(s));
+                black_box(r.copy_to_bytes())
+            })
+        });
+        g.finish();
+    }
+}
+
 criterion_group!(
     benches,
+    bench_small_buffer,
     bench_split_position,
     bench_chunk_dist,
     bench_stream,
