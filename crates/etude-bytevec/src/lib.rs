@@ -1181,6 +1181,27 @@ impl<K> Rope<K> {
         rest.is_empty()
     }
 
+    /// Inserts `chunk`'s bytes at byte offset `at`, shifting the existing `[at, len)` bytes after it.
+    ///
+    /// `at == 0` prepends and `at == self.len()` appends; both splice by structural share
+    /// ([`split_to`](Self::split_to) + [`append`](Self::append)) in O(log₃₂ n) — the untouched prefix
+    /// and suffix are shared, not copied. Returns [`ByteVecError::OutOfBounds`] if `at` exceeds the
+    /// rope. This is a binary insert: it does not validate UTF-8, so it is the primitive for
+    /// length-prefix framing and other byte-level edits (contrast a string rope's `insert_str`).
+    ///
+    /// Available only when the content kind is [`kind::Mutable`] (e.g. [`ByteVec`]) — inserting an
+    /// arbitrary chunk could violate a validated kind's invariant.
+    pub fn insert(&mut self, at: usize, chunk: Bytes) -> Result<(), ByteVecError>
+    where
+        K: kind::Mutable,
+    {
+        let mut head = self.split_to(at)?; // head = [0, at); self = [at, len)
+        head.push_back(chunk);
+        head.append(self); // head = [0, at) + chunk + [at, len); drains self
+        *self = head;
+        Ok(())
+    }
+
     /// Moves all chunks out of `other` into the back of `self`, leaving `other` empty.
     ///
     /// Fast paths: O(1) when `self` is empty (swap); a cheap flat move when the combined size stays
