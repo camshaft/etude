@@ -5,6 +5,7 @@
 name = "etude-str"
 version = "0.1.0"
 description = "A cheaply-clonable, Bytes-backed UTF-8 string"
+readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

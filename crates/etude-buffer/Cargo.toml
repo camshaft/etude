@@ -5,6 +5,7 @@
 name = "etude-buffer"
 version = "0.1.0"
 description = "Copy-avoiding byte reader/writer buffer traits"
+readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

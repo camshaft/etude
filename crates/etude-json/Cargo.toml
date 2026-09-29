@@ -5,6 +5,7 @@
 name = "etude-json"
 version = "0.1.0"
 description = "Copy-avoiding JSON over the etude byte-rope: a tokenizer whose tokens reference spans of the input rope rather than copying bytes"
+readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

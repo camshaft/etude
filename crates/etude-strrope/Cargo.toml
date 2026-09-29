@@ -5,6 +5,7 @@
 name = "etude-strrope"
 version = "0.1.0"
 description = "A UTF-8 string rope: a validated-UTF-8 view over the etude-bytevec byte rope"
+readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
