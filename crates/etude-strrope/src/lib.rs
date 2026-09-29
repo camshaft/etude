@@ -20,6 +20,11 @@
 //! the zero-size kind marker is dropped — no copy, no re-validation), and [`StrRope::from_utf8`] validates
 //! a `ByteVec` back into a `StrRope` (O(n)).
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::string::String;
 use etude_bytevec::{ByteVec, Rope, Utf8};
 
 /// A UTF-8 string rope: a validated-UTF-8 view over the [`etude-bytevec`](etude_bytevec) byte rope.
