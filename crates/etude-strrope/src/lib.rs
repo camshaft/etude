@@ -21,6 +21,7 @@
 //! a `ByteVec` back into a `StrRope` (O(n)).
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![deny(missing_docs)]
 
 extern crate alloc;
 

@@ -15,6 +15,7 @@
 //! Ported from cadenza's `cdz-str` crate, preserving its representation, invariants, and public API.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![deny(missing_docs)]
 
 extern crate alloc;
 
