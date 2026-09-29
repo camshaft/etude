@@ -486,6 +486,10 @@ fn doc_to_value(d: &Doc) -> serde_json::Value {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "bolero fuzz loop spins under miri; deterministic tests cover the surface"
+)]
 fn differential_valid_documents() {
     use bolero::check;
 
@@ -496,6 +500,10 @@ fn differential_valid_documents() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "bolero fuzz loop spins under miri; deterministic tests cover the surface"
+)]
 fn tokenizer_never_panics_on_arbitrary_bytes() {
     use bolero::check;
     // `differential_arbitrary_input` fuzzes a `String`, so its bytes are always valid UTF-8 — it
@@ -540,6 +548,10 @@ fn tokenizer_never_panics_on_arbitrary_bytes() {
 /// with or without escapes. A violation is a soundness bug: it makes `from_utf8_unchecked` on that
 /// span undefined behavior.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "bolero fuzz loop spins under miri; deterministic tests cover the surface"
+)]
 fn strict_string_token_spans_are_valid_utf8() {
     use bolero::check;
 
@@ -568,6 +580,10 @@ fn strict_string_token_spans_are_valid_utf8() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "bolero fuzz loop spins under miri; deterministic tests cover the surface"
+)]
 fn differential_arbitrary_input() {
     use bolero::check;
 

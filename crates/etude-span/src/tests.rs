@@ -101,6 +101,10 @@ fn chunk_tail_and_skip_in_chunk() {
 /// plain differential walks with `bump` only; this is the fence for the bulk path under arbitrary
 /// leaf layouts.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "bolero fuzz loop spins under miri; deterministic tests cover the surface"
+)]
 fn mixed_bump_and_skip_walk_matches_flat_model() {
     use bolero::check;
     use bolero_generator::TypeGenerator;
@@ -167,6 +171,10 @@ fn mixed_bump_and_skip_walk_matches_flat_model() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "bolero fuzz loop spins under miri; deterministic tests cover the surface"
+)]
 fn differential_against_flat_model() {
     use bolero::check;
     use bolero_generator::TypeGenerator;
