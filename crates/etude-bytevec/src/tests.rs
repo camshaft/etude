@@ -1029,7 +1029,10 @@ fn replace_equal_length_overwrite_is_in_place() {
     // Path-1 in-place write — no allocation, no fragmentation).
     let mut rope: ByteVec = Bytes::from(vec![0u8; 1000]).into();
     let mut model = vec![0u8; 1000];
-    for i in 0..300usize {
+    // 300 overwrites native; 30 under Miri — enough repetitions of the Path-1 in-place write to prove
+    // it stays one unallocated chunk, without the interpreter cost of 300 iterations.
+    let iters = if cfg!(miri) { 30 } else { 300 };
+    for i in 0..iters {
         let at = (i * 7) % 997;
         rope.replace(at..at + 3, &b"abc"[..]).unwrap();
         model.splice(at..at + 3, b"abc".iter().copied());
@@ -1127,7 +1130,11 @@ fn replace_small_inserts_coalesce_and_do_not_fragment() {
     // Many single-byte inserts within a chunk must collapse (UC4), not leave ~1-byte chunks.
     let mut rope = ByteVec::new();
     let mut model: Vec<u8> = Vec::new();
-    for _ in 0..400usize {
+    // 400 single-byte inserts native; 60 under Miri. Coalescing keeps the chunk count small
+    // independent of the insert count, so the invariant holds at either scale — 60 still forces the
+    // UC4 collapse path many times over without the interpreter cost of 400 iterations.
+    let n = if cfg!(miri) { 60 } else { 400 };
+    for _ in 0..n {
         let at = model.len() / 2;
         rope.replace(at..at, &b"x"[..]).unwrap();
         model.splice(at..at, core::iter::once(b'x'));
@@ -1136,7 +1143,7 @@ fn replace_small_inserts_coalesce_and_do_not_fragment() {
     let chunk_count = rope.chunks().len();
     assert!(
         chunk_count < 40,
-        "coalescing failed: {chunk_count} chunks for 400 bytes"
+        "coalescing failed: {chunk_count} chunks for {n} bytes"
     );
 }
 
@@ -1602,7 +1609,12 @@ fn repeated_self_append_does_not_explode() {
     let (mut r, _) = deep_rope(64);
     let base = r.len();
     r.check_invariants(); // structure is valid before we start sharing it
-    for i in 1..=20 {
+    // Native runs the full 20 doublings (base << 20 ≈ a million-byte logical rope — the real
+    // anti-explosion property). Under Miri's interpreter each doubling's O(log) append/byte_at walk
+    // costs orders of magnitude more, so 20 steps runs for hours; 5 doublings exercise the identical
+    // clone/append/byte_at DAG machinery (all the unsafe paths Miri is here to check) in seconds.
+    let steps = if cfg!(miri) { 5 } else { 20 };
+    for i in 1..=steps {
         let mut clone = r.clone(); // O(1): bumps the root Arc
         r.append(&mut clone);
         assert_eq!(r.len(), base << i, "length must double exactly at step {i}");
