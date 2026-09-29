@@ -14,6 +14,8 @@ keywords = ["string", "bytes", "utf8", "str", "shared"]
 categories = ["data-structures", "text-processing", "no-std"]
 
 [features]
+default = ["std"]
+std = ["bytes/std"]
 # OPTIONAL serde support: `Str` (de)serializes as a plain string. OFF by default so the default build
 # stays serde-free; only a crate that wants derive-based ser/de on `Str`-bearing structs opts in with
 # `features = ["serde"]`.
@@ -27,7 +29,7 @@ bolero-generator = ["dep:bolero-generator", "bolero-generator/alloc"]
 [dependencies]
 # `Str` is a newtype over `bytes::Bytes` — a clone is an O(1) refcount bump, and text/bytes share ONE
 # representation so a value crosses the text/binary boundary without re-allocating.
-bytes = "1"
+bytes = { version = "1", default-features = false }
 # OPTIONAL — only pulled in by the `serde` feature (off by default). `Str` serializes as a string.
 serde = { version = "1", optional = true, default-features = false, features = ["alloc"] }
 # OPTIONAL — only pulled in by the `bolero-generator` feature (off by default).

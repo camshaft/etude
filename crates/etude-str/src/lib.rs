@@ -14,11 +14,16 @@
 //!
 //! Ported from cadenza's `cdz-str` crate, preserving its representation, invariants, and public API.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::string::String;
 use bytes::Bytes;
-use std::borrow::Borrow;
-use std::fmt;
-use std::ops::Deref;
-use std::str::Utf8Error;
+use core::borrow::Borrow;
+use core::fmt;
+use core::ops::Deref;
+use core::str::Utf8Error;
 
 /// A `Bytes`-backed UTF-8 string. `Clone` is an O(1) refcount bump. Deref/Borrow/AsRef to `str` so it
 /// works anywhere a `&str` does; equality and ordering are by string content.
@@ -63,7 +68,7 @@ impl Str {
         // SAFETY: every constructor establishes and preserves the "wrapped Bytes is valid UTF-8"
         // invariant (the fallible ones validate; the `unchecked` one documents the caller's obligation),
         // and `Bytes` is immutable, so the bytes are still valid UTF-8 here.
-        unsafe { std::str::from_utf8_unchecked(&self.0) }
+        unsafe { core::str::from_utf8_unchecked(&self.0) }
     }
 
     /// The underlying UTF-8 bytes.
@@ -96,7 +101,7 @@ impl Str {
     /// # Errors
     /// Returns the [`Utf8Error`] if `bytes` is not valid UTF-8.
     pub fn from_utf8(bytes: Bytes) -> Result<Self, Utf8Error> {
-        std::str::from_utf8(&bytes)?;
+        core::str::from_utf8(&bytes)?;
         Ok(Self(bytes))
     }
 
@@ -186,17 +191,17 @@ impl PartialEq for Str {
 }
 impl Eq for Str {}
 impl PartialOrd for Str {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 impl Ord for Str {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.as_str().cmp(other.as_str())
     }
 }
-impl std::hash::Hash for Str {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl core::hash::Hash for Str {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         // hash as the str would, so `Borrow<str>` keys hash-match a `&str` lookup.
         self.as_str().hash(state);
     }
