@@ -36,6 +36,21 @@ fn binary_insert_at_offsets_matches_model() {
     assert_eq!(&rope.copy_to_bytes()[..], b"abc");
 }
 
+#[test]
+fn copy_from_slice_owns_its_bytes() {
+    // A non-'static source: the ByteVec must copy, so the owned buffer can be dropped afterwards.
+    let owned = alloc::vec![1u8, 2, 3, 4, 5];
+    let rope = ByteVec::copy_from_slice(&owned);
+    drop(owned);
+    assert_eq!(&rope.copy_to_bytes()[..], &[1, 2, 3, 4, 5]);
+    assert_eq!(rope.len(), 5);
+
+    // An empty slice yields an empty rope with no chunk (push_back ignores empties).
+    let empty = ByteVec::copy_from_slice(&[]);
+    assert!(empty.is_empty());
+    assert_eq!(empty.chunks().count(), 0);
+}
+
 /// One step of a reader-drain script for the borrowed-vs-owning parity checks. Decoded from raw
 /// fuzz/fixture bytes (two bytes per step: op selector + arg) so the exact same sequence drives both
 /// a borrowed [`Reader`] and an owned clone.

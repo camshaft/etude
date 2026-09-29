@@ -469,6 +469,17 @@ impl ByteVec {
     pub fn tag<O: tagged::Owner>(self, owner: &O) -> tagged::Tagged<O> {
         tagged::Tagged::new(self, owner)
     }
+
+    /// Creates a `ByteVec` by copying a borrowed byte slice into a single freshly owned chunk.
+    ///
+    /// Use this for a non-`'static` slice: unlike `From<&'static [u8]>` (which borrows the slice
+    /// without copying), this owns its bytes, so the source may be dropped afterwards. It is the
+    /// byte-slice analogue of `bytes::Bytes::copy_from_slice` — one allocation, then a copy. An
+    /// empty slice yields an empty rope and does not allocate.
+    #[inline]
+    pub fn copy_from_slice(bytes: &[u8]) -> Self {
+        Bytes::copy_from_slice(bytes).into()
+    }
 }
 
 /// Options for [`Rope::compact_with`]: which segments to leave in place rather than copy into the
