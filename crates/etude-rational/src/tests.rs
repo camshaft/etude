@@ -594,6 +594,10 @@ fn apply_op(
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "bolero fuzz loop spins under miri; deterministic tests cover the surface"
+)]
 fn differential_oracle() {
     // Seeds: (num, den) pairs (den==0 skipped). Ops: (opcode, reg_a, reg_b) triples indexed mod live regs.
     bolero::check!()

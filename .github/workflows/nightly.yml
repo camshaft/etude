@@ -22,6 +22,10 @@ jobs:
   # The buffer adapters use `unsafe`; check the whole workspace under Miri.
   miri:
     runs-on: ubuntu-latest
+    # Deterministic tests only (the bolero fuzz loops are `#[cfg_attr(miri, ignore)]` — pathologically
+    # slow under Miri's interpreter). This is a hard cap so a future unguarded fuzz loop fails fast and
+    # visibly instead of silently camping a runner until the 6h platform limit cancels it.
+    timeout-minutes: 180
     env:
       RUSTFLAGS: ""
       # bolero corpus discovery does a filesystem stat, which Miri's isolation blocks.
