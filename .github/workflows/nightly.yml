@@ -30,9 +30,12 @@ jobs:
   miri:
     runs-on: ubuntu-latest
     # Deterministic tests only (the bolero fuzz loops are `#[cfg_attr(miri, ignore)]` — pathologically
-    # slow under Miri's interpreter). This is a hard cap so a future unguarded fuzz loop fails fast and
-    # visibly instead of silently camping a runner until the 6h platform limit cancels it.
-    timeout-minutes: 180
+    # slow under Miri's interpreter, and the scale-heavy oracle/stress tests are `cfg(miri)`-capped).
+    # Even so the full deterministic suite legitimately takes a few hours under Miri's interpreter (the
+    # per-test interpretation cost dominates, not any single hog), so the cap is generous — it is NOT a
+    # target, it is insurance so a future unguarded fuzz loop fails at 5h instead of silently camping a
+    # runner until the 6h platform limit. A genuine infinite hang is still caught; the real suite fits.
+    timeout-minutes: 300
     env:
       RUSTFLAGS: ""
       # bolero corpus discovery does a filesystem stat, which Miri's isolation blocks.
