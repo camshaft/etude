@@ -1088,7 +1088,17 @@ fn replace_equal_length_overwrite_spans_chunks_in_place() {
 
 #[test]
 fn uc5_brute_force() {
-    for nchunks in [6usize, 12, PROMOTE_AT * 2] {
+    // Native includes a PROMOTE_AT*2 (Deep-tier) brute-force pass; Miri drops it — the
+    // O(positions^2 * vlen * kind) rebuild explodes under the interpreter (hours), and Deep-tier
+    // replace UB is covered by replace_structural_deep_tier / tree_overwrite_* /
+    // replace_equal_length_overwrite_deep_tier. The [6, 12] passes still brute-force the UC5 replace
+    // logic exhaustively at small scale.
+    let nchunks_cases: &[usize] = if cfg!(miri) {
+        &[6, 12]
+    } else {
+        &[6, 12, PROMOTE_AT * 2]
+    };
+    for &nchunks in nchunks_cases {
         let build = || {
             let mut r = ByteVec::new();
             let mut m = Vec::new();
@@ -1342,7 +1352,14 @@ fn concat_matches_oracle() {
 /// consistent (len, bytes, random access).
 #[test]
 fn split_matches_oracle() {
-    for &n in &[1usize, 5, 40, 200, 1000] {
+    // Native sweeps up to 1000-leaf ropes; Miri caps the grid (largest still exceeds PROMOTE_AT, so
+    // Deep-tier splits are still exercised) so the interpreter isn't grinding a 1000-leaf oracle.
+    let sizes: &[usize] = if cfg!(miri) {
+        &[1, 5, 40, PROMOTE_AT + FANOUT]
+    } else {
+        &[1, 5, 40, 200, 1000]
+    };
+    for &n in sizes {
         let (_, flat) = deep_rope(n);
         let total = flat.len();
         for at in [0, 1, total / 3, total / 2, total.saturating_sub(1), total] {
