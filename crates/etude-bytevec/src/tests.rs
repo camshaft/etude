@@ -1310,8 +1310,16 @@ fn deep_rope(n: usize) -> (ByteVec, Vec<u8>) {
 /// flat concatenation, with correct len/chunk bytes throughout.
 #[test]
 fn concat_matches_oracle() {
-    for &na in &[0usize, 1, 5, 40, 200, 1000] {
-        for &nb in &[0usize, 1, 5, 40, 200, 1000] {
+    // Native sweeps up to 1000-leaf ropes; under Miri the grid is capped (its largest still exceeds
+    // PROMOTE_AT, so the Deep tier and height-mismatched appends are still exercised) so the
+    // interpreter isn't grinding a 36-combo 1000-leaf oracle for over an hour.
+    let sizes: &[usize] = if cfg!(miri) {
+        &[0, 1, 5, 40, PROMOTE_AT + FANOUT]
+    } else {
+        &[0, 1, 5, 40, 200, 1000]
+    };
+    for &na in sizes {
+        for &nb in sizes {
             let (mut a, fa) = deep_rope(na);
             let (mut b, fb) = deep_rope(nb);
             a.append(&mut b);
@@ -1362,7 +1370,11 @@ fn split_matches_oracle() {
 /// rope (exercises subtree sharing on both operations).
 #[test]
 fn slice_matches_oracle_in_both_tiers() {
-    for &n in &[4usize, 1000] {
+    for &n in if cfg!(miri) {
+        &[4usize, PROMOTE_AT + FANOUT]
+    } else {
+        &[4usize, 1000]
+    } {
         let (rope, flat) = deep_rope(n);
         let total = flat.len();
         for (a, b) in [
@@ -1388,7 +1400,13 @@ fn slice_matches_oracle_in_both_tiers() {
 /// A deep rope with bytes in ALL THREE regions — buffered head, tree, buffered tail — so a slice
 /// can straddle the head→tree and tree→tail seams (`deep_rope` alone leaves the head empty).
 fn deep_rope_with_buffered_ends() -> (ByteVec, Vec<u8>) {
-    let (mut rope, mut flat) = deep_rope(1000);
+    // Miri caps the leaf count; PROMOTE_AT + FANOUT still promotes to Deep (the buffered-ends
+    // consumers assert Repr::Deep), and all consumers derive their offsets from flat.len().
+    let (mut rope, mut flat) = deep_rope(if cfg!(miri) {
+        PROMOTE_AT + FANOUT
+    } else {
+        1000
+    });
     for i in 0..9u8 {
         let b = alloc::vec![200 + i; 2 + i as usize];
         rope.push_front(Bytes::from(b.clone())); // populate the buffered head
@@ -1414,8 +1432,12 @@ fn compact_collapses_to_single_contiguous_chunk() {
     assert_eq!(r.chunks().count(), 1, "collapsed to one chunk");
     assert_eq!(r.copy_to_bytes(), want, "content preserved");
 
-    // deep tier collapses to one chunk too
-    let (mut d, flat) = deep_rope(1000);
+    // deep tier collapses to one chunk too (Miri caps the leaf count; still Deep, > PROMOTE_AT)
+    let (mut d, flat) = deep_rope(if cfg!(miri) {
+        PROMOTE_AT + FANOUT
+    } else {
+        1000
+    });
     assert!(d.chunks().count() > 1);
     d.compact();
     assert_eq!(d.chunks().count(), 1);
@@ -1576,7 +1598,13 @@ fn slice_across_buffered_head_tree_tail() {
 /// original is untouched, and a later in-place edit copies-on-write instead of aliasing.
 #[test]
 fn self_append_shares_structure_without_exploding() {
-    let (mut a, flat) = deep_rope(1000);
+    // Miri caps the leaf count (still Deep, > PROMOTE_AT); every assertion is relative to `flat`.
+    let n = if cfg!(miri) {
+        PROMOTE_AT + FANOUT
+    } else {
+        1000
+    };
+    let (mut a, flat) = deep_rope(n);
     let mut b = a.clone(); // b aliases every one of a's subtrees (rc >= 2)
     a.append(&mut b);
 
@@ -1588,7 +1616,7 @@ fn self_append_shares_structure_without_exploding() {
     a.check_invariants();
 
     // The clone we appended was drained; a fresh clone of the original is still intact.
-    let (orig, _) = deep_rope(1000);
+    let (orig, _) = deep_rope(n);
     assert_eq!(orig, flat);
 
     // COW on the shared DAG: editing the doubled rope must not corrupt an independent clone.
@@ -1626,9 +1654,18 @@ fn repeated_self_append_does_not_explode() {
 
 #[test]
 fn split_then_concat_roundtrips() {
-    let (_, flat) = deep_rope(777);
-    for at in [0, 3, 100, 388, 776, 777] {
-        let (mut rope, _) = deep_rope(777);
+    // Native uses a 777-leaf rope with fixed split points; Miri caps the leaf count (still Deep,
+    // > PROMOTE_AT) and derives the split points from the actual length so they stay in bounds.
+    let n = if cfg!(miri) { PROMOTE_AT + FANOUT } else { 777 };
+    let (_, flat) = deep_rope(n);
+    let total = flat.len();
+    let ats: alloc::vec::Vec<usize> = if cfg!(miri) {
+        alloc::vec![0, 3, total / 4, total / 2, total - 1, total]
+    } else {
+        alloc::vec![0, 3, 100, 388, 776, 777]
+    };
+    for at in ats {
+        let (mut rope, _) = deep_rope(n);
         let mut front = rope.split_to(at).unwrap();
         front.append(&mut rope);
         assert_eq!(front, flat, "roundtrip at={at}");
@@ -2784,7 +2821,14 @@ fn set_byte_bounded_cow_in_tree_rebalances_and_preserves_sharing() {
 #[test]
 fn set_byte_tree_split_propagation_stress() {
     let clen = COW_SPLIT_ABOVE + 1; // just over threshold -> always splits when shared
-    let n = FANOUT * FANOUT + 40; // forces a height >= 2 tree with a wide root branch
+    // Native builds a wide height-2 tree; Miri caps it to PROMOTE_AT + FANOUT leaves — still a
+    // height-2 Deep tree (> FANOUT and > PROMOTE_AT) whose shared-leaf COW splits are exercised,
+    // without the interpreter materializing ~4 MB of >4 KiB chunks.
+    let n = if cfg!(miri) {
+        PROMOTE_AT + FANOUT
+    } else {
+        FANOUT * FANOUT + 40 // forces a height >= 2 tree with a wide root branch
+    };
     let mut rope = ByteVec::new();
     for i in 0..n {
         rope.push_back(Bytes::from(alloc::vec![(i % 251) as u8; clen]));
@@ -2795,7 +2839,9 @@ fn set_byte_tree_split_propagation_stress() {
     let base_len = rope.len();
 
     // Edit a byte in ~60 chunks spread across the whole tree; each shared-chunk edit splits its leaf.
-    for k in 0..60usize {
+    // Miri does fewer edits (the split-cascade path is the same; the count only affects coverage
+    // breadth, and `off` stays relative to base_len).
+    for k in 0..(if cfg!(miri) { 12usize } else { 60 }) {
         let off = (k * clen * 17 + 3) % base_len; // scattered, deterministic
         rope.set_byte(off, 0xC3).unwrap();
         rope.check_invariants(); // fanout / cache / height must hold after each split cascade
