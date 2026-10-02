@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/camshaft/etude/compare/etude-bytevec-v0.1.0...etude-bytevec-v0.1.1) - 2026-10-02
+
+### Added
+
+- *(bytevec)* add ByteVec::copy_from_slice for borrowed slices ([#337](https://github.com/camshaft/etude/pull/337))
+- *(bytevec)* add ByteVec::insert(at, chunk) binary byte-offset insert ([#336](https://github.com/camshaft/etude/pull/336))
+
+### Other
+
+- *(bytevec)* Miri-scale split_matches_oracle + uc5_brute_force (the last two hogs) ([#344](https://github.com/camshaft/etude/pull/344))
+- *(bytevec)* Miri-scale the deep_rope oracle/stress tests so nightly Miri completes ([#342](https://github.com/camshaft/etude/pull/342))
+- *(bytevec)* make the scale-heavy rope tests Miri-aware so nightly Miri completes ([#341](https://github.com/camshaft/etude/pull/341))
+- *(bytevec)* add small_buffer group for the tiny-leaf construct path ([#338](https://github.com/camshaft/etude/pull/338))
+- *(bytevec)* add a structural-sharing example ([#335](https://github.com/camshaft/etude/pull/335))
+- *(bytevec)* drop "efficient(ly)" filler per the doc quality bar ([#334](https://github.com/camshaft/etude/pull/334))
+- add crates.io + docs.rs badges to crate READMEs, CI + license to top README ([#326](https://github.com/camshaft/etude/pull/326))
+- *(crates)* add per-crate README + readme manifest field for crates.io ([#324](https://github.com/camshaft/etude/pull/324))
+- release v0.1.0 ([#322](https://github.com/camshaft/etude/pull/322))
+
 ## [0.1.0](https://github.com/camshaft/etude/releases/tag/etude-bytevec-v0.1.0) - 2026-09-28
 
 ### Added

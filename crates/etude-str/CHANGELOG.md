@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/camshaft/etude/compare/etude-str-v0.1.0...etude-str-v0.1.1) - 2026-10-02
+
+### Added
+
+- *(str,strrope)* no_std support via a default `std` feature ([#329](https://github.com/camshaft/etude/pull/329))
+
+### Other
+
+- enable deny(missing_docs) on the last three crates ([#333](https://github.com/camshaft/etude/pull/333))
+- add crates.io + docs.rs badges to crate READMEs, CI + license to top README ([#326](https://github.com/camshaft/etude/pull/326))
+- *(crates)* add per-crate README + readme manifest field for crates.io ([#324](https://github.com/camshaft/etude/pull/324))
+- release v0.1.0 ([#322](https://github.com/camshaft/etude/pull/322))
+
 ## [0.1.0](https://github.com/camshaft/etude/releases/tag/etude-str-v0.1.0) - 2026-09-28
 
 ### Other

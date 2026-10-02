@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/camshaft/etude/compare/etude-bigint-v0.1.0...etude-bigint-v0.1.1) - 2026-10-02
+
+### Added
+
+- *(bigint)* impl Ord/PartialOrd for Big ([#328](https://github.com/camshaft/etude/pull/328))
+
+### Other
+
+- add crates.io + docs.rs badges to crate READMEs, CI + license to top README ([#326](https://github.com/camshaft/etude/pull/326))
+- *(crates)* add per-crate README + readme manifest field for crates.io ([#324](https://github.com/camshaft/etude/pull/324))
+- release v0.1.0 ([#322](https://github.com/camshaft/etude/pull/322))
+
 ## [0.1.0](https://github.com/camshaft/etude/releases/tag/etude-bigint-v0.1.0) - 2026-09-28
 
 ### Added
