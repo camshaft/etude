@@ -94,7 +94,18 @@ fn actual(tokens: &[Token], input: &ByteVec) -> Vec<Expect> {
     tokens
         .iter()
         .map(|t| match t.kind() {
-            TokenKind::String => Expect::Str(t.decode_string(input).unwrap()),
+            TokenKind::String => {
+                let decoded = t.decode_string(input).unwrap();
+                // Cross-check the StrRope-backed value against the String path on every generated
+                // doc and chunk layout: the zero-copy no-escape borrow and the escape builder must
+                // both decode to identical content.
+                assert_eq!(
+                    t.decode_str_rope(input).unwrap(),
+                    decoded.as_str(),
+                    "decode_str_rope disagreed with decode_string for {decoded:?}"
+                );
+                Expect::Str(decoded)
+            }
             // The Number token spans the exact bytes serde_json serialized (check_valid tokenizes
             // serde_json's own canonical output), which equals the expected `Number::to_string()`.
             // Compare the lexeme directly: a reparse-then-reserialize is not the identity for some
@@ -304,6 +315,49 @@ fn decodes_string_escapes() {
         );
         assert_eq!(toks[0].string_has_escapes(), Some(bytes.contains(&b'\\')));
     }
+}
+
+#[test]
+fn decode_str_rope_escapes_and_borrows() {
+    // Same escape cases as `decodes_string_escapes`, but through the StrRope-backed value path;
+    // 1-byte chunks force every escape (and the borrow slice) to straddle rope-leaf boundaries.
+    let cases: &[(&[u8], &str)] = &[
+        (b"\"\"", ""),
+        (b"\"abc\"", "abc"),
+        (b"\"a\\nb\"", "a\nb"),
+        (b"\"q\\\"q\"", "q\"q"),
+        (b"\"back\\\\slash\"", "back\\slash"),
+        (b"\"\\b\\f\\r\"", "\u{08}\u{0C}\r"),
+        (b"\"\\u0041\"", "A"),
+        (b"\"\\uD83D\\uDE00\"", "\u{1F600}"),
+        (
+            b"\"unicode \xc3\xa9 \xf0\x9f\x98\x80\"",
+            "unicode \u{e9} \u{1F600}",
+        ),
+    ];
+    for (bytes, want) in cases {
+        let r = rope(bytes, 1);
+        let toks: Vec<Token> = Tokenizer::new(&r).collect::<Result<_, _>>().unwrap();
+        assert_eq!(toks.len(), 1);
+        let value = toks[0]
+            .decode_str_rope(&r)
+            .expect("string token decodes to a StrRope");
+        assert_eq!(
+            value,
+            *want,
+            "decode_str_rope content for {:?}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+
+    // The no-escape path is a zero-copy borrow: its content still equals the raw bytes between the
+    // quotes, even when the string spans several rope leaves.
+    let r = rope(b"\"hello world\"", 3);
+    let tok = &Tokenizer::new(&r)
+        .collect::<Result<Vec<Token>, _>>()
+        .unwrap()[0];
+    assert_eq!(tok.string_has_escapes(), Some(false));
+    assert_eq!(tok.decode_str_rope(&r).unwrap(), "hello world");
 }
 
 #[test]
