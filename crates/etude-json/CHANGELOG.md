@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/camshaft/etude/compare/etude-json-v0.1.0...etude-json-v0.1.1) - 2026-10-02
+
+### Added
+
+- *(etude-json)* StrRope-backed string values via Token::decode_str_rope
+
+### Fixed
+
+- *(ci)* stop the nightly Miri run hanging past the 6h cap ([#339](https://github.com/camshaft/etude/pull/339))
+
+### Other
+
+- *(json)* add a runnable zero-copy tokenization example ([#331](https://github.com/camshaft/etude/pull/331))
+- add crates.io + docs.rs badges to crate READMEs, CI + license to top README ([#326](https://github.com/camshaft/etude/pull/326))
+- *(crates)* add per-crate README + readme manifest field for crates.io ([#324](https://github.com/camshaft/etude/pull/324))
+- release v0.1.0 ([#322](https://github.com/camshaft/etude/pull/322))
+
 ## [0.1.0](https://github.com/camshaft/etude/releases/tag/etude-json-v0.1.0) - 2026-09-28
 
 ### Other

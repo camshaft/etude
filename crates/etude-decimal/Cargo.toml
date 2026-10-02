@@ -3,7 +3,7 @@
 
 [package]
 name = "etude-decimal"
-version = "0.1.0"
+version = "0.1.1"
 description = "Exact base-10 arbitrary-precision decimal numbers (coeff * 10^exp) over etude-bigint"
 readme = "README.md"
 edition.workspace = true
