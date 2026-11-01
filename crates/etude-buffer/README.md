@@ -8,6 +8,10 @@ move bytes between buffers while avoiding copies wherever possible, along with a
 adapters (`chain`, `tracked`, `io_slice`, …) and, under the `testing` feature, a stream-data
 model and generators for property/fuzz tests.
 
+The `codec` module encodes fixed-width integers, bools, length-prefixed bytes and text, and
+counts of items over the two traits, refusing short, trailing and malformed input with typed
+errors.
+
 The traits are cursor-free: anything that tracks offsets (stream position, final offset)
 layers that on top downstream.
 
