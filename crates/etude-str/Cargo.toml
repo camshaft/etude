@@ -3,7 +3,7 @@
 
 [package]
 name = "etude-str"
-version = "0.1.0"
+version = "0.1.1"
 description = "A cheaply-clonable, Bytes-backed UTF-8 string"
 readme = "README.md"
 edition.workspace = true
