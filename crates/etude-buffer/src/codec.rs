@@ -4,35 +4,36 @@
 //! Fixed-width fields, length-prefixed bytes and text, and counts over the [`writer::Buffer`]
 //! and [`reader::Buffer`] traits.
 //!
+//! [`WriteExt`] and [`ReadExt`] are extension traits: a blanket impl adds their methods to every
+//! writer and every reader, as [`reader::Infallible`] does for infallible readers.
+//!
 //! The encoding is little-endian at a fixed width:
 //!
 //! - A `u8`, `u16`, `u32` or `u64` takes 1, 2, 4 or 8 bytes.
-//! - A bool is one byte, `0` or `1`; the decoder refuses any other byte.
+//! - A bool is one byte, `0` or `1`; a read refuses any other byte.
 //! - A byte string is a `u64` length followed by that many bytes. Text is a byte string that holds
-//!   UTF-8; the decoder refuses invalid UTF-8.
-//! - A count of items is a `u64`; the decoder refuses a count that the remaining bytes can't hold
-//!   at the least size the caller states for an item.
+//!   UTF-8; a read refuses invalid UTF-8.
+//! - A count of items is a `u64`; a read refuses a count that the remaining bytes can't hold at
+//!   the least size the caller states for an item.
 //! - A fixed-size field, such as a 32-byte digest, is its bytes with no prefix.
 //!
-//! [`Encoder`] checks each field against the writer's remaining capacity before it writes any of
-//! the field's bytes, so a refused write leaves the writer as it was. [`Decoder`] reads each field
+//! Each write checks its field against the writer's remaining capacity before it writes any of
+//! the field's bytes, so a refused write leaves the writer as it was. Each read takes its field
 //! across the reader's chunk boundaries, and checks each length and count against the reader's
-//! [`buffered_len`](crate::reader::Buffer::buffered_len) before it allocates, so a claimed size
-//! can't force an allocation.
+//! [`buffered_len`](reader::Buffer::buffered_len) before it allocates, so a claimed size can't
+//! force an allocation.
 //!
 //! ```
-//! use etude_buffer::codec::{Decoder, Encoder};
+//! use etude_buffer::codec::{ReadExt as _, WriteExt as _};
 //!
 //! let mut record: Vec<u8> = Vec::new();
-//! let mut encoder = Encoder::new(&mut record);
-//! encoder.write_u32(7)?;
-//! encoder.write_str("seven")?;
+//! record.write_u32(7)?;
+//! record.write_text("seven")?;
 //!
 //! let mut reader = &record[..];
-//! let mut decoder = Decoder::new(&mut reader);
-//! assert_eq!(decoder.read_u32()?, 7);
-//! assert_eq!(decoder.read_str()?, "seven");
-//! decoder.finish()?;
+//! assert_eq!(reader.read_u32()?, 7);
+//! assert_eq!(reader.read_text()?, "seven");
+//! reader.check_end()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -53,37 +54,27 @@ fn prefix(len: usize) -> [u8; PREFIX_LEN] {
     (len as u64).to_le_bytes()
 }
 
-/// Writes fields into a [`writer::Buffer`].
-///
-/// Each write checks the whole field against the writer's
-/// [`remaining_capacity`](crate::writer::Buffer::remaining_capacity) first, and refuses it with
-/// [`EncodeError::Capacity`] without writing any of its bytes.
-pub struct Encoder<'a, W: ?Sized> {
-    writer: &'a mut W,
+/// Refuses a field of `needed` bytes where the writer can take only `remaining`.
+#[inline]
+fn check(needed: usize, remaining: usize) -> Result<(), EncodeError> {
+    if needed > remaining {
+        return Err(EncodeError::Capacity { needed, remaining });
+    }
+    Ok(())
 }
 
-impl<'a, W> Encoder<'a, W>
-where
-    W: writer::Buffer + ?Sized,
-{
-    /// Wraps `writer`, which takes each field at its end.
-    #[inline]
-    pub fn new(writer: &'a mut W) -> Self {
-        Self { writer }
-    }
-
-    /// Returns the number of bytes the writer can still take.
-    #[inline]
-    pub fn remaining_capacity(&self) -> usize {
-        self.writer.remaining_capacity()
-    }
-
+/// Field writes for every [`writer::Buffer`], through a blanket impl.
+///
+/// Each write checks the whole field against the writer's
+/// [`remaining_capacity`](writer::Buffer::remaining_capacity) first, and refuses it with
+/// [`EncodeError::Capacity`] without writing any of its bytes.
+pub trait WriteExt: writer::Buffer {
     /// Writes a `u8`.
     ///
     /// # Errors
     /// Returns [`EncodeError::Capacity`] where the writer can't take the byte.
     #[inline]
-    pub fn write_u8(&mut self, value: u8) -> Result<(), EncodeError> {
+    fn write_u8(&mut self, value: u8) -> Result<(), EncodeError> {
         self.write_raw(&[value])
     }
 
@@ -92,7 +83,7 @@ where
     /// # Errors
     /// Returns [`EncodeError::Capacity`] where the writer can't take 2 bytes.
     #[inline]
-    pub fn write_u16(&mut self, value: u16) -> Result<(), EncodeError> {
+    fn write_u16(&mut self, value: u16) -> Result<(), EncodeError> {
         self.write_raw(&value.to_le_bytes())
     }
 
@@ -101,7 +92,7 @@ where
     /// # Errors
     /// Returns [`EncodeError::Capacity`] where the writer can't take 4 bytes.
     #[inline]
-    pub fn write_u32(&mut self, value: u32) -> Result<(), EncodeError> {
+    fn write_u32(&mut self, value: u32) -> Result<(), EncodeError> {
         self.write_raw(&value.to_le_bytes())
     }
 
@@ -110,7 +101,7 @@ where
     /// # Errors
     /// Returns [`EncodeError::Capacity`] where the writer can't take 8 bytes.
     #[inline]
-    pub fn write_u64(&mut self, value: u64) -> Result<(), EncodeError> {
+    fn write_u64(&mut self, value: u64) -> Result<(), EncodeError> {
         self.write_raw(&value.to_le_bytes())
     }
 
@@ -119,7 +110,7 @@ where
     /// # Errors
     /// Returns [`EncodeError::Capacity`] where the writer can't take the byte.
     #[inline]
-    pub fn write_bool(&mut self, value: bool) -> Result<(), EncodeError> {
+    fn write_bool(&mut self, value: bool) -> Result<(), EncodeError> {
         self.write_u8(u8::from(value))
     }
 
@@ -129,21 +120,22 @@ where
     /// Returns [`EncodeError::Capacity`] where the writer can't take the length and the bytes
     /// together; it then writes neither.
     #[inline]
-    pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
         // A slice holds at most `isize::MAX` bytes, so the sum can't overflow; saturating keeps
         // the check sound regardless.
-        self.check(bytes.len().saturating_add(PREFIX_LEN))?;
-        self.writer.put_slice(&prefix(bytes.len()));
-        self.writer.put_slice(bytes);
+        let needed = bytes.len().saturating_add(PREFIX_LEN);
+        check(needed, self.remaining_capacity())?;
+        self.put_slice(&prefix(bytes.len()));
+        self.put_slice(bytes);
         Ok(())
     }
 
     /// Writes `text` as a byte string of its UTF-8 bytes.
     ///
     /// # Errors
-    /// As [`write_bytes`](Self::write_bytes).
+    /// As [`write_bytes`](WriteExt::write_bytes).
     #[inline]
-    pub fn write_str(&mut self, text: &str) -> Result<(), EncodeError> {
+    fn write_text(&mut self, text: &str) -> Result<(), EncodeError> {
         self.write_bytes(text.as_bytes())
     }
 
@@ -152,7 +144,7 @@ where
     /// # Errors
     /// Returns [`EncodeError::Capacity`] where the writer can't take 8 bytes.
     #[inline]
-    pub fn write_count(&mut self, count: usize) -> Result<(), EncodeError> {
+    fn write_count(&mut self, count: usize) -> Result<(), EncodeError> {
         self.write_raw(&prefix(count))
     }
 
@@ -162,80 +154,54 @@ where
     /// Returns [`EncodeError::Capacity`] where the writer can't take every byte; it then writes
     /// none of them.
     #[inline]
-    pub fn write_raw(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
-        self.check(bytes.len())?;
-        self.writer.put_slice(bytes);
-        Ok(())
-    }
-
-    /// Refuses a field of `needed` bytes that the writer can't take whole.
-    #[inline]
-    fn check(&self, needed: usize) -> Result<(), EncodeError> {
-        let remaining = self.writer.remaining_capacity();
-        if needed > remaining {
-            return Err(EncodeError::Capacity { needed, remaining });
-        }
+    fn write_raw(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
+        check(bytes.len(), self.remaining_capacity())?;
+        self.put_slice(bytes);
         Ok(())
     }
 }
 
-/// Reads fields from a [`reader::Buffer`].
+impl<T> WriteExt for T where T: writer::Buffer + ?Sized {}
+
+/// Field reads for every [`reader::Buffer`], through a blanket impl.
 ///
-/// Each read takes its field's bytes across as many of the reader's chunks as they span, and
-/// [`finish`](Self::finish) refuses bytes left after the record's last field.
-pub struct Decoder<'a, R: ?Sized> {
-    reader: &'a mut R,
-}
-
-impl<'a, R> Decoder<'a, R>
-where
-    R: reader::Buffer + ?Sized,
-{
-    /// Wraps `reader`, whose buffered bytes hold the record.
-    #[inline]
-    pub fn new(reader: &'a mut R) -> Self {
-        Self { reader }
-    }
-
-    /// Returns the number of bytes left to read.
-    #[inline]
-    pub fn remaining_len(&self) -> usize {
-        self.reader.buffered_len()
-    }
-
+/// The reader's buffered bytes hold the record. Each read takes its field's bytes across as many
+/// of the reader's chunks as they span, and [`check_end`](ReadExt::check_end) refuses bytes left
+/// after the record's last field.
+pub trait ReadExt: reader::Buffer {
     /// Reads a `u8`.
     ///
     /// # Errors
-    /// As [`read_raw`](Self::read_raw).
+    /// As [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_u8(&mut self) -> Result<u8, DecodeError<R::Error>> {
+    fn read_u8(&mut self) -> Result<u8, DecodeError<Self::Error>> {
         Ok(u8::from_le_bytes(self.read_array()?))
     }
 
     /// Reads a `u16` from 2 bytes, little-endian.
     ///
     /// # Errors
-    /// As [`read_raw`](Self::read_raw).
+    /// As [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_u16(&mut self) -> Result<u16, DecodeError<R::Error>> {
+    fn read_u16(&mut self) -> Result<u16, DecodeError<Self::Error>> {
         Ok(u16::from_le_bytes(self.read_array()?))
     }
 
     /// Reads a `u32` from 4 bytes, little-endian.
     ///
     /// # Errors
-    /// As [`read_raw`](Self::read_raw).
+    /// As [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_u32(&mut self) -> Result<u32, DecodeError<R::Error>> {
+    fn read_u32(&mut self) -> Result<u32, DecodeError<Self::Error>> {
         Ok(u32::from_le_bytes(self.read_array()?))
     }
 
     /// Reads a `u64` from 8 bytes, little-endian.
     ///
     /// # Errors
-    /// As [`read_raw`](Self::read_raw).
+    /// As [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_u64(&mut self) -> Result<u64, DecodeError<R::Error>> {
+    fn read_u64(&mut self) -> Result<u64, DecodeError<Self::Error>> {
         Ok(u64::from_le_bytes(self.read_array()?))
     }
 
@@ -243,9 +209,9 @@ where
     ///
     /// # Errors
     /// Returns [`DecodeError::InvalidBool`] for any other byte, and otherwise as
-    /// [`read_raw`](Self::read_raw).
+    /// [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_bool(&mut self) -> Result<bool, DecodeError<R::Error>> {
+    fn read_bool(&mut self) -> Result<bool, DecodeError<Self::Error>> {
         match self.read_u8()? {
             0 => Ok(false),
             1 => Ok(true),
@@ -259,13 +225,13 @@ where
     ///
     /// # Errors
     /// Returns [`DecodeError::LengthExceedsRemaining`] where the length is more than the bytes
-    /// that remain after it, and otherwise as [`read_raw`](Self::read_raw).
+    /// that remain after it, and otherwise as [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_bytes(&mut self) -> Result<Vec<u8>, DecodeError<R::Error>> {
-        let needed = self.read_len()?;
+    fn read_bytes(&mut self) -> Result<Vec<u8>, DecodeError<Self::Error>> {
+        let needed = read_len(self)?;
         let mut bytes = Vec::with_capacity(needed);
         while bytes.len() < needed {
-            let chunk = self.reader.read_chunk(needed - bytes.len())?;
+            let chunk = self.read_chunk(needed - bytes.len())?;
             if chunk.is_empty() {
                 // The reader held fewer bytes than it reported.
                 let remaining = bytes.len();
@@ -280,9 +246,9 @@ where
     ///
     /// # Errors
     /// Returns [`DecodeError::InvalidText`] where the bytes aren't valid UTF-8, and otherwise as
-    /// [`read_bytes`](Self::read_bytes).
+    /// [`read_bytes`](ReadExt::read_bytes).
     #[inline]
-    pub fn read_str(&mut self) -> Result<String, DecodeError<R::Error>> {
+    fn read_text(&mut self) -> Result<String, DecodeError<Self::Error>> {
         let bytes = self.read_bytes()?;
         String::from_utf8(bytes)
             .map_err(|error| DecodeError::InvalidText(error.utf8_error()))
@@ -295,11 +261,11 @@ where
     ///
     /// # Errors
     /// Returns [`DecodeError::CountExceedsRemaining`] where the bytes that remain after the count
-    /// can't hold its items, and otherwise as [`read_raw`](Self::read_raw).
+    /// can't hold its items, and otherwise as [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_count(&mut self, min_item_len: usize) -> Result<usize, DecodeError<R::Error>> {
+    fn read_count(&mut self, min_item_len: usize) -> Result<usize, DecodeError<Self::Error>> {
         let count = self.read_u64()?;
-        let remaining = self.reader.buffered_len();
+        let remaining = self.buffered_len();
         // Compare as `u64`, so a count past `usize::MAX` on a narrower target is refused too.
         let item_len = min_item_len.max(1) as u64;
         let fits = count
@@ -319,9 +285,9 @@ where
     /// Reads `N` bytes as they are: a fixed-size field, such as a digest.
     ///
     /// # Errors
-    /// As [`read_raw`](Self::read_raw).
+    /// As [`read_raw`](ReadExt::read_raw).
     #[inline]
-    pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError<R::Error>> {
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError<Self::Error>> {
         let mut array = [0; N];
         self.read_raw(&mut array)?;
         Ok(array)
@@ -331,17 +297,18 @@ where
     ///
     /// # Errors
     /// Returns [`DecodeError::Truncated`] where fewer bytes remain, without reading any of them,
-    /// and [`DecodeError::Reader`] where the reader fails.
+    /// or where the reader holds fewer bytes than its `buffered_len` reports, after it reads the
+    /// bytes the reader holds; and [`DecodeError::Reader`] where the reader fails.
     #[inline]
-    pub fn read_raw(&mut self, dest: &mut [u8]) -> Result<(), DecodeError<R::Error>> {
+    fn read_raw(&mut self, dest: &mut [u8]) -> Result<(), DecodeError<Self::Error>> {
         let needed = dest.len();
-        let remaining = self.reader.buffered_len();
+        let remaining = self.buffered_len();
         if needed > remaining {
             return Err(DecodeError::Truncated { needed, remaining });
         }
         let mut filled = 0;
         while filled < needed {
-            let chunk = self.reader.read_chunk(needed - filled)?;
+            let chunk = self.read_chunk(needed - filled)?;
             if chunk.is_empty() {
                 // The reader held fewer bytes than it reported.
                 let remaining = filled;
@@ -353,34 +320,39 @@ where
         Ok(())
     }
 
-    /// Ends the record, and refuses any bytes left after its last field.
+    /// Ends the record: refuses any bytes left after its last field.
     ///
     /// # Errors
     /// Returns [`DecodeError::TrailingBytes`] where bytes remain.
     #[inline]
-    pub fn finish(self) -> Result<(), DecodeError<R::Error>> {
-        let remaining = self.reader.buffered_len();
+    fn check_end(&self) -> Result<(), DecodeError<Self::Error>> {
+        let remaining = self.buffered_len();
         if remaining > 0 {
             return Err(DecodeError::TrailingBytes { remaining });
         }
         Ok(())
     }
-
-    /// Reads a byte string's `u64` length, and checks it against the bytes that remain.
-    #[inline]
-    fn read_len(&mut self) -> Result<usize, DecodeError<R::Error>> {
-        let len = self.read_u64()?;
-        let remaining = self.reader.buffered_len();
-        // Compare as `u64`, so a length past `usize::MAX` on a narrower target is refused too.
-        if len > remaining as u64 {
-            return Err(DecodeError::LengthExceedsRemaining { len, remaining });
-        }
-        // `len` is at most `remaining`, a `usize`, so the cast keeps the value.
-        Ok(len as usize)
-    }
 }
 
-/// A field the [`Encoder`] refused.
+impl<T> ReadExt for T where T: reader::Buffer + ?Sized {}
+
+/// Reads a byte string's `u64` length, and checks it against the bytes that remain.
+#[inline]
+fn read_len<R>(reader: &mut R) -> Result<usize, DecodeError<R::Error>>
+where
+    R: ReadExt + ?Sized,
+{
+    let len = reader.read_u64()?;
+    let remaining = reader.buffered_len();
+    // Compare as `u64`, so a length past `usize::MAX` on a narrower target is refused too.
+    if len > remaining as u64 {
+        return Err(DecodeError::LengthExceedsRemaining { len, remaining });
+    }
+    // `len` is at most `remaining`, a `usize`, so the cast keeps the value.
+    Ok(len as usize)
+}
+
+/// A field a [`WriteExt`] write refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeError {
     /// The field needs more bytes than the writer can take; none of them were written.
@@ -405,7 +377,7 @@ impl fmt::Display for EncodeError {
 
 impl core::error::Error for EncodeError {}
 
-/// A record the [`Decoder`] refused.
+/// A record a [`ReadExt`] read refused.
 ///
 /// The `E` parameter is the reader's error; it defaults to [`core::convert::Infallible`] for a
 /// reader that can't fail.
