@@ -21,25 +21,25 @@ enum Field {
 }
 
 impl Field {
-    /// Writes the field with the encoder under test.
-    fn encode<W>(&self, encoder: &mut Encoder<'_, W>) -> Result<(), EncodeError>
+    /// Writes the field with the writes under test.
+    fn encode<W>(&self, out: &mut W) -> Result<(), EncodeError>
     where
         W: writer::Buffer + ?Sized,
     {
         match self {
-            Self::U8(value) => encoder.write_u8(*value),
-            Self::U16(value) => encoder.write_u16(*value),
-            Self::U32(value) => encoder.write_u32(*value),
-            Self::U64(value) => encoder.write_u64(*value),
-            Self::Bool(value) => encoder.write_bool(*value),
-            Self::Bytes(bytes) => encoder.write_bytes(bytes),
-            Self::Text(text) => encoder.write_str(text),
-            Self::Digest(digest) => encoder.write_raw(digest),
-            Self::Raw(bytes) => encoder.write_raw(bytes),
+            Self::U8(value) => out.write_u8(*value),
+            Self::U16(value) => out.write_u16(*value),
+            Self::U32(value) => out.write_u32(*value),
+            Self::U64(value) => out.write_u64(*value),
+            Self::Bool(value) => out.write_bool(*value),
+            Self::Bytes(bytes) => out.write_bytes(bytes),
+            Self::Text(text) => out.write_text(text),
+            Self::Digest(digest) => out.write_raw(digest),
+            Self::Raw(bytes) => out.write_raw(bytes),
             Self::List(items) => {
-                encoder.write_count(items.len())?;
+                out.write_count(items.len())?;
                 for item in items {
-                    encoder.write_u16(*item)?;
+                    out.write_u16(*item)?;
                 }
                 Ok(())
             }
@@ -75,30 +75,30 @@ impl Field {
         }
     }
 
-    /// Reads a field of this one's kind with the decoder under test.
-    fn decode<R>(&self, decoder: &mut Decoder<'_, R>) -> Result<Self, DecodeError<R::Error>>
+    /// Reads a field of this one's kind with the reads under test.
+    fn decode<R>(&self, input: &mut R) -> Result<Self, DecodeError<R::Error>>
     where
         R: reader::Buffer + ?Sized,
     {
         Ok(match self {
-            Self::U8(_) => Self::U8(decoder.read_u8()?),
-            Self::U16(_) => Self::U16(decoder.read_u16()?),
-            Self::U32(_) => Self::U32(decoder.read_u32()?),
-            Self::U64(_) => Self::U64(decoder.read_u64()?),
-            Self::Bool(_) => Self::Bool(decoder.read_bool()?),
-            Self::Bytes(_) => Self::Bytes(decoder.read_bytes()?),
-            Self::Text(_) => Self::Text(decoder.read_str()?),
-            Self::Digest(_) => Self::Digest(decoder.read_array()?),
+            Self::U8(_) => Self::U8(input.read_u8()?),
+            Self::U16(_) => Self::U16(input.read_u16()?),
+            Self::U32(_) => Self::U32(input.read_u32()?),
+            Self::U64(_) => Self::U64(input.read_u64()?),
+            Self::Bool(_) => Self::Bool(input.read_bool()?),
+            Self::Bytes(_) => Self::Bytes(input.read_bytes()?),
+            Self::Text(_) => Self::Text(input.read_text()?),
+            Self::Digest(_) => Self::Digest(input.read_array()?),
             Self::Raw(bytes) => {
                 let mut raw = vec![0; bytes.len()];
-                decoder.read_raw(&mut raw)?;
+                input.read_raw(&mut raw)?;
                 Self::Raw(raw)
             }
             Self::List(_) => {
-                let count = decoder.read_count(2)?;
+                let count = input.read_count(2)?;
                 let mut items = Vec::new();
                 for _ in 0..count {
-                    items.push(decoder.read_u16()?);
+                    items.push(input.read_u16()?);
                 }
                 Self::List(items)
             }
@@ -106,14 +106,13 @@ impl Field {
     }
 }
 
-/// Writes `fields` with the encoder under test.
+/// Writes `fields` with the writes under test.
 fn encode<W>(fields: &[Field], out: &mut W) -> Result<(), EncodeError>
 where
     W: writer::Buffer + ?Sized,
 {
-    let mut encoder = Encoder::new(out);
     for field in fields {
-        field.encode(&mut encoder)?;
+        field.encode(out)?;
     }
     Ok(())
 }
@@ -127,17 +126,16 @@ fn reference(fields: &[Field]) -> Vec<u8> {
     out
 }
 
-/// Reads a record of `fields`' kinds with the decoder under test, and finishes it.
+/// Reads a record of `fields`' kinds with the reads under test, and checks its end.
 fn decode<R>(fields: &[Field], input: &mut R) -> Result<Vec<Field>, DecodeError<R::Error>>
 where
     R: reader::Buffer + ?Sized,
 {
-    let mut decoder = Decoder::new(input);
     let mut decoded = Vec::new();
     for field in fields {
-        decoded.push(field.decode(&mut decoder)?);
+        decoded.push(field.decode(input)?);
     }
-    decoder.finish()?;
+    input.check_end()?;
     Ok(decoded)
 }
 
@@ -202,7 +200,7 @@ fn split<'a>(bytes: &'a [u8], cuts: &[u8]) -> Vec<&'a [u8]> {
 /// Reads a count of items of `min_item_len` bytes from `record`.
 fn count_of(record: &[u8], min_item_len: usize) -> Result<usize, DecodeError> {
     let mut reader = record;
-    Decoder::new(&mut reader).read_count(min_item_len)
+    reader.read_count(min_item_len)
 }
 
 /// A count of `count`, then `rest` zero bytes.
@@ -271,7 +269,7 @@ impl reader::Buffer for Overstated<'_> {
 }
 
 #[test]
-fn encoder_matches_the_reference() {
+fn writes_match_the_reference() {
     let fields = sample();
     let mut encoded: Vec<u8> = Vec::new();
     encode(&fields, &mut encoded).unwrap();
@@ -339,14 +337,13 @@ fn every_truncation_of_a_record_is_refused() {
 #[test]
 fn a_field_short_of_bytes_is_refused_without_reading_them() {
     let mut reader: &[u8] = &[1, 2, 3];
-    let mut decoder = Decoder::new(&mut reader);
     let short = DecodeError::Truncated {
         needed: 4,
         remaining: 3,
     };
-    assert_eq!(decoder.read_u32(), Err(short));
-    assert_eq!(decoder.remaining_len(), 3);
-    assert_eq!(decoder.read_u16(), Ok(0x0201));
+    assert_eq!(reader.read_u32(), Err(short));
+    assert_eq!(reader.len(), 3);
+    assert_eq!(reader.read_u16(), Ok(0x0201));
 }
 
 #[test]
@@ -369,7 +366,7 @@ fn a_bool_other_than_0_or_1_is_refused() {
             1 => Ok(true),
             _ => Err(DecodeError::InvalidBool(byte)),
         };
-        assert_eq!(Decoder::new(&mut reader).read_bool(), expected);
+        assert_eq!(reader.read_bool(), expected);
     }
 }
 
@@ -377,10 +374,9 @@ fn a_bool_other_than_0_or_1_is_refused() {
 fn invalid_text_is_refused() {
     // 0xC3 starts a 2-byte sequence, and 0x28 doesn't continue one.
     let mut record: Vec<u8> = Vec::new();
-    let mut encoder = Encoder::new(&mut record);
-    encoder.write_bytes(&[0xC3, 0x28]).unwrap();
+    record.write_bytes(&[0xC3, 0x28]).unwrap();
     let mut reader = &record[..];
-    let error = Decoder::new(&mut reader).read_str().unwrap_err();
+    let error = reader.read_text().unwrap_err();
     let DecodeError::InvalidText(utf8) = error else {
         panic!("expected invalid text, read {error:?}");
     };
@@ -391,23 +387,21 @@ fn invalid_text_is_refused() {
 #[test]
 fn a_length_past_the_remaining_bytes_is_refused() {
     let mut record: Vec<u8> = Vec::new();
-    let mut encoder = Encoder::new(&mut record);
-    encoder.write_u64(4).unwrap();
-    encoder.write_raw(b"abc").unwrap();
+    record.write_u64(4).unwrap();
+    record.write_raw(b"abc").unwrap();
 
     let mut reader = &record[..];
-    let mut decoder = Decoder::new(&mut reader);
     let too_long = DecodeError::LengthExceedsRemaining {
         len: 4,
         remaining: 3,
     };
-    assert_eq!(decoder.read_bytes(), Err(too_long));
-    assert_eq!(decoder.remaining_len(), 3);
+    assert_eq!(reader.read_bytes(), Err(too_long));
+    assert_eq!(reader.len(), 3);
 
     let mut exact: Vec<u8> = Vec::new();
-    Encoder::new(&mut exact).write_bytes(b"abc").unwrap();
+    exact.write_bytes(b"abc").unwrap();
     let mut reader = &exact[..];
-    assert_eq!(Decoder::new(&mut reader).read_bytes(), Ok(b"abc".to_vec()));
+    assert_eq!(reader.read_bytes(), Ok(b"abc".to_vec()));
 }
 
 #[test]
@@ -419,9 +413,9 @@ fn a_claimed_length_or_count_of_u64_max_is_refused() {
         remaining: 0,
     };
     let mut reader = &claim[..];
-    assert_eq!(Decoder::new(&mut reader).read_bytes(), Err(too_long));
+    assert_eq!(reader.read_bytes(), Err(too_long));
     let mut reader = &claim[..];
-    assert_eq!(Decoder::new(&mut reader).read_str(), Err(too_long));
+    assert_eq!(reader.read_text(), Err(too_long));
 
     let too_many = DecodeError::CountExceedsRemaining {
         count: u64::MAX,
@@ -463,7 +457,7 @@ fn a_count_the_remaining_bytes_cannot_hold_is_refused() {
 #[test]
 fn a_reader_error_is_returned() {
     let mut record: Vec<u8> = Vec::new();
-    Encoder::new(&mut record).write_bytes(b"payload").unwrap();
+    record.write_bytes(b"payload").unwrap();
     let failed = DecodeError::Reader("boom");
 
     // The first read fails.
@@ -471,14 +465,14 @@ fn a_reader_error_is_returned() {
         bytes: &record,
         reads: 0,
     };
-    assert_eq!(Decoder::new(&mut reader).read_u8(), Err(failed));
+    assert_eq!(reader.read_u8(), Err(failed));
 
     // The length's read is served, and the first read of the payload fails.
     let mut reader = FailAfter {
         bytes: &record,
         reads: 1,
     };
-    assert_eq!(Decoder::new(&mut reader).read_bytes(), Err(failed));
+    assert_eq!(reader.read_bytes(), Err(failed));
 }
 
 #[test]
@@ -492,17 +486,16 @@ fn a_reader_short_of_its_buffered_len_is_refused() {
         bytes: &[1, 2],
         extra: 2,
     };
-    assert_eq!(Decoder::new(&mut reader).read_u32(), Err(short));
+    assert_eq!(reader.read_u32(), Err(short));
 
     let mut record: Vec<u8> = Vec::new();
-    let mut encoder = Encoder::new(&mut record);
-    encoder.write_u64(4).unwrap();
-    encoder.write_raw(&[1, 2]).unwrap();
+    record.write_u64(4).unwrap();
+    record.write_raw(&[1, 2]).unwrap();
     let mut reader = Overstated {
         bytes: &record,
         extra: 2,
     };
-    assert_eq!(Decoder::new(&mut reader).read_bytes(), Err(short));
+    assert_eq!(reader.read_bytes(), Err(short));
 }
 
 #[test]
@@ -546,18 +539,16 @@ fn a_write_past_the_capacity_is_refused_without_a_partial_field() {
 fn a_write_past_a_write_limit_is_refused_without_panicking() {
     let mut out: Vec<u8> = Vec::new();
     let mut limited = writer::Limit::new(&mut out, 10);
-    let mut encoder = Encoder::new(&mut limited);
-    assert_eq!(encoder.remaining_capacity(), 10);
-    encoder.write_u64(1).unwrap();
+    limited.write_u64(1).unwrap();
 
     let refused = EncodeError::Capacity {
         needed: 9,
         remaining: 2,
     };
-    assert_eq!(encoder.write_bytes(b"x"), Err(refused));
-    assert_eq!(encoder.remaining_capacity(), 2);
-    encoder.write_u16(0xFFFF).unwrap();
-    assert_eq!(encoder.remaining_capacity(), 0);
+    assert_eq!(limited.write_bytes(b"x"), Err(refused));
+    assert_eq!(writer::Buffer::remaining_capacity(&limited), 2);
+    limited.write_u16(0xFFFF).unwrap();
+    assert_eq!(writer::Buffer::remaining_capacity(&limited), 0);
     assert_eq!(out, [1, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF]);
 }
 
@@ -573,7 +564,7 @@ fn errors_say_what_was_refused() {
     );
 
     let mut reader: &[u8] = &[2, 0, 0, 0, 0, 0, 0, 0, 0xC3, 0x28];
-    let invalid_text = Decoder::new(&mut reader).read_str().unwrap_err();
+    let invalid_text = reader.read_text().unwrap_err();
     let cases: [(DecodeError, &str); 6] = [
         (
             DecodeError::Truncated {
@@ -617,7 +608,7 @@ fn errors_say_what_was_refused() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // the property search is too expensive under miri
-fn encoder_and_decoder_match_the_reference() {
+fn writes_and_reads_match_the_reference() {
     bolero::check!()
         .with_type::<(Vec<(u8, u64, Vec<u8>)>, Vec<u8>)>()
         .for_each(|(specs, cuts)| {
@@ -627,7 +618,7 @@ fn encoder_and_decoder_match_the_reference() {
                 .collect();
             let expected = reference(&fields);
 
-            // The encoder writes the reference encoding, into a vec and into a bounded slice.
+            // The writes give the reference encoding, into a vec and into a bounded slice.
             let mut encoded: Vec<u8> = Vec::new();
             encode(&fields, &mut encoded).unwrap();
             assert_eq!(encoded, expected);
@@ -637,7 +628,7 @@ fn encoder_and_decoder_match_the_reference() {
             assert!(out.is_empty());
             assert_eq!(bounded, expected);
 
-            // The decoder reads the fields back across the chunk boundaries `cuts` sets.
+            // The reads take the fields back across the chunk boundaries `cuts` sets.
             let parts = split(&expected, cuts);
             let mut reader = IoSlice::new(&parts);
             assert_eq!(decode(&fields, &mut reader), Ok(fields.clone()));
