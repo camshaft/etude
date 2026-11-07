@@ -376,41 +376,44 @@ mod largest_allocation {
     }
 }
 
-/// A collection's length is the peer's to set: a 9-byte input that claims more elements than its one byte holds
-/// fails `InvalidLength` once the byte runs out, and reserves at most what the input holds, where it reserved what
-/// the length claimed.
+/// A collection's length is the peer's to set: an input that claims more elements than it holds fails
+/// `InvalidLength` once its bytes run out, and reserves under 1 KiB, where it reserved what the length claimed.
 #[test]
 fn collection_length_past_the_input_fails_without_reserving_it() {
-    fn claim(len: u64) -> ByteVec {
+    fn claim(len: u64, held: usize) -> ByteVec {
         let mut input = len.to_be_bytes().to_vec();
-        input.push(7);
+        input.resize(input.len() + held, 7);
         ByteVec::from(input)
     }
 
-    fn assert_refused<T: Deserialize + Debug>(len: u64) {
-        let mut bytes = claim(len);
+    fn assert_refused<T: Deserialize + Debug>(len: u64, held: usize) {
+        let mut bytes = claim(len, held);
         let (result, largest) = largest_allocation::during(|| T::deserialize(&mut bytes));
-        let error = result.expect_err("one byte doesn't hold the claimed elements");
+        let error = result.expect_err("the input doesn't hold the claimed elements");
         assert_eq!(error.kind(), ErrorKind::InvalidLength, "{}", std::any::type_name::<T>());
         assert!(
             largest < 1024,
-            "{} reserved {largest} bytes for a 9-byte input",
+            "{} reserved {largest} bytes for an input of {held} bytes past its length",
             std::any::type_name::<T>()
         );
     }
 
     // The most a length can claim: reserving it panics.
     let most = usize::MAX as u64;
-    assert_refused::<VecDeque<u8>>(most);
-    assert_refused::<VecDeque<u64>>(most);
+    assert_refused::<VecDeque<u8>>(most, 1);
+    assert_refused::<VecDeque<u64>>(most, 1);
     // The most `Vec`'s bound takes: reserving it asks for 4 GiB.
-    assert_refused::<Vec<u8>>(u64::from(u32::MAX));
-    assert_refused::<String>(u64::from(u32::MAX));
-    assert_refused::<std::sync::Arc<str>>(u64::from(u32::MAX));
-    assert_refused::<Vec<u64>>(u64::from(u32::MAX) / 8);
+    assert_refused::<Vec<u8>>(u64::from(u32::MAX), 1);
+    assert_refused::<String>(u64::from(u32::MAX), 1);
+    assert_refused::<std::sync::Arc<str>>(u64::from(u32::MAX), 1);
+    assert_refused::<Vec<u64>>(u64::from(u32::MAX) / 8, 1);
     // A length past `Vec`'s bound fails before anything is reserved.
-    assert_refused::<Vec<u8>>(most);
-    assert_refused::<Vec<u64>>(most);
+    assert_refused::<Vec<u8>>(most, 1);
+    assert_refused::<Vec<u64>>(most, 1);
+    // A byte vector refuses a length past its bytes before it reserves them, however many bytes it holds: reserving
+    // the bytes left first asks for 1500 bytes here.
+    assert_refused::<Vec<u8>>(2048, 1500);
+    assert_refused::<String>(2048, 1500);
 }
 
 // Versioned Wire struct tests — validates the full end-to-end workflow:
