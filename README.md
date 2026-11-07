@@ -36,6 +36,12 @@ tower (integers, rationals, decimals).
 | [`etude-rational`](crates/etude-rational) | Exact rational numbers: a normalized (reduced, positive-denominator) `num/den` pair over `etude-bigint`. |
 | [`etude-decimal`](crates/etude-decimal)   | Exact base-10 decimals (`coeff × 10^exp`) over `etude-bigint`. |
 
+### Hashing
+
+| Crate | Description |
+|-------|-------------|
+| [`etude-sha2-const`](crates/etude-sha2-const) | SHA-256 as a `const fn`: digests of static data computed at compile time, with no dependencies. |
+
 ### Utilities
 
 | Crate | Description |
@@ -59,6 +65,7 @@ as WebAssembly guests).
   etude-str     = { version = "0.1", default-features = false }
   etude-bytevec = { version = "0.1", default-features = false }
   ```
+- `etude-sha2-const` is `no_std` unconditionally: it uses only `core` and has no features.
 
 ## Example
 
