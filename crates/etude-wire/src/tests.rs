@@ -407,6 +407,9 @@ fn collection_length_past_the_input_fails_without_reserving_it() {
     assert_refused::<String>(u64::from(u32::MAX), 1);
     assert_refused::<std::sync::Arc<str>>(u64::from(u32::MAX), 1);
     assert_refused::<Vec<u64>>(u64::from(u32::MAX) / 8, 1);
+    // An element type of 64 KiB: reserving an element for each byte left asks for 64 KiB of a 9-byte input.
+    assert_refused::<Vec<[u8; 65536]>>(65535, 1);
+    assert_refused::<VecDeque<[u8; 65536]>>(most, 1);
     // A length past `Vec`'s bound fails before anything is reserved.
     assert_refused::<Vec<u8>>(most, 1);
     assert_refused::<Vec<u64>>(most, 1);
