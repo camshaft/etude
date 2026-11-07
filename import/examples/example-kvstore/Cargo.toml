@@ -1,0 +1,32 @@
+[package]
+name = "amzn-upstream-example-kvstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "KVStore example server for upstream"
+build = "builder/main.rs"
+
+[features]
+testing = ["upstream-core/runtime-bach"]
+
+[dependencies]
+bach.workspace = true
+bytes.workspace = true
+upstream-core = { workspace = true, features = [
+    "runtime-tokio",
+    "runtime-bach",
+    "testing",
+    "transport-dcquic",
+    "transport-memory",
+    "transport-quic",
+    "transport-rpc",
+    "transport-tcp",
+] }
+s2n-quic.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+
+[build-dependencies]
+upstream-codegen.workspace = true

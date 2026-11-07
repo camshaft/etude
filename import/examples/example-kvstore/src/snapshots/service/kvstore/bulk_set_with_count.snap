@@ -1,0 +1,30 @@
+---
+source: core/core-testing/src/service.rs
+assertion_line: 26
+description: "\nThis test preserves wire compatibility. If the test fails, it means the method has been changed and will not be wire compatible with existing deployments.\n\nMethods should be considered immutable and any changes to the signature should result in a new method being added.\n"
+input_file: examples/example-kvstore/src/generated/service/kvstore/schema.rs
+---
+Method {
+    global_id: 10772509193587819616,
+    name: "bulk_set_with_count",
+    inputs: [
+        Input {
+            name: "key",
+            ty: Bytes,
+        },
+        Input {
+            name: "value",
+            ty: Bytes,
+        },
+    ],
+    output: Output {
+        ty: nil,
+    },
+    unidirectional: false,
+    unreliable: false,
+    stream_request: true,
+    stream_response: false,
+    peer_addr: false,
+    raw_response: false,
+    request_header: usize,
+}
