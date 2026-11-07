@@ -4,7 +4,7 @@ use bytes::Bytes;
 use etude_bytevec::{Builder, ByteVec};
 use insta::assert_debug_snapshot;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Debug,
 };
 
@@ -58,6 +58,7 @@ generate_deserialize_fuzz_test!(fuzz_u8_array_deserialize, [u8; 4]);
 generate_deserialize_fuzz_test!(fuzz_tuple_deserialize, (u32, String));
 generate_deserialize_fuzz_test!(fuzz_box_u32_deserialize, Box<u32>);
 generate_deserialize_fuzz_test!(fuzz_box_string_deserialize, Box<String>);
+generate_deserialize_fuzz_test!(fuzz_vec_deque_u32_deserialize, VecDeque<u32>);
 
 // Helper function to test round-trip serialization and deserialization
 pub(crate) fn test_round_trip<T>(value: T)
@@ -321,6 +322,95 @@ fn skip_test() {
 fn test_default_buffer_size_reminder() {
     // dummy test to remind that setting this buffer too large will result in OOM
     assert_eq!(1 << 8, DEFAULT_BUFFER_CAPACITY)
+}
+
+/// The test binary's allocator: the system's, which also records the largest allocation each thread asks for, so a
+/// test reads what one decode asked for on its own thread whatever other tests run beside it.
+mod largest_allocation {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+    };
+
+    thread_local! {
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn record(size: usize) {
+        // The thread's cell has no destructor and doesn't allocate, so the allocator may reach it; `try_with` fails
+        // only while the thread's locals are torn down, and that allocation goes unrecorded.
+        let _ = LARGEST.try_with(|largest| largest.set(largest.get().max(size)));
+    }
+
+    struct Recording;
+
+    unsafe impl GlobalAlloc for Recording {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Recording = Recording;
+
+    /// Runs `f`, and answers its result with the largest allocation, in bytes, that it asked for on this thread.
+    pub(super) fn during<R>(f: impl FnOnce() -> R) -> (R, usize) {
+        LARGEST.with(|largest| largest.set(0));
+        let result = f();
+        (result, LARGEST.with(Cell::get))
+    }
+}
+
+/// A collection's length is the peer's to set: a 9-byte input that claims more elements than its one byte holds
+/// fails `InvalidLength` once the byte runs out, and reserves at most what the input holds, where it reserved what
+/// the length claimed.
+#[test]
+fn collection_length_past_the_input_fails_without_reserving_it() {
+    fn claim(len: u64) -> ByteVec {
+        let mut input = len.to_be_bytes().to_vec();
+        input.push(7);
+        ByteVec::from(input)
+    }
+
+    fn assert_refused<T: Deserialize + Debug>(len: u64) {
+        let mut bytes = claim(len);
+        let (result, largest) = largest_allocation::during(|| T::deserialize(&mut bytes));
+        let error = result.expect_err("one byte doesn't hold the claimed elements");
+        assert_eq!(error.kind(), ErrorKind::InvalidLength, "{}", std::any::type_name::<T>());
+        assert!(
+            largest < 1024,
+            "{} reserved {largest} bytes for a 9-byte input",
+            std::any::type_name::<T>()
+        );
+    }
+
+    // The most a length can claim: reserving it panics.
+    let most = usize::MAX as u64;
+    assert_refused::<VecDeque<u8>>(most);
+    assert_refused::<VecDeque<u64>>(most);
+    // The most `Vec`'s bound takes: reserving it asks for 4 GiB.
+    assert_refused::<Vec<u8>>(u64::from(u32::MAX));
+    assert_refused::<String>(u64::from(u32::MAX));
+    assert_refused::<std::sync::Arc<str>>(u64::from(u32::MAX));
+    assert_refused::<Vec<u64>>(u64::from(u32::MAX) / 8);
+    // A length past `Vec`'s bound fails before anything is reserved.
+    assert_refused::<Vec<u8>>(most);
+    assert_refused::<Vec<u64>>(most);
 }
 
 // Versioned Wire struct tests — validates the full end-to-end workflow:
