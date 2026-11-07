@@ -1,0 +1,69 @@
+---
+source: core/core-testing/src/service.rs
+description: "\nThis test preserves wire compatibility. If the test fails, it means the method has been changed and will not be wire compatible with existing deployments.\n\nMethods should be considered immutable and any changes to the signature should result in a new method being added.\n"
+input_file: examples/example-versioned-rpc/src/generated/service/versioned/schema.rs
+---
+Method {
+    global_id: 7535151740597886509,
+    name: "scan_replies",
+    inputs: [
+        Input {
+            name: "count",
+            ty: u64,
+        },
+    ],
+    output: Output {
+        ty: struct ReadReply(
+            u64,
+            enum Option(
+                None,
+                Some(
+                    struct ReplyMetadata(
+                        u64,
+                        enum Option(
+                            None,
+                            Some(
+                                u64,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    },
+    unidirectional: false,
+    unreliable: false,
+    stream_request: false,
+    stream_response: true,
+    peer_addr: false,
+    raw_response: false,
+    response_header: u64,
+    versions: GlobalIdMap {
+        table: [
+            Some(
+                (
+                    18140294439503392396,
+                    MethodVersionEntry {
+                        global_id: 18140294439503392396,
+                        input_version_idx: 0,
+                        output_version_idx: 1,
+                    },
+                ),
+            ),
+            Some(
+                (
+                    13005982774727434761,
+                    MethodVersionEntry {
+                        global_id: 13005982774727434761,
+                        input_version_idx: 0,
+                        output_version_idx: 0,
+                    },
+                ),
+            ),
+        ],
+        keys: [
+            18140294439503392396,
+            13005982774727434761,
+        ],
+    },
+}

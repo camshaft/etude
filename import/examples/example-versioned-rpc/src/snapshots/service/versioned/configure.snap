@@ -1,0 +1,90 @@
+---
+source: core/core-testing/src/service.rs
+description: "\nThis test preserves wire compatibility. If the test fails, it means the method has been changed and will not be wire compatible with existing deployments.\n\nMethods should be considered immutable and any changes to the signature should result in a new method being added.\n"
+input_file: examples/example-versioned-rpc/src/generated/service/versioned/schema.rs
+---
+Method {
+    global_id: 15912334336538220184,
+    name: "configure",
+    inputs: [
+        Input {
+            name: "config",
+            ty: struct ConsistencyConfig(
+                enum ConsistencyMode(
+                    Linearizable,
+                    Eventual,
+                    BoundedStaleness(
+                        u64,
+                    ),
+                ),
+                enum Option(
+                    None,
+                    Some(
+                        u64,
+                    ),
+                ),
+            ),
+        },
+    ],
+    output: Output {
+        ty: bool,
+    },
+    unidirectional: false,
+    unreliable: false,
+    stream_request: false,
+    stream_response: false,
+    peer_addr: false,
+    raw_response: false,
+    versions: GlobalIdMap {
+        table: [
+            None,
+            Some(
+                (
+                    2507295661178744641,
+                    MethodVersionEntry {
+                        global_id: 2507295661178744641,
+                        input_version_idx: 1,
+                        output_version_idx: 0,
+                    },
+                ),
+            ),
+            Some(
+                (
+                    5302578594005255522,
+                    MethodVersionEntry {
+                        global_id: 5302578594005255522,
+                        input_version_idx: 2,
+                        output_version_idx: 0,
+                    },
+                ),
+            ),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(
+                (
+                    8065483405198866474,
+                    MethodVersionEntry {
+                        global_id: 8065483405198866474,
+                        input_version_idx: 0,
+                        output_version_idx: 0,
+                    },
+                ),
+            ),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+        keys: [
+            5302578594005255522,
+            2507295661178744641,
+            8065483405198866474,
+        ],
+    },
+}

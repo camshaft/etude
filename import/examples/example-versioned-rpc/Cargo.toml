@@ -1,0 +1,30 @@
+[package]
+name = "amzn-upstream-example-versioned-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "End-to-end test for versioned RPC schema evolution"
+build = "builder/main.rs"
+
+[features]
+testing = ["upstream-core/runtime-bach"]
+
+[dependencies]
+upstream-core = { workspace = true, features = [
+    "runtime-tokio",
+    "runtime-bach",
+    "transport-memory",
+    "transport-rpc",
+    "testing",
+] }
+upstream-testing = { workspace = true }
+
+[build-dependencies]
+upstream-codegen.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+insta = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

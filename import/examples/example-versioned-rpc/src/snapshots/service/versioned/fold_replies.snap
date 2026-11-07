@@ -1,0 +1,70 @@
+---
+source: core/core-testing/src/service.rs
+description: "\nThis test preserves wire compatibility. If the test fails, it means the method has been changed and will not be wire compatible with existing deployments.\n\nMethods should be considered immutable and any changes to the signature should result in a new method being added.\n"
+input_file: examples/example-versioned-rpc/src/generated/service/versioned/schema.rs
+---
+Method {
+    global_id: 7909548159049664917,
+    name: "fold_replies",
+    inputs: [
+        Input {
+            name: "keys",
+            ty: u64,
+        },
+    ],
+    output: Output {
+        ty: struct ReadReply(
+            u64,
+            enum Option(
+                None,
+                Some(
+                    struct ReplyMetadata(
+                        u64,
+                        enum Option(
+                            None,
+                            Some(
+                                u64,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    },
+    unidirectional: false,
+    unreliable: false,
+    stream_request: true,
+    stream_response: false,
+    peer_addr: false,
+    raw_response: false,
+    versions: GlobalIdMap {
+        table: [
+            None,
+            Some(
+                (
+                    6472254336784097021,
+                    MethodVersionEntry {
+                        global_id: 6472254336784097021,
+                        input_version_idx: 0,
+                        output_version_idx: 1,
+                    },
+                ),
+            ),
+            None,
+            Some(
+                (
+                    6848042264057075823,
+                    MethodVersionEntry {
+                        global_id: 6848042264057075823,
+                        input_version_idx: 0,
+                        output_version_idx: 0,
+                    },
+                ),
+            ),
+        ],
+        keys: [
+            6472254336784097021,
+            6848042264057075823,
+        ],
+    },
+}

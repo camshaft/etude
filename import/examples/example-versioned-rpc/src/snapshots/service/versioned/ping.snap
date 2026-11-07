@@ -1,0 +1,25 @@
+---
+source: core/core-testing/src/service.rs
+assertion_line: 26
+description: "\nThis test preserves wire compatibility. If the test fails, it means the method has been changed and will not be wire compatible with existing deployments.\n\nMethods should be considered immutable and any changes to the signature should result in a new method being added.\n"
+input_file: examples/example-versioned-rpc/src/tests.rs
+---
+Method {
+    global_id: 10928797585300760198,
+    name: "ping",
+    inputs: [
+        Input {
+            name: "message",
+            ty: u64,
+        },
+    ],
+    output: Output {
+        ty: u64,
+    },
+    unidirectional: false,
+    unreliable: false,
+    stream_request: false,
+    stream_response: false,
+    peer_addr: false,
+    raw_response: false,
+}
