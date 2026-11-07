@@ -1,0 +1,39 @@
+[package]
+name = "amzn-upstream-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Runtime environment abstractions for upstream"
+
+[features]
+bach = ["dep:bach"]
+tokio = ["dep:tokio", "tokio/rt", "tokio/time", "rand"]
+
+[dependencies]
+bach = { workspace = true, optional = true, features = ["net"] }
+bolero-generator = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+futures = { workspace = true }
+upstream-buffer = { workspace = true }
+upstream-bytevec = { workspace = true }
+upstream-macros = { workspace = true }
+upstream-metrics = { workspace = true }
+upstream-time = { workspace = true }
+upstream-wire = { workspace = true }
+num_cpus.workspace = true
+pin-project-lite.workspace = true
+# TODO switch to the workspace dependency once everything is ready for 0.9 changes
+rand = { version = "0.9", optional = true }
+rayon.workspace = true
+s2n-quic-core = { workspace = true }
+tokio = { workspace = true, optional = true, features = ["net", "sync"] }
+tokio-util = { version = "0.7" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+bach = { workspace = true, features = ["net"] }
+bolero = { workspace = true }
+upstream-testing = { workspace = true }
