@@ -215,7 +215,9 @@ impl<T: 'static + Deserialize> Deserialize for Vec<T> {
             return Err(Error::new(ErrorKind::InvalidLength, type_of::<Self>()));
         }
 
-        let mut buf = Vec::with_capacity(len);
+        // The length is the peer's to set, so the bytes left bound what the vector reserves before any element
+        // decodes; it grows past that bound only as its elements decode.
+        let mut buf = Vec::with_capacity(len.min(bytes.len()));
 
         if TypeId::of::<T>() == TypeId::of::<u8>() {
             if bytes.len() < len {
@@ -239,7 +241,9 @@ impl<T: 'static + Deserialize> Deserialize for Vec<T> {
 impl<T: Deserialize> Deserialize for VecDeque<T> {
     fn deserialize(bytes: &mut ByteVec) -> Result<Self, Error> {
         let len = usize::deserialize(bytes)?;
-        let mut deque = VecDeque::with_capacity(len);
+        // The length is the peer's to set, so the bytes left bound what the deque reserves before any element
+        // decodes; it grows past that bound only as its elements decode.
+        let mut deque = VecDeque::with_capacity(len.min(bytes.len()));
         for _ in 0..len {
             deque.push_back(T::deserialize(bytes)?);
         }
