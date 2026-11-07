@@ -1,0 +1,32 @@
+[package]
+name = "amzn-upstream-core-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Cross-cutting events for upstream core crates"
+build = "builder/main.rs"
+
+[features]
+default = []
+testing = ["dep:upstream-testing", "upstream-runtime/bach"]
+
+[dependencies]
+upstream-config.workspace = true
+upstream-metrics.workspace = true
+upstream-runtime = { workspace = true, features = ["tokio"] }
+upstream-time.workspace = true
+upstream-testing = { workspace = true, optional = true }
+backbeat.workspace = true
+serde = { workspace = true }
+zerocopy = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+
+[dev-dependencies]
+upstream-testing.workspace = true
+upstream-runtime = { workspace = true, features = ["tokio", "bach"] }
+toml.workspace = true
+
+[build-dependencies]
+upstream-codegen.workspace = true
