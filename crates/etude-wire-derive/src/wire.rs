@@ -166,6 +166,17 @@ mod tests {
     }
 
     #[test]
+    fn struct_default_crate_path() {
+        let input = parse_quote! { struct Test { value: u32 } };
+        let s = derive_wire(input).to_string();
+        assert!(
+            s.contains(":: etude_wire ::"),
+            "should use the default crate path ::etude_wire"
+        );
+        assert!(!s.contains("my_wire"), "should not use a custom path");
+    }
+
+    #[test]
     fn struct_custom_crate_path() {
         let input = parse_quote! { #[wire(crate = my_wire)] struct Test { value: u32 } };
         let s = derive_wire(input).to_string();
