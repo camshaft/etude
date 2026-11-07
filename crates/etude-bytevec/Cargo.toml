@@ -3,7 +3,7 @@
 
 [package]
 name = "etude-bytevec"
-version = "0.1.0"
+version = "0.1.1"
 description = "A chunked byte buffer backed by a relaxed-radix (RRB) rope: O(log32) offset lookup, structural sharing, zero-copy slice/concat"
 readme = "README.md"
 edition.workspace = true

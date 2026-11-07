@@ -3,7 +3,7 @@
 
 [package]
 name = "etude-bigint"
-version = "0.1.0"
+version = "0.1.1"
 description = "Arbitrary-precision signed integers: a small no_std limb library with a canonical sign-magnitude form"
 readme = "README.md"
 edition.workspace = true
