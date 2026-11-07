@@ -1,0 +1,5 @@
+---
+source: core/wire/src/tests.rs
+expression: bytes
+---
+[]

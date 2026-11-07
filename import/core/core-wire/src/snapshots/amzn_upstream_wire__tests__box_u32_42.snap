@@ -1,0 +1,7 @@
+---
+source: core/wire/src/tests.rs
+expression: bytes
+---
+[
+    b"\0\0\0*",
+]
