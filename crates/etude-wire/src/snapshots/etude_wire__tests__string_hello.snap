@@ -1,0 +1,8 @@
+---
+source: crates/etude-wire/src/tests.rs
+expression: bytes
+---
+[
+    b"\0\0\0\0\0\0\0\x05",
+    b"hello",
+]

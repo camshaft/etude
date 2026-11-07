@@ -42,6 +42,13 @@ tower (integers, rationals, decimals).
 |-------|-------------|
 | [`etude-sha2-const`](crates/etude-sha2-const) | SHA-256 as a `const fn`: digests of static data computed at compile time, with no dependencies. |
 
+### Encoding
+
+| Crate | Description |
+|-------|-------------|
+| [`etude-wire`](crates/etude-wire)               | A compact binary encoding: `Serialize` / `Deserialize` for the standard types, versioned derives, and a tag-length-value form. |
+| [`etude-wire-derive`](crates/etude-wire-derive) | The `Wire` and `TaggedWire` derives for `etude-wire`. |
+
 ### Utilities
 
 | Crate | Description |
@@ -50,7 +57,7 @@ tower (integers, rationals, decimals).
 
 ## no_std
 
-Every crate is `no_std`-compatible (they build for `wasm32-unknown-unknown`, e.g. to run
+Every crate except `etude-wire` and `etude-wire-derive` is `no_std`-compatible (they build for `wasm32-unknown-unknown`, e.g. to run
 as WebAssembly guests).
 
 - The numeric and macro crates — `etude-bigint`, `etude-rational`, `etude-decimal`,
@@ -66,6 +73,9 @@ as WebAssembly guests).
   etude-bytevec = { version = "0.1", default-features = false }
   ```
 - `etude-sha2-const` is `no_std` unconditionally: it uses only `core` and has no features.
+- `etude-wire` uses `std`, since it encodes `std::io` and `std::net` types; it builds for
+  `wasm32-unknown-unknown` with that target's `std`. `etude-wire-derive` is a procedural macro
+  crate, which runs on the host at compile time.
 
 ## Example
 
