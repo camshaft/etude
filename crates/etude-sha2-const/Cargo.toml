@@ -1,0 +1,21 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-sha2-const"
+version = "0.1.0"
+description = "SHA-256 as a const fn: digests of static data computed at compile time, with no dependencies"
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["sha256", "sha2", "hash", "const", "no-std"]
+categories = ["cryptography", "no-std"]
+
+[dependencies]
+
+[dev-dependencies]
+bolero = "0.13"
+# The reference implementation the tests compare digests with.
+sha2 = "0.10"
