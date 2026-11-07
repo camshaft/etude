@@ -59,3 +59,20 @@ pub fn derive(input: DeriveInput) -> TokenStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn struct_default_crate_path() {
+        let input = parse_quote! { struct Test { #[wire(tag = 1.1)] value: u32 } };
+        let s = derive(input).to_string();
+        assert!(
+            s.contains("etude_wire ::"),
+            "should use the default crate path etude_wire"
+        );
+        assert!(!s.contains("my_wire"), "should not use a custom path");
+    }
+}
