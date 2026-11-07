@@ -1,0 +1,7 @@
+---
+source: crates/etude-wire/src/tests.rs
+expression: bytes
+---
+[
+    b"*",
+]

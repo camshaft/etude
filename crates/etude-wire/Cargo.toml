@@ -1,0 +1,39 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "etude-wire"
+version = "0.1.0"
+description = "A compact binary encoding with versioned derives and a tag-length-value form"
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["serialization", "binary", "encoding", "wire", "versioning"]
+categories = ["encoding"]
+
+[features]
+# Derive a `bolero_generator::TypeGenerator` for the deserialize error kinds (property/fuzz testing).
+testing = ["dep:bolero-generator"]
+
+[dependencies]
+bytes = { version = "1", default-features = false }
+etude-buffer = { version = "0.1", path = "../etude-buffer", default-features = false }
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", default-features = false }
+etude-sha2-const = { version = "0.1", path = "../etude-sha2-const" }
+etude-wire-derive = { version = "0.1", path = "../etude-wire-derive" }
+bolero-generator = { version = "0.13", optional = true }
+
+[dev-dependencies]
+bolero = "0.13"
+bolero-generator = "0.13"
+# `serialize_at` bench harness.
+criterion = "0.5"
+# Golden byte tests (`src/snapshots`).
+insta = "1"
+etude-bytevec = { version = "0.1", path = "../etude-bytevec", features = ["testing"] }
+
+[[bench]]
+name = "serialize_at"
+harness = false
