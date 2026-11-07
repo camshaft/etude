@@ -1,0 +1,31 @@
+[package]
+name = "amzn-upstream-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Wire protocol serialization for upstream"
+
+[features]
+testing = ["dep:bolero-generator"]
+
+[dependencies]
+upstream-buffer.workspace = true
+upstream-bytevec.workspace = true
+upstream-macros.workspace = true
+upstream-sha2-const = { workspace = true }
+bolero-generator = { workspace = true, optional = true }
+bytes = { workspace = true }
+s2n-quic-core = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
+bolero-generator = { workspace = true }
+criterion = { workspace = true }
+insta = { workspace = true }
+upstream-bytevec = { workspace = true, features = ["testing"] }
+
+[[bench]]
+name = "serialize_at"
+harness = false
