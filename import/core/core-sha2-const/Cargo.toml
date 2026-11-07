@@ -1,0 +1,15 @@
+[package]
+name = "amzn-upstream-sha2-const"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Compile-time SHA2 implementation for upstream"
+
+[dependencies]
+# No runtime dependencies - all const evaluation
+
+[dev-dependencies]
+aws-lc-rs = "1"         # For testing against reference implementation
+bolero.workspace = true
