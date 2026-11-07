@@ -1,0 +1,100 @@
+---
+source: core/core-transport-rpc/src/mem.rs
+expression: LOG
+---
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.001000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 0"]
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.000000000] START
+[0:00:00.002000000] request: [b"hello 1"]
+[0:00:00.002000000] request: [b"hello 0"]

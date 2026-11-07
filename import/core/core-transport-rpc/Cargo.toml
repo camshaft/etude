@@ -1,0 +1,69 @@
+[package]
+name = "amzn-upstream-transport-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["dcquic"]
+auth-kms = ["dep:aws-config", "dep:aws-kms-tls-auth", "dep:aws-sdk-kms", "dep:hex-literal", "dep:upstream-aws-http", "quic"]
+dcquic = ["quic"]
+memory = []
+quic = []
+tcp = []
+mux = []
+testing = []
+# Exposes the framing loop to `benches/write_framed_stream.rs`.
+bench = []
+
+[dependencies]
+libc.workspace = true
+pin-project-lite.workspace = true
+arrayvec = "0.7"
+aws-config = { version = "1", optional = true }
+aws-kms-tls-auth = { version = "0.0.2", optional = true }
+aws-sdk-kms = { version = "1", optional = true }
+bach = { workspace = true, features = ["net"] }
+hex-literal = { version = "1", optional = true }
+upstream-aws-http = { workspace = true, optional = true }
+upstream-bach-net.workspace = true
+upstream-buffer.workspace = true
+upstream-bytevec.workspace = true
+upstream-core-events.workspace = true
+upstream-debug.workspace = true
+upstream-metrics.workspace = true
+upstream-runtime.workspace = true
+upstream-service.workspace = true
+upstream-time.workspace = true
+upstream-wire.workspace = true
+tracing.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["full"] }
+bytes.workspace = true
+anyhow.workspace = true
+dashmap.workspace = true
+rand.workspace = true
+s2n-quic = { workspace = true, features = ["provider-event-tracing"] }
+s2n-quic-dc.workspace = true
+s2n-quic-dc-experimental.workspace = true
+s2n-quic-core.workspace = true
+rcgen.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+aws-sdk-kms = { version = "1", features = ["test-util"] }
+aws-smithy-mocks = { version = "0.2" }
+bach = { workspace = true, features = ["coop"] }
+bolero.workspace = true
+criterion = { workspace = true }
+insta.workspace = true
+upstream-buffer = { workspace = true, features = ["testing"] }
+upstream-testing.workspace = true
+
+[[bench]]
+name = "write_framed_stream"
+harness = false
+required-features = ["bench"]
