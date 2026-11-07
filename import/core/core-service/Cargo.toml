@@ -1,0 +1,30 @@
+[package]
+name = "amzn-upstream-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Service layer for upstream"
+
+[features]
+http = ["dep:axum"]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+futures = { workspace = true }
+upstream-buffer = { workspace = true }
+upstream-bytevec = { workspace = true }
+upstream-config = { workspace = true }
+upstream-debug = { workspace = true }
+upstream-iter = { workspace = true }
+upstream-runtime = { workspace = true }
+upstream-sha2-const = { workspace = true }
+upstream-time = { workspace = true }
+upstream-wire = { workspace = true }
+s2n-quic-core = { workspace = true }
+sort-const = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]
+axum = { workspace = true }
