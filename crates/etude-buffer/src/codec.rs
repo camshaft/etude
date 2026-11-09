@@ -429,10 +429,9 @@ impl<E> From<E> for DecodeError<E> {
 impl<E: fmt::Display> fmt::Display for DecodeError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Truncated { needed, remaining } => write!(
-                f,
-                "the field needs {needed} bytes and {remaining} remain"
-            ),
+            Self::Truncated { needed, remaining } => {
+                write!(f, "the field needs {needed} bytes and {remaining} remain")
+            }
             Self::LengthExceedsRemaining { len, remaining } => write!(
                 f,
                 "a length of {len} bytes is more than the {remaining} that remain"
