@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::reader::{Buffer as _, Chain, Chunk, Infallible as _, IoSlice};
+use crate::reader::{Chain, Chunk, Infallible as _, IoSlice};
 
 /// One field of a record, as a test writes and reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
