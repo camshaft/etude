@@ -250,8 +250,7 @@ pub trait ReadExt: reader::Buffer {
     #[inline]
     fn read_text(&mut self) -> Result<String, DecodeError<Self::Error>> {
         let bytes = self.read_bytes()?;
-        String::from_utf8(bytes)
-            .map_err(|error| DecodeError::InvalidText(error.utf8_error()))
+        String::from_utf8(bytes).map_err(|error| DecodeError::InvalidText(error.utf8_error()))
     }
 
     /// Reads a count of items, each at least `min_item_len` bytes, and checks that the bytes
@@ -429,10 +428,9 @@ impl<E> From<E> for DecodeError<E> {
 impl<E: fmt::Display> fmt::Display for DecodeError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Truncated { needed, remaining } => write!(
-                f,
-                "the field needs {needed} bytes and {remaining} remain"
-            ),
+            Self::Truncated { needed, remaining } => {
+                write!(f, "the field needs {needed} bytes and {remaining} remain")
+            }
             Self::LengthExceedsRemaining { len, remaining } => write!(
                 f,
                 "a length of {len} bytes is more than the {remaining} that remain"
